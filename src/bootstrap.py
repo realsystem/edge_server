@@ -482,7 +482,9 @@ class Bootstrap:
         if self.deploy_type in ["base", "full"]:
             self._log("Starting base stack deployment")
             self.progress.info("Deploying base stack (Tailscale, MQTT, Home Assistant)...")
-            self.progress.info(f"  Tail log: ssh {self.target} tail -f /var/log/edge-server-deploy.log")
+            self.progress.info(
+                f"  Tail log: ssh {self.target} tail -f /var/log/edge-server-deploy.log"
+            )
             timeout = self.config.timeouts.deployment_base
 
             result = self.ssh.run(
@@ -512,7 +514,9 @@ class Bootstrap:
             self.state.start_phase(Phase.DEPLOY_SECURITY)
             self._log("Starting security stack deployment")
             self.progress.info("Deploying security stack (Frigate NVR)...")
-            self.progress.info(f"  Tail log: ssh {self.target} tail -f /var/log/edge-server-deploy.log")
+            self.progress.info(
+                f"  Tail log: ssh {self.target} tail -f /var/log/edge-server-deploy.log"
+            )
             timeout = self.config.timeouts.deployment_security
 
             result = self.ssh.run(
