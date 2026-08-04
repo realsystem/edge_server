@@ -110,52 +110,46 @@ class SSHClient:
         cmd_timeout = timeout or self.timeout * 10
 
         stdout_lines = []
-        stderr_lines = []
 
         try:
+            # Merge stderr into stdout for simpler streaming
             process = subprocess.Popen(
                 args,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
             )
 
-            import select
+            import threading
 
-            start_time = time.monotonic()
-            while True:
-                if cmd_timeout and (time.monotonic() - start_time) > cmd_timeout:
-                    process.kill()
-                    return SSHResult(-1, "\n".join(stdout_lines), "Command timed out")
+            timed_out = [False]
 
-                readable, _, _ = select.select([process.stdout, process.stderr], [], [], 0.1)
+            def timeout_killer():
+                timed_out[0] = True
+                process.kill()
 
-                for stream in readable:
-                    line = stream.readline()
+            timer = threading.Timer(cmd_timeout, timeout_killer)
+            timer.start()
+
+            try:
+                for line in iter(process.stdout.readline, ""):
+                    line = line.rstrip("\n\r")
                     if line:
-                        line = line.rstrip("\n")
-                        if stream == process.stdout:
-                            stdout_lines.append(line)
-                            if on_line:
-                                on_line(line)
-                        else:
-                            stderr_lines.append(line)
-
-                if process.poll() is not None:
-                    for line in process.stdout:
-                        line = line.rstrip("\n")
                         stdout_lines.append(line)
                         if on_line:
                             on_line(line)
-                    for line in process.stderr:
-                        stderr_lines.append(line.rstrip("\n"))
-                    break
+                process.wait()
+            finally:
+                timer.cancel()
+
+            if timed_out[0]:
+                return SSHResult(-1, "\n".join(stdout_lines), "Command timed out")
 
             return SSHResult(
                 process.returncode,
                 "\n".join(stdout_lines),
-                "\n".join(stderr_lines),
+                "",
             )
         except Exception as e:
             return SSHResult(-1, "\n".join(stdout_lines), str(e))
