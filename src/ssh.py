@@ -103,10 +103,18 @@ class SSHClient:
         if sudo:
             command = f"sudo {command}"
 
-        # Use -tt to force PTY allocation for real-time output
-        args = self._ssh_args()
-        args.insert(1, "-tt")
+        # Build SSH args without BatchMode for streaming (allows PTY)
+        args = [
+            "ssh",
+            "-tt",  # Force PTY for unbuffered output
+            "-o", "ConnectTimeout=" + str(self.timeout),
+            "-o", "StrictHostKeyChecking=" + self.strict_host_key_checking,
+        ]
+        if self.key_file:
+            args.extend(["-i", self.key_file])
+        args.append(f"{self.user}@{self.host}")
         args.append(command)
+
         cmd_timeout = timeout or self.timeout * 10
 
         stdout_lines = []
