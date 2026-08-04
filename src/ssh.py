@@ -103,17 +103,8 @@ class SSHClient:
         if sudo:
             command = f"sudo {command}"
 
-        # Build SSH args without BatchMode for streaming (allows PTY)
-        args = [
-            "ssh",
-            "-tt",  # Force PTY for unbuffered output
-            "-o", "ConnectTimeout=" + str(self.timeout),
-            "-o", "StrictHostKeyChecking=" + self.strict_host_key_checking,
-        ]
-        if self.key_file:
-            args.extend(["-i", self.key_file])
-        args.append(f"{self.user}@{self.host}")
-        args.append(command)
+        # Build SSH args - use regular args but wrap command with unbuffer/stdbuf
+        args = self._ssh_args() + [command]
 
         cmd_timeout = timeout or self.timeout * 10
 
@@ -121,14 +112,12 @@ class SSHClient:
 
         try:
             # Merge stderr into stdout for simpler streaming
-            # Provide stdin to prevent SSH from closing with -tt
             process = subprocess.Popen(
                 args,
-                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                bufsize=1,
+                bufsize=0,  # Unbuffered
             )
 
             import threading
@@ -143,13 +132,15 @@ class SSHClient:
             timer.start()
 
             try:
-                for line in iter(process.stdout.readline, ""):
-                    line = line.rstrip("\n\r")
+                while True:
+                    line = process.stdout.readline()
+                    if not line and process.poll() is not None:
+                        break
                     if line:
+                        line = line.rstrip("\n\r")
                         stdout_lines.append(line)
                         if on_line:
                             on_line(line)
-                process.wait()
             finally:
                 timer.cancel()
 
