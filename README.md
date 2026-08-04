@@ -22,7 +22,12 @@ Headless Ubuntu edge server for Frigate NVR, Home Assistant, Mosquitto MQTT, and
 
 # Dry run to see what would happen
 ./bootstrap.sh --dry-run 192.168.1.100
+
+# With custom config
+./bootstrap.sh --config myserver.cfg 192.168.1.100
 ```
+
+Requires Python 3.10+. The wrapper script creates a venv automatically.
 
 ## Manual Setup Flow
 
@@ -117,12 +122,35 @@ docker compose pull && docker compose up -d
 
 ## Files
 
-- `bootstrap.sh` — Run from laptop to deploy to remote server
-- `initial-setup.sh` — Run once on fresh Ubuntu
-- `deploy-edge-server.sh` — Main deployment script (base system)
-- `deploy-security.sh` — Camera/NVR deployment (Frigate + cameras)
-- `secrets.sh` — Encrypted secrets management
-- `DEPLOYMENT.md` — Detailed reference
+**Orchestrator (runs on laptop):**
+- `bootstrap.sh` — Python deployment orchestrator with progress display, rollback support
+
+**Target scripts (run on Ubuntu server via SSH):**
+- `initial-setup.sh` — System setup (static IP, Docker, storage)
+- `deploy-edge-server.sh` — Deploy base stack (Home Assistant, MQTT, Tailscale)
+- `deploy-security.sh` — Deploy security stack (Frigate, cameras)
+- `secrets.sh` — Encrypted secrets management on target
+
+**Configuration:**
+- `bootstrap.cfg.example` — Configuration template
+- `DEPLOYMENT.md` — Detailed deployment reference
+
+## Development
+
+```bash
+# Create venv and install dev dependencies
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+
+# Run tests
+pytest tests/ -v
+
+# Run all tests (Python + shell + Docker)
+make test-scripts   # Shell script tests
+pytest              # Python tests
+make test           # Docker integration tests
+```
 
 ## Secrets
 

@@ -6,10 +6,10 @@
 #   make stop        - Stop all containers
 #   make clean       - Stop and remove all data
 
-TESTING_DIR := testing
-LITE_COMPOSE := $(TESTING_DIR)/docker-compose.lite.yml
-FULL_COMPOSE := $(TESTING_DIR)/docker-compose.mac.yml
-HARNESS_COMPOSE := $(TESTING_DIR)/docker-compose.test-harness.yml
+TESTS_DIR := tests
+LITE_COMPOSE := $(TESTS_DIR)/docker-compose.lite.yml
+FULL_COMPOSE := $(TESTS_DIR)/docker-compose.mac.yml
+HARNESS_COMPOSE := $(TESTS_DIR)/docker-compose.test-harness.yml
 
 .PHONY: help check check-mem-lite check-mem-full test test-dev test-ci test-full test-full-dev test-scripts start start-full stop status logs clean reset lint mem
 
@@ -80,21 +80,21 @@ check-mem-full: check
 	fi
 
 dirs:
-	@mkdir -p $(TESTING_DIR)/mock_storage
-	@mkdir -p $(TESTING_DIR)/mosquitto/config
-	@mkdir -p $(TESTING_DIR)/frigate-lite
+	@mkdir -p $(TESTS_DIR)/mock_storage
+	@mkdir -p $(TESTS_DIR)/mosquitto/config
+	@mkdir -p $(TESTS_DIR)/frigate-lite
 
 # Run tests with assertions (tears down after)
 test: check
-	@cd $(TESTING_DIR) && ./test-runner.sh
+	@cd $(TESTS_DIR) && ./test-runner.sh
 
 # Run tests but leave stack running for debugging
 test-dev: check
-	@cd $(TESTING_DIR) && ./test-runner.sh --no-teardown
+	@cd $(TESTS_DIR) && ./test-runner.sh --no-teardown
 
 # CI-friendly test run
 test-ci: check
-	@cd $(TESTING_DIR) && NO_COLOR=1 ./test-runner.sh
+	@cd $(TESTS_DIR) && NO_COLOR=1 ./test-runner.sh
 
 # Start stack without running tests
 start: check check-mem-lite dirs
@@ -108,11 +108,11 @@ start: check check-mem-lite dirs
 
 # Full test - 4 mock cameras with assertions
 test-full: check
-	@cd $(TESTING_DIR) && ./test-runner-full.sh
+	@cd $(TESTS_DIR) && ./test-runner-full.sh
 
 # Full test, leave stack running for debugging
 test-full-dev: check
-	@cd $(TESTING_DIR) && ./test-runner-full.sh --no-teardown
+	@cd $(TESTS_DIR) && ./test-runner-full.sh --no-teardown
 
 # Start full stack without tests
 start-full: check check-mem-full dirs
@@ -121,7 +121,7 @@ start-full: check check-mem-full dirs
 	@echo "Waiting 15s for streams..."
 	@sleep 15
 	@echo "Starting security stack..."
-	@docker compose -f $(FULL_COMPOSE) --env-file $(TESTING_DIR)/.env.mac up -d
+	@docker compose -f $(FULL_COMPOSE) --env-file $(TESTS_DIR)/.env.mac up -d
 	@echo "Waiting 20s for services..."
 	@sleep 20
 	@$(MAKE) -s status
@@ -147,10 +147,10 @@ logs-frigate:
 	@docker logs -f frigate-test 2>/dev/null || echo "Frigate not running"
 
 clean: stop
-	@rm -rf $(TESTING_DIR)/mock_storage
-	@rm -rf $(TESTING_DIR)/frigate-lite/*.db
-	@rm -rf $(TESTING_DIR)/mosquitto/data
-	@rm -rf $(TESTING_DIR)/mosquitto/log
+	@rm -rf $(TESTS_DIR)/mock_storage
+	@rm -rf $(TESTS_DIR)/frigate-lite/*.db
+	@rm -rf $(TESTS_DIR)/mosquitto/data
+	@rm -rf $(TESTS_DIR)/mosquitto/log
 	@docker network rm edge-server-test 2>/dev/null || true
 	@echo "Cleaned"
 
@@ -160,11 +160,11 @@ reset: clean
 
 # Run shell script unit tests
 test-scripts:
-	@cd $(TESTING_DIR) && ./test-scripts.sh
+	@cd $(TESTS_DIR) && ./test-scripts.sh
 
 lint:
 	@command -v shellcheck >/dev/null || (echo "Install shellcheck: brew install shellcheck" && exit 1)
-	@shellcheck -e SC1090,SC1091,SC2034 *.sh testing/*.sh
+	@shellcheck -e SC1090,SC1091,SC2034 *.sh tests/*.sh
 	@echo "Lint complete"
 
 # Show memory usage of running test containers

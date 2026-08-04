@@ -42,7 +42,7 @@ section() {
 
 section "Syntax Validation"
 
-for script in bootstrap.sh initial-setup.sh deploy-edge-server.sh deploy-security.sh secrets.sh; do
+for script in initial-setup.sh deploy-edge-server.sh deploy-security.sh secrets.sh; do
     if [ -f "$script" ]; then
         if bash -n "$script" 2>/dev/null; then
             pass "$script syntax OK"
@@ -54,7 +54,7 @@ for script in bootstrap.sh initial-setup.sh deploy-edge-server.sh deploy-securit
     fi
 done
 
-for script in testing/test-runner.sh testing/test-runner-full.sh testing/test-lite.sh; do
+for script in tests/test-runner.sh tests/test-runner-full.sh tests/test-lite.sh; do
     if [ -f "$script" ]; then
         if bash -n "$script" 2>/dev/null; then
             pass "$script syntax OK"
@@ -73,7 +73,7 @@ done
 section "ShellCheck Linting"
 
 if command -v shellcheck >/dev/null 2>&1; then
-    for script in bootstrap.sh secrets.sh testing/test-runner.sh testing/test-runner-full.sh; do
+    for script in secrets.sh tests/test-runner.sh tests/test-runner-full.sh; do
         if [ -f "$script" ]; then
             # SC1090: Can't follow non-constant source
             # SC1091: Not following sourced file
@@ -92,49 +92,29 @@ else
 fi
 
 #-----------------------------------------------------------------------------
-# Test: bootstrap.sh
+# Test: bootstrap (Python wrapper)
 #-----------------------------------------------------------------------------
 
-section "bootstrap.sh"
+section "bootstrap (Python)"
 
 # Test: --help works
-output=$(./bootstrap.sh --help 2>&1 || true)
-if echo "$output" | grep -q "Usage:"; then
-    pass "--help displays usage"
-else
-    fail "--help does not display usage"
-fi
+if [ -x "./bootstrap" ]; then
+    output=$(./bootstrap --help 2>&1 || true)
+    if echo "$output" | grep -q "usage:\|positional arguments"; then
+        pass "bootstrap --help displays usage"
+    else
+        fail "bootstrap --help does not display usage" "Got: $output"
+    fi
 
-# Test: Missing target IP
-output=$(./bootstrap.sh 2>&1 || true)
-if echo "$output" | grep -q "Target IP required"; then
-    pass "Exits with error when no target provided"
+    # Test: --dry-run mode
+    output=$(timeout 10 ./bootstrap --dry-run --auto --skip-init 192.0.2.1 2>&1 || true)
+    if echo "$output" | grep -q "DRY RUN"; then
+        pass "bootstrap --dry-run mode works"
+    else
+        fail "bootstrap --dry-run mode not working" "Got: $output"
+    fi
 else
-    fail "Does not error on missing target" "Got: $output"
-fi
-
-# Test: Invalid --deploy type
-output=$(./bootstrap.sh --deploy invalid 192.168.1.1 2>&1 || true)
-if echo "$output" | grep -q "must be base, security, or full"; then
-    pass "Rejects invalid --deploy type"
-else
-    fail "Accepts invalid --deploy type" "Got: $output"
-fi
-
-# Test: --dry-run flag recognized (use --auto to avoid prompts)
-output=$(timeout 5 ./bootstrap.sh --dry-run --auto --skip-init 192.0.2.1 2>&1 || true)
-if echo "$output" | grep -q "DRY RUN"; then
-    pass "--dry-run mode recognized"
-else
-    fail "--dry-run mode not recognized" "Got: $output"
-fi
-
-# Test: Missing secrets file
-output=$(./bootstrap.sh --secrets-file /nonexistent/file 192.168.1.1 2>&1 || true)
-if echo "$output" | grep -q "Secrets file not found"; then
-    pass "Errors on missing secrets file"
-else
-    fail "Does not error on missing secrets file" "Got: $output"
+    skip "bootstrap wrapper not executable"
 fi
 
 #-----------------------------------------------------------------------------
@@ -262,14 +242,14 @@ fi
 section "test-runner.sh"
 
 # Test: Has pass/fail functions
-if grep -q "^pass()" testing/test-runner.sh && grep -q "^fail()" testing/test-runner.sh; then
+if grep -q "^pass()" tests/test-runner.sh && grep -q "^fail()" tests/test-runner.sh; then
     pass "Has pass/fail test functions"
 else
     fail "Missing pass/fail functions"
 fi
 
 # Test: Has cleanup trap
-if grep -q "trap.*cleanup\|trap.*EXIT" testing/test-runner.sh; then
+if grep -q "trap.*cleanup\|trap.*EXIT" tests/test-runner.sh; then
     pass "Has cleanup trap"
 else
     fail "Missing cleanup trap"
@@ -282,7 +262,7 @@ fi
 section "Docker Compose Files"
 
 if command -v docker >/dev/null 2>&1; then
-    for compose_file in testing/docker-compose.lite.yml testing/docker-compose.mac.yml testing/docker-compose.test-harness.yml; do
+    for compose_file in tests/docker-compose.lite.yml tests/docker-compose.mac.yml tests/docker-compose.test-harness.yml; do
         if [ -f "$compose_file" ]; then
             if docker compose -f "$compose_file" config >/dev/null 2>&1; then
                 pass "$compose_file valid"

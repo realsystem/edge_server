@@ -1,0 +1,71 @@
+# Edge Server Bootstrap Configuration
+# Copy to bootstrap.cfg and customize
+
+[target]
+# SSH connection settings
+SSH_TIMEOUT = 10
+SSH_RETRIES = 3
+
+[timeouts]
+# Per-phase timeouts in seconds
+DISCOVERY = 30
+PREREQUISITES = 60
+INITIAL_SETUP = 300
+REBOOT_WAIT = 120
+SECRETS = 60
+DEPLOYMENT_BASE = 600
+DEPLOYMENT_SECURITY = 900
+VERIFICATION = 120
+
+# Probe settings for health checks
+PROBE_INTERVAL = 5
+PROBE_COUNT = 3
+
+[network]
+# Default network configuration
+DEFAULT_DNS = 8.8.8.8
+DEFAULT_GATEWAY =
+
+[services]
+# Service verification after deployment
+VERIFY_TAILSCALE = true
+VERIFY_HOMEASSISTANT = true
+VERIFY_MQTT = true
+VERIFY_FRIGATE = true
+
+# Service ports
+HA_PORT = 8123
+MQTT_PORT = 1883
+FRIGATE_PORT = 5000
+
+[unifi]
+# UniFi controller integration (optional)
+ENABLED = false
+CONTROLLER_URL = https://192.168.1.1:8443
+SITE = default
+
+# Camera VLAN settings
+CAMERA_VLAN_ID = 10
+CAMERA_VLAN_NAME = CAMERAS
+CAMERA_SUBNET = 192.168.10.0/24
+
+# IoT VLAN settings
+IOT_VLAN_ID = 20
+IOT_VLAN_NAME = IOT
+IOT_SUBNET = 192.168.20.0/24
+
+[unifi.ports]
+# Port assignments (port_number = profile_name)
+# Uncomment and customize for your setup
+# 2 = CAMERA-PORT
+# 3 = CAMERA-PORT
+# 4 = CAMERA-PORT
+# 5 = CAMERA-PORT
+# 6 = IOT-PORT
+
+[rollback]
+# Automatic rollback on failure
+ENABLED = true
+SNAPSHOT_BEFORE_DEPLOY = true
+RESTORE_ON_FAILURE = true
+SNAPSHOT_DIR = /var/lib/edge-server-snapshots
