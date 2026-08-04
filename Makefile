@@ -64,9 +64,10 @@ setup:
 		exit 1; \
 	fi
 	@echo "Using $(PYTHON3)..."
+	@rm -rf $(VENV_DIR)
 	@echo "Creating Python virtual environment..."
 	@$(PYTHON3) -m venv $(VENV_DIR)
-	@$(PIP) install --upgrade pip
+	@$(PIP) install --upgrade pip setuptools
 	@$(PIP) install -e ".[dev]"
 	@echo "Done. Activate with: source $(VENV_DIR)/bin/activate"
 

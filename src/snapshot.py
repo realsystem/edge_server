@@ -129,7 +129,7 @@ class SnapshotManager:
 
         return sorted(snapshots, key=lambda s: s.created_at, reverse=True)
 
-    def get_manifest(self, snapshot_id: str) -> SnapshotManifest | None:
+    def get_manifest(self, snapshot_id: str) -> Optional[SnapshotManifest]:
         """Get manifest for a snapshot."""
         if snapshot_id == "latest":
             # Resolve latest symlink

@@ -68,7 +68,7 @@ class PhaseDefinition:
     phase: Phase
     pre_validations: List[ValidationRule] = field(default_factory=list)
     post_validations: List[ValidationRule] = field(default_factory=list)
-    rollback: Callable[[], bool] | None = None
+    rollback: Optional[Callable[[], bool]] = None
     timeout: int = 60
 
 
@@ -233,7 +233,7 @@ class StateMachine:
 
         return True
 
-    def next_phase(self) -> Phase | None:
+    def next_phase(self) -> Optional[Phase]:
         """Get the next phase to execute."""
         current_idx = self.PHASE_ORDER.index(self.current_phase)
         if current_idx + 1 < len(self.PHASE_ORDER):

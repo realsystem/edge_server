@@ -32,7 +32,7 @@ check_python() {
     echo "$python_cmd"
 }
 
-# Setup venv if needed
+# Setup venv and ensure package is installed
 setup_venv() {
     local python_cmd="$1"
 
@@ -40,6 +40,10 @@ setup_venv() {
         echo "Setting up Python environment..."
         "$python_cmd" -m venv "$VENV_DIR"
         "$VENV_DIR/bin/pip" install --quiet --upgrade pip
+    fi
+
+    # Always ensure package is installed
+    if ! "$VENV_DIR/bin/python" -c "import bootstrap" 2>/dev/null; then
         "$VENV_DIR/bin/pip" install --quiet -e "$SCRIPT_DIR"
     fi
 }
