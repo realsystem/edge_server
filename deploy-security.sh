@@ -42,11 +42,13 @@ declare -A CAMERAS=(
 # OUTPUT FORMATTING
 #-------------------------------------------------------------------------------
 
+readonly STATUS_FILE="/tmp/edge-server-deploy.status"
+
 header()  { printf '\n===============================================================\n  %s\n===============================================================\n' "$*"; }
-info()    { printf '[OK] %s\n' "$*"; }
-warn()    { printf '[WARN] %s\n' "$*"; }
-error()   { printf '[ERROR] %s\n' "$*"; }
-step()    { printf '[..] %s\n' "$*"; }
+info()    { printf '[OK] %s\n' "$*"; printf '%s' "$*" > "$STATUS_FILE"; }
+warn()    { printf '[WARN] %s\n' "$*"; printf '%s' "$*" > "$STATUS_FILE"; }
+error()   { printf '[ERROR] %s\n' "$*"; printf '%s' "$*" > "$STATUS_FILE"; }
+step()    { printf '[..] %s\n' "$*"; printf '%s' "$*" > "$STATUS_FILE"; }
 
 #-------------------------------------------------------------------------------
 # PRE-FLIGHT CHECKS

@@ -96,8 +96,8 @@ class TestSSHRunWithProgress:
 
         progress_calls = []
 
-        def on_progress(elapsed):
-            progress_calls.append(elapsed)
+        def on_progress(elapsed, status):
+            progress_calls.append((elapsed, status))
 
         with patch("time.sleep"):  # Skip actual sleeping
             result = client.run_with_progress(

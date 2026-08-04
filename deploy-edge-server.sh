@@ -45,6 +45,7 @@ MQTT_PASS="${MQTT_PASS:-}"
 #-------------------------------------------------------------------------------
 
 readonly LOG_FILE="/var/log/edge-server-deploy.log"
+readonly STATUS_FILE="/tmp/edge-server-deploy.status"
 
 log() {
     local level="$1"
@@ -53,6 +54,8 @@ log() {
     local timestamp
     timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     printf '%s [%s] %s\n' "$timestamp" "$level" "$message" | stdbuf -oL tee -a "$LOG_FILE"
+    # Update status file for progress monitoring
+    printf '%s' "$message" > "$STATUS_FILE"
 }
 
 info()    { log "INFO" "$*"; }

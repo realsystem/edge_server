@@ -183,11 +183,11 @@ class TestDeploymentPhase:
         # Track progress calls
         progress_calls = []
 
-        def mock_run_with_progress(command, timeout=None, on_progress=None):
+        def mock_run_with_progress(command, timeout=None, on_progress=None, status_file=None):
             # Simulate calling progress a few times
             if on_progress:
                 for i in range(3):
-                    on_progress(float(i))
+                    on_progress(float(i), f"Step {i}")
                     progress_calls.append(i)
             # Return successful result with some output
             return SSHResult(

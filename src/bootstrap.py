@@ -483,9 +483,10 @@ class Bootstrap:
             self._log("Starting base stack deployment")
             self.progress.info("Deploying base stack (Tailscale, MQTT, Home Assistant)...")
             timeout = self.config.timeouts.deployment_base
+            status_file = "/tmp/edge-server-deploy.status"
 
-            def on_progress(elapsed: float) -> None:
-                self.progress.waiting("deploy-edge-server.sh", elapsed, timeout)
+            def on_progress(elapsed: float, status: str) -> None:
+                self.progress.waiting("deploy-edge-server.sh", elapsed, timeout, status)
 
             result = self.ssh.run_with_progress(
                 f"cd {self.REMOTE_DIR} && "
@@ -493,6 +494,7 @@ class Bootstrap:
                 f"sudo -E ./deploy-edge-server.sh 2>&1",
                 timeout=timeout,
                 on_progress=on_progress,
+                status_file=status_file,
             )
             self.progress.clear_line()
             self._log_result("deploy-edge-server.sh", result)
@@ -522,9 +524,10 @@ class Bootstrap:
             self._log("Starting security stack deployment")
             self.progress.info("Deploying security stack (Frigate NVR)...")
             timeout = self.config.timeouts.deployment_security
+            status_file = "/tmp/edge-server-deploy.status"
 
-            def on_security_progress(elapsed: float) -> None:
-                self.progress.waiting("deploy-security.sh", elapsed, timeout)
+            def on_security_progress(elapsed: float, status: str) -> None:
+                self.progress.waiting("deploy-security.sh", elapsed, timeout, status)
 
             result = self.ssh.run_with_progress(
                 f"cd {self.REMOTE_DIR} && "
@@ -532,6 +535,7 @@ class Bootstrap:
                 f"sudo -E ./deploy-security.sh 2>&1",
                 timeout=timeout,
                 on_progress=on_security_progress,
+                status_file=status_file,
             )
             self.progress.clear_line()
             self._log_result("deploy-security.sh", result)

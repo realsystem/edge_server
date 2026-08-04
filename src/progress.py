@@ -140,13 +140,23 @@ class Progress:
             + elapsed_str
         )
 
-    def waiting(self, message: str, elapsed: float, timeout: int) -> None:
+    def waiting(
+        self, message: str, elapsed: float, timeout: int, status: str = ""
+    ) -> None:
         """Update waiting status with spinner."""
         spinner = self.SPINNERS[self._spinner_idx % len(self.SPINNERS)]
         self._spinner_idx += 1
         percent = min(100, int((elapsed / timeout) * 100)) if timeout > 0 else 0
+        # Truncate status to fit on line
+        if status:
+            max_status_len = 40
+            if len(status) > max_status_len:
+                status = status[: max_status_len - 3] + "..."
+            status_str = f" - {status}"
+        else:
+            status_str = ""
         sys.stdout.write(
-            f"\r  {Color.BLUE}{spinner}{Color.RESET} {message}: {int(elapsed)}s / {timeout}s [{percent}%]"
+            f"\r  {Color.BLUE}{spinner}{Color.RESET} {message}: {int(elapsed)}s / {timeout}s [{percent}%]{status_str}    "
         )
         sys.stdout.flush()
 
