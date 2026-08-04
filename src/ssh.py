@@ -121,8 +121,10 @@ class SSHClient:
 
         try:
             # Merge stderr into stdout for simpler streaming
+            # Provide stdin to prevent SSH from closing with -tt
             process = subprocess.Popen(
                 args,
+                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
