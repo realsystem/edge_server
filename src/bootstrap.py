@@ -291,11 +291,18 @@ class Bootstrap:
             env["DNS"] = dns
 
         self._log(f"Running initial-setup.sh with env: {env}")
-        self.progress.info("Running initial-setup.sh...")
+        self.progress.info(f"Running initial-setup.sh (timeout: {self.config.timeouts.initial_setup}s)...")
+
+        def on_setup_line(line: str) -> None:
+            if line.startswith("[") or line.startswith(">>>"):
+                self.progress.info(f"  {line}")
+            self._log(f"[initial-setup] {line}")
+
         result = self.ssh.run_script(
             f"{self.REMOTE_DIR}/initial-setup.sh",
             env=env,
             timeout=self.config.timeouts.initial_setup,
+            on_line=on_setup_line,
         )
         self._log_result("initial-setup.sh", result)
         if not result.success:
@@ -464,11 +471,18 @@ class Bootstrap:
             self._log("Starting base stack deployment")
             self.progress.info("Deploying base stack (Tailscale, MQTT, Home Assistant)...")
             self.progress.info(f"  Running deploy-edge-server.sh (timeout: {self.config.timeouts.deployment_base}s)")
-            result = self.ssh.run(
+
+            def on_deploy_line(line: str) -> None:
+                if line.startswith("[") or line.startswith(">>>"):
+                    self.progress.info(f"    {line}")
+                self._log(f"[deploy-edge-server] {line}")
+
+            result = self.ssh.run_streaming(
                 f"cd {self.REMOTE_DIR} && "
                 f"eval $(./secrets.sh export 2>/dev/null) && "
                 f"sudo -E ./deploy-edge-server.sh 2>&1",
                 timeout=self.config.timeouts.deployment_base,
+                on_line=on_deploy_line,
             )
             self._log_result("deploy-edge-server.sh", result)
             if not result.success:
@@ -492,11 +506,18 @@ class Bootstrap:
             self._log("Starting security stack deployment")
             self.progress.info("Deploying security stack (Frigate NVR)...")
             self.progress.info(f"  Running deploy-security.sh (timeout: {self.config.timeouts.deployment_security}s)")
-            result = self.ssh.run(
+
+            def on_security_line(line: str) -> None:
+                if line.startswith("[") or line.startswith(">>>"):
+                    self.progress.info(f"    {line}")
+                self._log(f"[deploy-security] {line}")
+
+            result = self.ssh.run_streaming(
                 f"cd {self.REMOTE_DIR} && "
                 f"eval $(./secrets.sh export 2>/dev/null) && "
                 f"sudo -E ./deploy-security.sh 2>&1",
                 timeout=self.config.timeouts.deployment_security,
+                on_line=on_security_line,
             )
             self._log_result("deploy-security.sh", result)
             if not result.success:

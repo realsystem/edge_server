@@ -1,10 +1,11 @@
 """SSH connection and remote command execution."""
 
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 
 @dataclass
@@ -85,6 +86,73 @@ class SSHClient:
         except Exception as e:
             return SSHResult(-1, "", str(e))
 
+    def run_streaming(
+        self,
+        command: str,
+        timeout: Optional[int] = None,
+        sudo: bool = False,
+        on_line: Optional[Callable[[str], None]] = None,
+    ) -> SSHResult:
+        """Execute a remote command with streaming output."""
+        if sudo:
+            command = f"sudo {command}"
+
+        args = self._ssh_args() + [command]
+        cmd_timeout = timeout or self.timeout * 10
+
+        stdout_lines = []
+        stderr_lines = []
+
+        try:
+            process = subprocess.Popen(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+
+            import select
+
+            start_time = time.monotonic()
+            while True:
+                if cmd_timeout and (time.monotonic() - start_time) > cmd_timeout:
+                    process.kill()
+                    return SSHResult(-1, "\n".join(stdout_lines), "Command timed out")
+
+                readable, _, _ = select.select(
+                    [process.stdout, process.stderr], [], [], 0.1
+                )
+
+                for stream in readable:
+                    line = stream.readline()
+                    if line:
+                        line = line.rstrip("\n")
+                        if stream == process.stdout:
+                            stdout_lines.append(line)
+                            if on_line:
+                                on_line(line)
+                        else:
+                            stderr_lines.append(line)
+
+                if process.poll() is not None:
+                    for line in process.stdout:
+                        line = line.rstrip("\n")
+                        stdout_lines.append(line)
+                        if on_line:
+                            on_line(line)
+                    for line in process.stderr:
+                        stderr_lines.append(line.rstrip("\n"))
+                    break
+
+            return SSHResult(
+                process.returncode,
+                "\n".join(stdout_lines),
+                "\n".join(stderr_lines),
+            )
+        except Exception as e:
+            return SSHResult(-1, "\n".join(stdout_lines), str(e))
+
     def test_connection(self) -> bool:
         """Test if SSH connection works."""
         result = self.run("true")
@@ -149,14 +217,21 @@ class SSHClient:
         return False, elapsed
 
     def run_script(
-        self, script_path: str, env: Optional[dict] = None, sudo: bool = True, timeout: int = 600
+        self,
+        script_path: str,
+        env: Optional[dict] = None,
+        sudo: bool = True,
+        timeout: int = 600,
+        on_line: Optional[Callable[[str], None]] = None,
     ) -> SSHResult:
         """Run a script on remote host."""
         env_str = " ".join(f"{k}='{v}'" for k, v in (env or {}).items())
         if env_str:
-            command = f"cd $(dirname {script_path}) && {env_str} {'sudo -E' if sudo else ''} {script_path}"
+            command = f"cd $(dirname {script_path}) && {env_str} {'sudo -E' if sudo else ''} {script_path} 2>&1"
         else:
-            command = f"cd $(dirname {script_path}) && {'sudo' if sudo else ''} {script_path}"
+            command = f"cd $(dirname {script_path}) && {'sudo' if sudo else ''} {script_path} 2>&1"
+        if on_line:
+            return self.run_streaming(command, timeout=timeout, on_line=on_line)
         return self.run(command, timeout=timeout)
 
     def get_docker_containers(self, filter_name: Optional[str] = None) -> List[dict]:
