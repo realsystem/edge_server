@@ -157,7 +157,7 @@ class Progress:
 
     def info(self, message: str) -> None:
         """Print an info message."""
-        print(f"  {Color.BLUE}→{Color.RESET} {message}")
+        print(f"  {Color.BLUE}→{Color.RESET} {message}", flush=True)
 
     def ok(self, message: str) -> None:
         """Print a success message."""

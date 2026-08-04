@@ -489,7 +489,7 @@ class Bootstrap:
             )
 
             def on_deploy_line(line: str) -> None:
-                self.progress.info(f"    {line}")
+                print(f"    [STREAM] {line}", flush=True)
                 self._log(f"[deploy-edge-server] {line}")
 
             result = self.ssh.run_streaming(
