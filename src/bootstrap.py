@@ -17,7 +17,7 @@ from ssh import SSHClient, SSHResult
 from state import Phase, PhaseStatus, StateMachine
 
 DEFAULT_LOG_DIR = Path.home() / ".edge-server" / "logs"
-DEFAULT_SECRETS_DIR = "~/.edge-server-secrets"
+DEFAULT_SECRETS_DIR = "$HOME/.edge-server-secrets"
 
 
 class Bootstrap:
@@ -399,7 +399,7 @@ class Bootstrap:
         else:
             self.progress.info("Initializing secrets storage...")
             result = self.ssh.run(
-                f"cd {self.REMOTE_DIR} && SECRETS_DIR='{self.secrets_dir}' SECRETS_PASSWORD='{secrets_pass}' "
+                f'cd {self.REMOTE_DIR} && SECRETS_DIR="{self.secrets_dir}" SECRETS_PASSWORD=\'{secrets_pass}\' '
                 f"./secrets.sh init <<< $'{secrets_pass}\\n{secrets_pass}' 2>&1"
             )
             self._log_result("secrets.sh init", result)
@@ -424,7 +424,7 @@ class Bootstrap:
         for key, value in self._secrets.items():
             if value:
                 self.progress.info(f"  Setting {key}...")
-                env_prefix = f"SECRETS_DIR='{self.secrets_dir}'"
+                env_prefix = f'SECRETS_DIR="{self.secrets_dir}"'
                 if secrets_pass:
                     env_prefix += f" SECRETS_PASSWORD='{secrets_pass}'"
                 cmd = f"cd {self.REMOTE_DIR} && {env_prefix} ./secrets.sh set {key} '{value}' 2>&1"
