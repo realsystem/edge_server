@@ -142,7 +142,7 @@ jobs:
 
       - name: Start lite test stack
         run: |
-          cd testing
+          cd tests
           docker compose -f docker-compose.lite.yml up -d
           sleep 30
 

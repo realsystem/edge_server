@@ -1,14 +1,11 @@
 """Tests for services module."""
 
 import json
-from http.server import HTTPServer, BaseHTTPRequestHandler
 import socket
 import threading
-import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
-import pytest
-
-from services import HealthStatus, ServiceHealth, ServiceChecker
+from services import HealthStatus, ServiceChecker, ServiceHealth
 
 
 class TestHealthStatus:

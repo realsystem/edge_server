@@ -11,7 +11,7 @@ Test the security stack on macOS before deploying to production.
 ## Quick Start
 
 ```bash
-cd testing
+cd tests
 
 # Start everything (mock cameras + full stack)
 ./test-local-deploy.sh start
@@ -33,7 +33,7 @@ open http://localhost:8123   # Home Assistant
 ## What's Included
 
 ```
-testing/
+tests/
 ├── docker-compose.test-harness.yml   # Mock RTSP camera streams
 ├── docker-compose.mac.yml            # macOS-adapted stack
 ├── mediamtx.yml                      # RTSP server config

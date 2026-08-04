@@ -3,9 +3,7 @@
 import tempfile
 from pathlib import Path
 
-import pytest
-
-from config import Config, TimeoutConfig, NetworkConfig, ServiceConfig
+from config import Config, TimeoutConfig
 
 
 class TestTimeoutConfig:

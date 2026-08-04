@@ -2,10 +2,10 @@
 
 import sys
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
-from typing import Iterator, Optional
 
 
 class Color:
@@ -47,7 +47,7 @@ class TaskResult:
     status: Status
     message: str
     elapsed: float
-    details: Optional[str] = None
+    details: str | None = None
 
 
 class Progress:
@@ -58,8 +58,8 @@ class Progress:
     def __init__(self, verbose: bool = True, no_color: bool = False):
         self.verbose = verbose
         self.start_time = time.monotonic()
-        self.phase_start: Optional[float] = None
-        self.task_start: Optional[float] = None
+        self.phase_start: float | None = None
+        self.task_start: float | None = None
         self._spinner_idx = 0
 
         if no_color or not sys.stdout.isatty():
@@ -74,7 +74,7 @@ class Progress:
             print(f" {Color.YELLOW}(DRY RUN - no changes will be made){Color.RESET}")
         print("═" * 67)
 
-    def phase(self, number: int, name: str, timeout: Optional[int] = None) -> None:
+    def phase(self, number: int, name: str, timeout: int | None = None) -> None:
         """Start a new phase."""
         self.phase_start = time.monotonic()
         timeout_str = f"[timeout: {timeout}s]" if timeout else ""
@@ -87,7 +87,7 @@ class Progress:
         if self.phase_start:
             elapsed = time.monotonic() - self.phase_start
             print(" " * 54 + "──────────────")
-            print(f" " * 54 + f" Total: {elapsed:.1f}s")
+            print(" " * 54 + f" Total: {elapsed:.1f}s")
 
     @contextmanager
     def task(self, description: str) -> Iterator[None]:
@@ -107,8 +107,8 @@ class Progress:
         self,
         description: str,
         status: Status,
-        elapsed: Optional[float] = None,
-        details: Optional[str] = None,
+        elapsed: float | None = None,
+        details: str | None = None,
     ) -> None:
         """Print a task status line."""
         self._print_task_status(description, status, elapsed, details)
@@ -117,8 +117,8 @@ class Progress:
         self,
         description: str,
         status: Status,
-        elapsed: Optional[float] = None,
-        details: Optional[str] = None,
+        elapsed: float | None = None,
+        details: str | None = None,
     ) -> None:
         """Internal: print formatted task status."""
         color = {
@@ -167,7 +167,7 @@ class Progress:
         """Print a warning message."""
         print(f"  {Color.YELLOW}⚠{Color.RESET} {message}")
 
-    def fail(self, message: str, details: Optional[str] = None) -> None:
+    def fail(self, message: str, details: str | None = None) -> None:
         """Print a failure message."""
         print(f"  {Color.RED}✗{Color.RESET} {message}")
         if details:
@@ -207,7 +207,7 @@ class Progress:
         print("━" * 40)
         print()
 
-    def footer(self, success: bool, urls: Optional[dict] = None) -> None:
+    def footer(self, success: bool, urls: dict | None = None) -> None:
         """Print the final footer."""
         print()
         print("═" * 67)

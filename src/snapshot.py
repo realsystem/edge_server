@@ -2,11 +2,9 @@
 
 import json
 import tarfile
-import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
 
 from ssh import SSHClient
 
@@ -19,9 +17,9 @@ class SnapshotManifest:
     created_at: str
     phase: str
     description: str
-    files: List[str] = field(default_factory=list)
-    docker_containers: List[str] = field(default_factory=list)
-    metadata: Dict[str, str] = field(default_factory=dict)
+    files: list[str] = field(default_factory=list)
+    docker_containers: list[str] = field(default_factory=list)
+    metadata: dict[str, str] = field(default_factory=dict)
 
 
 class SnapshotManager:
@@ -41,9 +39,9 @@ class SnapshotManager:
         self,
         phase: str,
         description: str,
-        paths: Optional[List[str]] = None,
+        paths: list[str] | None = None,
         include_docker: bool = False,
-    ) -> Optional[str]:
+    ) -> str | None:
         """Create a snapshot. Returns snapshot ID on success."""
         snapshot_id = self._generate_id(phase)
         snapshot_path = f"{self.SNAPSHOT_DIR}/{snapshot_id}"
@@ -114,7 +112,7 @@ class SnapshotManager:
 
         return snapshot_id
 
-    def list_snapshots(self) -> List[SnapshotManifest]:
+    def list_snapshots(self) -> list[SnapshotManifest]:
         """List all snapshots."""
         result = self.ssh.run(f"ls -1 {self.SNAPSHOT_DIR} 2>/dev/null | grep -v latest || true")
         if not result.success or not result.stdout:
@@ -130,7 +128,7 @@ class SnapshotManager:
 
         return sorted(snapshots, key=lambda s: s.created_at, reverse=True)
 
-    def get_manifest(self, snapshot_id: str) -> Optional[SnapshotManifest]:
+    def get_manifest(self, snapshot_id: str) -> SnapshotManifest | None:
         """Get manifest for a snapshot."""
         if snapshot_id == "latest":
             # Resolve latest symlink
@@ -196,15 +194,15 @@ class SnapshotManager:
 class LocalSnapshotManager:
     """Manage local snapshots (for testing or local deployments)."""
 
-    def __init__(self, snapshot_dir: Optional[Path] = None):
+    def __init__(self, snapshot_dir: Path | None = None):
         self.snapshot_dir = snapshot_dir or Path("/var/lib/edge-server-snapshots")
 
     def create(
         self,
         phase: str,
         description: str,
-        paths: Optional[List[Path]] = None,
-    ) -> Optional[str]:
+        paths: list[Path] | None = None,
+    ) -> str | None:
         """Create a local snapshot."""
         timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
         snapshot_id = f"{timestamp}_{phase}"

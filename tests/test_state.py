@@ -3,14 +3,12 @@
 import tempfile
 from pathlib import Path
 
-import pytest
-
 from state import (
     Phase,
-    PhaseStatus,
-    PhaseResult,
-    StateMachine,
     PhaseDefinition,
+    PhaseResult,
+    PhaseStatus,
+    StateMachine,
     ValidationRule,
 )
 

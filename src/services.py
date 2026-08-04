@@ -3,11 +3,10 @@
 import json
 import socket
 import subprocess
-import urllib.request
 import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Optional
 
 from ssh import SSHClient
 
@@ -28,14 +27,14 @@ class ServiceHealth:
     name: str
     status: HealthStatus
     message: str
-    details: Optional[dict] = None
-    response_time: Optional[float] = None
+    details: dict | None = None
+    response_time: float | None = None
 
 
 class ServiceChecker:
     """Check health of various services."""
 
-    def __init__(self, ssh: Optional[SSHClient] = None):
+    def __init__(self, ssh: SSHClient | None = None):
         self.ssh = ssh
 
     def check_tcp_port(self, host: str, port: int, timeout: int = 5) -> ServiceHealth:
@@ -56,7 +55,7 @@ class ServiceChecker:
                 status=HealthStatus.UNHEALTHY,
                 message=f"Port {port} is closed",
             )
-        except socket.timeout:
+        except TimeoutError:
             return ServiceHealth(
                 name=f"tcp:{port}",
                 status=HealthStatus.UNHEALTHY,
@@ -72,7 +71,7 @@ class ServiceChecker:
     def check_http(
         self,
         url: str,
-        expected_codes: Optional[list] = None,
+        expected_codes: list | None = None,
         timeout: int = 10,
     ) -> ServiceHealth:
         """Check HTTP endpoint."""
@@ -128,7 +127,7 @@ class ServiceChecker:
     def check_http_json(
         self,
         url: str,
-        jq_path: Optional[str] = None,
+        jq_path: str | None = None,
         timeout: int = 10,
     ) -> ServiceHealth:
         """Check HTTP endpoint and optionally extract JSON field."""

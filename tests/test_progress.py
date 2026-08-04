@@ -1,10 +1,5 @@
 """Tests for progress module."""
 
-import io
-import sys
-
-import pytest
-
 from progress import Color, Progress, Status
 
 

@@ -1,10 +1,8 @@
 """Configuration management for edge server deployment."""
 
 import configparser
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 
 @dataclass
@@ -75,7 +73,7 @@ class Config:
     ssh: SSHConfig = field(default_factory=SSHConfig)
 
     @classmethod
-    def load(cls, config_path: Optional[Path] = None) -> "Config":
+    def load(cls, config_path: Path | None = None) -> "Config":
         """Load configuration from file, falling back to defaults."""
         config = cls()
 
