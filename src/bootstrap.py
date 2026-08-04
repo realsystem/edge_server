@@ -496,7 +496,7 @@ class Bootstrap:
             result = self.ssh.run_streaming(
                 f"cd {self.REMOTE_DIR} && "
                 f"eval $(./secrets.sh export 2>/dev/null) && "
-                f"sudo -E ./deploy-edge-server.sh 2>&1",
+                f"stdbuf -oL sudo -E ./deploy-edge-server.sh 2>&1",
                 timeout=self.config.timeouts.deployment_base,
                 on_line=on_deploy_line,
             )
@@ -533,7 +533,7 @@ class Bootstrap:
             result = self.ssh.run_streaming(
                 f"cd {self.REMOTE_DIR} && "
                 f"eval $(./secrets.sh export 2>/dev/null) && "
-                f"sudo -E ./deploy-security.sh 2>&1",
+                f"stdbuf -oL sudo -E ./deploy-security.sh 2>&1",
                 timeout=self.config.timeouts.deployment_security,
                 on_line=on_security_line,
             )

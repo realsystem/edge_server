@@ -230,10 +230,11 @@ class SSHClient:
     ) -> SSHResult:
         """Run a script on remote host."""
         env_str = " ".join(f"{k}='{v}'" for k, v in (env or {}).items())
+        sudo_prefix = "stdbuf -oL sudo -E" if sudo else ""
         if env_str:
-            command = f"cd $(dirname {script_path}) && {env_str} {'sudo -E' if sudo else ''} {script_path} 2>&1"
+            command = f"cd $(dirname {script_path}) && {env_str} {sudo_prefix} {script_path} 2>&1"
         else:
-            command = f"cd $(dirname {script_path}) && {'sudo' if sudo else ''} {script_path} 2>&1"
+            command = f"cd $(dirname {script_path}) && {sudo_prefix} {script_path} 2>&1"
         if on_line:
             return self.run_streaming(command, timeout=timeout, on_line=on_line)
         return self.run(command, timeout=timeout)
