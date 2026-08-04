@@ -484,48 +484,19 @@ class Bootstrap:
             self.progress.info("Deploying base stack (Tailscale, MQTT, Home Assistant)...")
             timeout = self.config.timeouts.deployment_base
 
-            # Run script with live output using ssh -t
-            import subprocess
-            ssh_args = [
-                "ssh", "-t",
-                "-o", f"ConnectTimeout={self.config.ssh.timeout}",
-                "-o", f"StrictHostKeyChecking={self.config.ssh.strict_host_key_checking}",
-            ]
-            if self.config.ssh.key_file:
-                ssh_args.extend(["-i", self.config.ssh.key_file])
-            ssh_args.append(f"{self.config.ssh.user}@{self.target}")
-            ssh_args.append(
+            # Run script - output will be captured and shown after
+            result = self.ssh.run(
                 f"cd {self.REMOTE_DIR} && "
                 f"eval $(./secrets.sh export 2>/dev/null) && "
-                f"sudo -E ./deploy-edge-server.sh"
+                f"sudo -E ./deploy-edge-server.sh",
+                timeout=timeout,
             )
 
-            self._log(f"Running: {' '.join(ssh_args)}")
-            proc = subprocess.Popen(
-                ssh_args,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
-
-            stdout_lines = []
-            while True:
-                line = proc.stdout.readline()
-                if not line and proc.poll() is not None:
-                    break
-                if line:
-                    line = line.rstrip()
-                    stdout_lines.append(line)
-                    self.progress.info(f"  {line}")
-                    self._log(f"[deploy-edge-server] {line}")
-
-            result = type("Result", (), {
-                "success": proc.returncode == 0,
-                "returncode": proc.returncode,
-                "stdout": "\n".join(stdout_lines),
-                "stderr": "",
-            })()
+            # Show all output
+            if result.stdout:
+                for line in result.stdout.split("\n"):
+                    if line.strip():
+                        self.progress.info(f"  {line}")
             self._log_result("deploy-edge-server.sh", result)
             if not result.success:
                 self._log("Base stack deployment failed", "error")
@@ -542,48 +513,19 @@ class Bootstrap:
             self.progress.info("Deploying security stack (Frigate NVR)...")
             timeout = self.config.timeouts.deployment_security
 
-            # Run script with live output using ssh -t
-            import subprocess
-            ssh_args = [
-                "ssh", "-t",
-                "-o", f"ConnectTimeout={self.config.ssh.timeout}",
-                "-o", f"StrictHostKeyChecking={self.config.ssh.strict_host_key_checking}",
-            ]
-            if self.config.ssh.key_file:
-                ssh_args.extend(["-i", self.config.ssh.key_file])
-            ssh_args.append(f"{self.config.ssh.user}@{self.target}")
-            ssh_args.append(
+            # Run script - output will be captured and shown after
+            result = self.ssh.run(
                 f"cd {self.REMOTE_DIR} && "
                 f"eval $(./secrets.sh export 2>/dev/null) && "
-                f"sudo -E ./deploy-security.sh"
+                f"sudo -E ./deploy-security.sh",
+                timeout=timeout,
             )
 
-            self._log(f"Running: {' '.join(ssh_args)}")
-            proc = subprocess.Popen(
-                ssh_args,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
-
-            stdout_lines = []
-            while True:
-                line = proc.stdout.readline()
-                if not line and proc.poll() is not None:
-                    break
-                if line:
-                    line = line.rstrip()
-                    stdout_lines.append(line)
-                    self.progress.info(f"  {line}")
-                    self._log(f"[deploy-security] {line}")
-
-            result = type("Result", (), {
-                "success": proc.returncode == 0,
-                "returncode": proc.returncode,
-                "stdout": "\n".join(stdout_lines),
-                "stderr": "",
-            })()
+            # Show all output
+            if result.stdout:
+                for line in result.stdout.split("\n"):
+                    if line.strip():
+                        self.progress.info(f"  {line}")
 
             self._log_result("deploy-security.sh", result)
             if not result.success:
