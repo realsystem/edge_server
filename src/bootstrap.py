@@ -375,23 +375,28 @@ class Bootstrap:
         # Configure secrets on target
         # Check if secrets already initialized
         check_result = self.ssh.run(f"[ -f {self.secrets_dir}/secrets.enc ]")
-        if check_result.success:
-            self.progress.ok("Secrets storage already initialized")
-        else:
-            # Need to initialize - get password from user in manual mode
+        secrets_exist = check_result.success
+
+        # Get password - either from env, or prompt user
+        secrets_pass = os.environ.get("SECRETS_PASSWORD", "")
+        if not secrets_pass:
             if self.mode == "manual":
-                secrets_pass = self._prompt("Create secrets storage password", "", secret=True)
+                if secrets_exist:
+                    secrets_pass = self._prompt("Secrets storage password", "", secret=True)
+                else:
+                    secrets_pass = self._prompt("Create secrets storage password", "", secret=True)
                 if not secrets_pass:
                     self.progress.fail("Secrets password required")
                     self.state.complete_phase(Phase.SECRETS, PhaseStatus.FAILED, "No password", start)
                     return False
             else:
-                secrets_pass = os.environ.get("SECRETS_PASSWORD", "")
-                if not secrets_pass:
-                    self.progress.fail("SECRETS_PASSWORD env var required in auto mode")
-                    self.state.complete_phase(Phase.SECRETS, PhaseStatus.FAILED, "No password", start)
-                    return False
+                self.progress.fail("SECRETS_PASSWORD env var required in auto mode")
+                self.state.complete_phase(Phase.SECRETS, PhaseStatus.FAILED, "No password", start)
+                return False
 
+        if secrets_exist:
+            self.progress.ok("Secrets storage already initialized")
+        else:
             self.progress.info("Initializing secrets storage...")
             result = self.ssh.run(
                 f"cd {self.REMOTE_DIR} && SECRETS_DIR='{self.secrets_dir}' SECRETS_PASSWORD='{secrets_pass}' "
@@ -408,8 +413,9 @@ class Bootstrap:
                 self.state.complete_phase(Phase.SECRETS, PhaseStatus.FAILED, "Init failed", start)
                 return False
             self.progress.ok("Secrets storage initialized")
-            # Store password for subsequent set commands
-            os.environ["SECRETS_PASSWORD"] = secrets_pass
+
+        # Store password for subsequent set commands
+        os.environ["SECRETS_PASSWORD"] = secrets_pass
 
         secrets_set = 0
         secrets_failed = 0
