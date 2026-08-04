@@ -157,8 +157,9 @@ class TestMain:
 class TestDeploymentPhase:
     """Tests for deployment phase with progress output."""
 
-    def test_deployment_shows_progress(self, capsys):
-        """Test that deployment phase shows progress spinner."""
+    @patch("subprocess.Popen")
+    def test_deployment_shows_progress(self, mock_popen, capsys):
+        """Test that deployment phase shows output lines."""
         config = Config()
         config.ssh.user = "testuser"
         config.timeouts.deployment_base = 10
@@ -170,35 +171,41 @@ class TestDeploymentPhase:
             deploy_type="base",
             dry_run=False,
         )
-
-        # Mock SSH client
-        mock_ssh = MagicMock()
-        bootstrap.ssh = mock_ssh
 
         # Mock snapshots
         mock_snapshots = MagicMock()
         bootstrap.snapshots = mock_snapshots
         bootstrap.config.rollback.snapshot_before_deploy = False
 
-        mock_ssh.run.return_value = SSHResult(
-            0,
-            "2024-08-04 [INFO] Starting deployment\n"
-            "2024-08-04 [OK] Docker installed\n"
-            "2024-08-04 [OK] Services started\n",
-            "",
-        )
+        # Mock Popen to return output lines
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
 
-        # Run deployment phase
+        lines = [
+            "2024-08-04 [INFO] Starting deployment\n",
+            "2024-08-04 [OK] Docker installed\n",
+            "2024-08-04 [OK] Services started\n",
+        ]
+        line_iter = iter(lines + [""] * 10)
+        mock_proc.stdout.readline = lambda: next(line_iter, "")
+
+        poll_count = [0]
+        def mock_poll():
+            poll_count[0] += 1
+            return 0 if poll_count[0] > len(lines) else None
+        mock_proc.poll = mock_poll
+
+        mock_popen.return_value = mock_proc
+
         result = bootstrap._phase_deployment()
 
         assert result is True
-
-        # Check output contains summary lines
         captured = capsys.readouterr()
         assert "[OK]" in captured.out or "[INFO]" in captured.out
 
-    def test_deployment_shows_output_on_success(self, capsys):
-        """Test that deployment shows [OK]/[INFO] lines after completion."""
+    @patch("subprocess.Popen")
+    def test_deployment_shows_output_on_success(self, mock_popen, capsys):
+        """Test that deployment shows [OK]/[INFO] lines during execution."""
         config = Config()
         config.ssh.user = "testuser"
         config.timeouts.deployment_base = 10
@@ -211,29 +218,38 @@ class TestDeploymentPhase:
             dry_run=False,
         )
 
-        mock_ssh = MagicMock()
-        bootstrap.ssh = mock_ssh
         mock_snapshots = MagicMock()
         bootstrap.snapshots = mock_snapshots
         bootstrap.config.rollback.snapshot_before_deploy = False
 
-        mock_ssh.run.return_value = SSHResult(
-            0,
-            "2024-08-04 [INFO] Installing Docker\n"
-            "2024-08-04 [OK] Docker ready\n"
-            "2024-08-04 [INFO] Starting containers\n"
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+
+        lines = [
+            "2024-08-04 [INFO] Installing Docker\n",
+            "2024-08-04 [OK] Docker ready\n",
+            "2024-08-04 [INFO] Starting containers\n",
             "2024-08-04 [OK] All services running\n",
-            "",
-        )
+        ]
+        line_iter = iter(lines + [""] * 10)
+        mock_proc.stdout.readline = lambda: next(line_iter, "")
+
+        poll_count = [0]
+        def mock_poll():
+            poll_count[0] += 1
+            return 0 if poll_count[0] > len(lines) else None
+        mock_proc.poll = mock_poll
+
+        mock_popen.return_value = mock_proc
 
         result = bootstrap._phase_deployment()
 
         assert result is True
         captured = capsys.readouterr()
-        # Should show the [OK] and [INFO] lines
-        assert "Docker" in captured.out or "services" in captured.out
+        assert "Docker" in captured.out
 
-    def test_deployment_shows_error_on_failure(self, capsys):
+    @patch("subprocess.Popen")
+    def test_deployment_shows_error_on_failure(self, mock_popen, capsys):
         """Test that deployment shows error output on failure."""
         config = Config()
         config.ssh.user = "testuser"
@@ -247,22 +263,30 @@ class TestDeploymentPhase:
             dry_run=False,
         )
 
-        mock_ssh = MagicMock()
-        bootstrap.ssh = mock_ssh
         mock_snapshots = MagicMock()
         bootstrap.snapshots = mock_snapshots
         bootstrap.config.rollback.snapshot_before_deploy = False
 
-        mock_ssh.run.return_value = SSHResult(
-            1,
-            "2024-08-04 [INFO] Installing Docker\n"
+        mock_proc = MagicMock()
+        mock_proc.returncode = 1
+
+        lines = [
+            "2024-08-04 [INFO] Installing Docker\n",
             "2024-08-04 [ERROR] Failed to pull image\n",
-            "docker: Error response from daemon",
-        )
+        ]
+        line_iter = iter(lines + [""] * 10)
+        mock_proc.stdout.readline = lambda: next(line_iter, "")
+
+        poll_count = [0]
+        def mock_poll():
+            poll_count[0] += 1
+            return 1 if poll_count[0] > len(lines) else None
+        mock_proc.poll = mock_poll
+
+        mock_popen.return_value = mock_proc
 
         result = bootstrap._phase_deployment()
 
         assert result is False
         captured = capsys.readouterr()
-        # Should show error details
-        assert "failed" in captured.out.lower() or "error" in captured.out.lower()
+        assert "failed" in captured.out.lower()
