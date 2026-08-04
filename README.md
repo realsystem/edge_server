@@ -29,7 +29,7 @@ Headless Ubuntu edge server for Frigate NVR, Home Assistant, Mosquitto MQTT, and
 ./bootstrap.sh --config myserver.cfg 192.168.1.100
 ```
 
-Requires Python 3.10+. The wrapper script creates a venv automatically.
+Requires Python 3.8+. The wrapper script creates a venv automatically.
 
 ## Manual Setup Flow
 
@@ -140,17 +140,15 @@ docker compose pull && docker compose up -d
 ## Development
 
 ```bash
-# Create venv and install dev dependencies
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
+# Setup (creates venv and installs dependencies)
+make setup
 
-# Run tests
-pytest tests/ -v
+# Run Python tests
+make pytest
 
-# Run all tests (Python + shell + Docker)
+# Run all tests
 make test-scripts   # Shell script tests
-pytest              # Python tests
+make pytest         # Python unit tests
 make test           # Docker integration tests
 ```
 

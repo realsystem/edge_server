@@ -5,6 +5,7 @@ import tarfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Dict, List, Optional
 
 from ssh import SSHClient
 
@@ -17,9 +18,9 @@ class SnapshotManifest:
     created_at: str
     phase: str
     description: str
-    files: list[str] = field(default_factory=list)
-    docker_containers: list[str] = field(default_factory=list)
-    metadata: dict[str, str] = field(default_factory=dict)
+    files: List[str] = field(default_factory=list)
+    docker_containers: List[str] = field(default_factory=list)
+    metadata: Dict[str, str] = field(default_factory=dict)
 
 
 class SnapshotManager:
@@ -39,9 +40,9 @@ class SnapshotManager:
         self,
         phase: str,
         description: str,
-        paths: list[str] | None = None,
+        paths: Optional[List[str]] = None,
         include_docker: bool = False,
-    ) -> str | None:
+    ) -> Optional[str]:
         """Create a snapshot. Returns snapshot ID on success."""
         snapshot_id = self._generate_id(phase)
         snapshot_path = f"{self.SNAPSHOT_DIR}/{snapshot_id}"
@@ -112,7 +113,7 @@ class SnapshotManager:
 
         return snapshot_id
 
-    def list_snapshots(self) -> list[SnapshotManifest]:
+    def list_snapshots(self) -> List[SnapshotManifest]:
         """List all snapshots."""
         result = self.ssh.run(f"ls -1 {self.SNAPSHOT_DIR} 2>/dev/null | grep -v latest || true")
         if not result.success or not result.stdout:
@@ -194,15 +195,15 @@ class SnapshotManager:
 class LocalSnapshotManager:
     """Manage local snapshots (for testing or local deployments)."""
 
-    def __init__(self, snapshot_dir: Path | None = None):
+    def __init__(self, snapshot_dir: Optional[Path] = None):
         self.snapshot_dir = snapshot_dir or Path("/var/lib/edge-server-snapshots")
 
     def create(
         self,
         phase: str,
         description: str,
-        paths: list[Path] | None = None,
-    ) -> str | None:
+        paths: Optional[List[Path]] = None,
+    ) -> Optional[str]:
         """Create a local snapshot."""
         timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
         snapshot_id = f"{timestamp}_{phase}"

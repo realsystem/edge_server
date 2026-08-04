@@ -1,22 +1,28 @@
 # Edge Server - Local Testing
 #
 # Usage:
+#   make setup       - Create Python venv and install dependencies
 #   make test        - Start lightweight test stack (1 camera)
 #   make test-full   - Start full test stack (4 cameras)
 #   make stop        - Stop all containers
 #   make clean       - Stop and remove all data
 
+VENV_DIR := .venv
+PYTHON := $(VENV_DIR)/bin/python
+PIP := $(VENV_DIR)/bin/pip
 TESTS_DIR := tests
 LITE_COMPOSE := $(TESTS_DIR)/docker-compose.lite.yml
 FULL_COMPOSE := $(TESTS_DIR)/docker-compose.mac.yml
 HARNESS_COMPOSE := $(TESTS_DIR)/docker-compose.test-harness.yml
 
-.PHONY: help check check-mem-lite check-mem-full test test-dev test-ci test-full test-full-dev test-scripts start start-full stop status logs clean reset lint mem
+.PHONY: help setup pytest check check-mem-lite check-mem-full test test-dev test-ci test-full test-full-dev test-scripts start start-full stop status logs clean reset lint mem
 
 help:
 	@echo "Edge Server - Local Testing"
 	@echo ""
 	@echo "Targets:"
+	@echo "  make setup          - Create Python venv and install dependencies"
+	@echo "  make pytest         - Run Python unit tests"
 	@echo "  make test           - Run lite tests with pass/fail (auto-teardown)"
 	@echo "  make test-dev       - Lite tests, leave stack running"
 	@echo "  make test-full      - Run full tests (4 cameras, HA, auto-teardown)"
@@ -38,6 +44,37 @@ help:
 	@echo "Access (after start):"
 	@echo "  Frigate:  http://localhost:5000"
 	@echo "  MQTT:     localhost:1883"
+
+# Python setup - finds Python 3.8+
+PYTHON3 := $(shell for cmd in python3.12 python3.11 python3.10 python3.9 python3.8 python3; do \
+	if command -v $$cmd >/dev/null 2>&1; then \
+		ver=$$($$cmd -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null); \
+		major=$$(echo $$ver | cut -d. -f1); \
+		minor=$$(echo $$ver | cut -d. -f2); \
+		if [ "$$major" -ge 3 ] && [ "$$minor" -ge 8 ]; then \
+			echo $$cmd; \
+			break; \
+		fi; \
+	fi; \
+done)
+
+setup:
+	@if [ -z "$(PYTHON3)" ]; then \
+		echo "ERROR: Python 3.8+ required"; \
+		exit 1; \
+	fi
+	@echo "Using $(PYTHON3)..."
+	@echo "Creating Python virtual environment..."
+	@$(PYTHON3) -m venv $(VENV_DIR)
+	@$(PIP) install --upgrade pip
+	@$(PIP) install -e ".[dev]"
+	@echo "Done. Activate with: source $(VENV_DIR)/bin/activate"
+
+pytest: $(VENV_DIR)
+	@$(PYTHON) -m pytest tests/ -v
+
+$(VENV_DIR):
+	@$(MAKE) setup
 
 check:
 	@docker info >/dev/null 2>&1 || (echo "ERROR: Docker not running" && exit 1)

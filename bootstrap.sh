@@ -16,7 +16,7 @@ check_python() {
             version=$("$cmd" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
             major=$(echo "$version" | cut -d. -f1)
             minor=$(echo "$version" | cut -d. -f2)
-            if [ "$major" -ge 3 ] && [ "$minor" -ge 10 ]; then
+            if [ "$major" -ge 3 ] && [ "$minor" -ge 8 ]; then
                 python_cmd="$cmd"
                 break
             fi
@@ -24,7 +24,7 @@ check_python() {
     done
 
     if [ -z "$python_cmd" ]; then
-        echo "Error: Python 3.10+ required"
+        echo "Error: Python 3.8+ required"
         echo "Install with: brew install python@3.11"
         exit 1
     fi

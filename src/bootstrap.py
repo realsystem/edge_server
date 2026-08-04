@@ -5,6 +5,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 from config import Config
 from progress import Progress
@@ -36,8 +37,8 @@ class Bootstrap:
         dry_run: bool = False,
         skip_init: bool = False,
         no_rollback: bool = False,
-        secrets_file: Path | None = None,
-        script_dir: Path | None = None,
+        secrets_file: Optional[Path] = None,
+        script_dir: Optional[Path] = None,
     ):
         self.target = target
         self.config = config
@@ -50,10 +51,10 @@ class Bootstrap:
         self.script_dir = script_dir or Path(__file__).parent.parent
 
         self.progress = Progress(no_color=not sys.stdout.isatty())
-        self.ssh: SSHClient | None = None
+        self.ssh: Optional[SSHClient] = None
         self.state = StateMachine()
-        self.checker: ServiceChecker | None = None
-        self.snapshots: SnapshotManager | None = None
+        self.checker: Optional[ServiceChecker] = None
+        self.snapshots: Optional[SnapshotManager] = None
 
         self._secrets: dict = {}
 

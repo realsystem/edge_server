@@ -4,6 +4,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import List, Optional
 
 
 @dataclass
@@ -28,7 +29,7 @@ class SSHClient:
         user: str,
         timeout: int = 10,
         retries: int = 3,
-        key_file: Path | None = None,
+        key_file: Optional[Path] = None,
     ):
         self.host = host
         self.user = user
@@ -36,7 +37,7 @@ class SSHClient:
         self.retries = retries
         self.key_file = key_file
 
-    def _ssh_args(self) -> list[str]:
+    def _ssh_args(self) -> List[str]:
         """Build SSH command arguments."""
         args = [
             "ssh",
@@ -52,7 +53,7 @@ class SSHClient:
         args.append(f"{self.user}@{self.host}")
         return args
 
-    def _scp_args(self) -> list[str]:
+    def _scp_args(self) -> List[str]:
         """Build SCP command arguments."""
         args = [
             "scp",
@@ -67,7 +68,7 @@ class SSHClient:
             args.extend(["-i", str(self.key_file)])
         return args
 
-    def run(self, command: str, timeout: int | None = None, sudo: bool = False) -> SSHResult:
+    def run(self, command: str, timeout: Optional[int] = None, sudo: bool = False) -> SSHResult:
         """Execute a remote command."""
         if sudo:
             command = f"sudo {command}"
@@ -98,7 +99,7 @@ class SSHClient:
         result = self.run("sudo -n true")
         return result.success
 
-    def get_os_info(self) -> str | None:
+    def get_os_info(self) -> Optional[str]:
         """Get OS information."""
         result = self.run("cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2 | tr -d '\"'")
         return result.stdout if result.success else None
@@ -113,7 +114,7 @@ class SSHClient:
         result = self.run(f"mkdir -p {path}", sudo=sudo)
         return result.success
 
-    def copy_files(self, local_paths: list[Path], remote_dir: str) -> bool:
+    def copy_files(self, local_paths: List[Path], remote_dir: str) -> bool:
         """Copy files to remote host."""
         args = self._scp_args() + ["-r"]
         args.extend(str(p) for p in local_paths)
@@ -152,7 +153,7 @@ class SSHClient:
         return False, elapsed
 
     def run_script(
-        self, script_path: str, env: dict | None = None, sudo: bool = True, timeout: int = 600
+        self, script_path: str, env: Optional[dict] = None, sudo: bool = True, timeout: int = 600
     ) -> SSHResult:
         """Run a script on remote host."""
         env_str = " ".join(f"{k}='{v}'" for k, v in (env or {}).items())
@@ -162,7 +163,7 @@ class SSHClient:
             command = f"cd $(dirname {script_path}) && {'sudo' if sudo else ''} {script_path}"
         return self.run(command, timeout=timeout)
 
-    def get_docker_containers(self, filter_name: str | None = None) -> list[dict]:
+    def get_docker_containers(self, filter_name: Optional[str] = None) -> List[dict]:
         """Get list of running docker containers."""
         cmd = "docker ps --format '{{.Names}}|{{.Status}}|{{.Ports}}'"
         if filter_name:

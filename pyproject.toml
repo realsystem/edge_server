@@ -7,7 +7,7 @@ name = "edge-server"
 version = "0.1.0"
 description = "Edge server deployment and management toolkit"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
     {name = "realsystem", email = "realsystem@gmail.com"}
@@ -20,6 +20,8 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -66,11 +68,11 @@ exclude_lines = [
 
 [tool.black]
 line-length = 100
-target-version = ["py310"]
+target-version = ["py38"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py38"
 
 [tool.ruff.lint]
 select = [
@@ -87,7 +89,7 @@ ignore = [
 ]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.8"
 warn_return_any = true
 warn_unused_ignores = true
 disallow_untyped_defs = true

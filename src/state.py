@@ -2,12 +2,11 @@
 
 import json
 import time
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Dict, List, Optional
 
 
 class PhaseStatus(Enum):
@@ -45,8 +44,8 @@ class PhaseResult:
     message: str
     started_at: float
     completed_at: float
-    details: dict[str, Any] = field(default_factory=dict)
-    error: str | None = None
+    details: Dict[str, Any] = field(default_factory=dict)
+    error: Optional[str] = None
 
     @property
     def elapsed(self) -> float:
@@ -67,8 +66,8 @@ class PhaseDefinition:
     """Definition of a phase including validations and rollback."""
 
     phase: Phase
-    pre_validations: list[ValidationRule] = field(default_factory=list)
-    post_validations: list[ValidationRule] = field(default_factory=list)
+    pre_validations: List[ValidationRule] = field(default_factory=list)
+    post_validations: List[ValidationRule] = field(default_factory=list)
     rollback: Callable[[], bool] | None = None
     timeout: int = 60
 
@@ -89,11 +88,11 @@ class StateMachine:
         Phase.DONE,
     ]
 
-    def __init__(self, state_file: Path | None = None):
+    def __init__(self, state_file: Optional[Path] = None):
         self.state_file = state_file
         self.current_phase = Phase.INIT
-        self.results: dict[Phase, PhaseResult] = {}
-        self.phase_definitions: dict[Phase, PhaseDefinition] = {}
+        self.results: Dict[Phase, PhaseResult] = {}
+        self.phase_definitions: Dict[Phase, PhaseDefinition] = {}
         self._started_at = time.monotonic()
 
         if state_file and state_file.exists():
@@ -201,8 +200,8 @@ class StateMachine:
         status: PhaseStatus,
         message: str,
         started_at: float,
-        details: dict[str, Any] | None = None,
-        error: str | None = None,
+        details: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
     ) -> PhaseResult:
         """Mark a phase as completed."""
         result = PhaseResult(
@@ -258,7 +257,7 @@ class StateMachine:
         except Exception:
             return False
 
-    def rollback_to(self, target_phase: Phase) -> list[Phase]:
+    def rollback_to(self, target_phase: Phase) -> List[Phase]:
         """Rollback all phases back to target. Returns rolled back phases."""
         target_idx = self.PHASE_ORDER.index(target_phase)
         current_idx = self.PHASE_ORDER.index(self.current_phase)
@@ -273,7 +272,7 @@ class StateMachine:
         self._save_state()
         return rolled_back
 
-    def get_summary(self) -> dict[str, Any]:
+    def get_summary(self) -> Dict[str, Any]:
         """Get a summary of all phase results."""
         return {
             "current_phase": self.current_phase.value,
