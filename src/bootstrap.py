@@ -1,9 +1,11 @@
 """Main bootstrap orchestration."""
 
 import argparse
+import logging
 import os
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -11,8 +13,10 @@ from config import Config
 from progress import Progress
 from services import HealthStatus, ServiceChecker
 from snapshot import SnapshotManager
-from ssh import SSHClient
+from ssh import SSHClient, SSHResult
 from state import Phase, PhaseStatus, StateMachine
+
+DEFAULT_LOG_DIR = Path.home() / ".edge-server" / "logs"
 
 
 class Bootstrap:
@@ -57,6 +61,38 @@ class Bootstrap:
         self.snapshots: Optional[SnapshotManager] = None
 
         self._secrets: dict = {}
+        self._setup_logging()
+
+    def _setup_logging(self) -> None:
+        """Setup logging to local file."""
+        log_dir = Path(self.config.logging.log_dir) if self.config.logging.log_dir else DEFAULT_LOG_DIR
+        log_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = log_dir / f"bootstrap_{self.target}_{timestamp}.log"
+
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s [%(levelname)s] %(message)s",
+            handlers=[
+                logging.FileHandler(log_file),
+            ],
+        )
+        self.logger = logging.getLogger("bootstrap")
+        self.log_file = log_file
+        self.logger.info(f"Bootstrap started for target: {self.target}")
+        self.logger.info(f"Mode: {self.mode}, Deploy type: {self.deploy_type}")
+
+    def _log(self, message: str, level: str = "info") -> None:
+        """Log a message."""
+        getattr(self.logger, level)(message)
+
+    def _log_result(self, phase: str, result: "SSHResult") -> None:
+        """Log SSH result."""
+        self.logger.info(f"[{phase}] returncode: {result.returncode}")
+        if result.stdout:
+            self.logger.debug(f"[{phase}] stdout:\n{result.stdout}")
+        if result.stderr:
+            self.logger.warning(f"[{phase}] stderr:\n{result.stderr}")
 
     def run(self) -> bool:
         """Run the bootstrap process."""
@@ -88,14 +124,20 @@ class Bootstrap:
                 return False
 
             # Success
+            self._log("Bootstrap completed successfully")
             self._print_success()
+            self.progress.info(f"Log saved to: {self.log_file}")
             return True
 
         except KeyboardInterrupt:
+            self._log("Interrupted by user", "warning")
             self.progress.fail("Interrupted by user")
+            self.progress.info(f"Log saved to: {self.log_file}")
             return False
         except Exception as e:
+            self._log(f"Unexpected error: {e}", "error")
             self.progress.fail(f"Unexpected error: {e}")
+            self.progress.info(f"Log saved to: {self.log_file}")
             if not self.no_rollback and self.config.rollback.restore_on_failure:
                 self._rollback()
             return False
@@ -212,10 +254,17 @@ class Bootstrap:
             self.state.complete_phase(Phase.INITIAL_SETUP, PhaseStatus.SUCCESS, "Dry run", start)
             return True
 
-        # Get configuration
+        # Get configuration (all optional - press Enter to skip)
+        self.progress.info("Configure static IP (press Enter to skip if already configured):")
         static_ip = self._prompt("Static IP (e.g., 192.168.1.100/24)", "")
-        gateway = self._prompt("Gateway", self.config.network.default_gateway)
-        dns = self._prompt("DNS server", self.config.network.default_dns)
+
+        if static_ip:
+            gateway = self._prompt("Gateway", self.config.network.default_gateway)
+            dns = self._prompt("DNS server", self.config.network.default_dns)
+        else:
+            gateway = ""
+            dns = ""
+            self.progress.info("  Skipping network configuration")
 
         # Create snapshot before changes
         if self.config.rollback.snapshot_before_deploy:
@@ -227,23 +276,33 @@ class Bootstrap:
                 )
 
         # Run initial setup
-        with self.progress.task("Running initial-setup.sh"):
-            env = {}
-            if static_ip:
-                env["STATIC_IP"] = static_ip
-            if gateway:
-                env["GATEWAY"] = gateway
-            if dns:
-                env["DNS"] = dns
+        env = {}
+        if static_ip:
+            env["STATIC_IP"] = static_ip
+        if gateway:
+            env["GATEWAY"] = gateway
+        if dns:
+            env["DNS"] = dns
 
-            result = self.ssh.run_script(
-                f"{self.REMOTE_DIR}/initial-setup.sh",
-                env=env,
-                timeout=self.config.timeouts.initial_setup,
-            )
-            if not result.success:
-                self.progress.fail("Initial setup failed", result.stderr)
-                return False
+        self._log(f"Running initial-setup.sh with env: {env}")
+        self.progress.info("Running initial-setup.sh...")
+        result = self.ssh.run_script(
+            f"{self.REMOTE_DIR}/initial-setup.sh",
+            env=env,
+            timeout=self.config.timeouts.initial_setup,
+        )
+        self._log_result("initial-setup.sh", result)
+        if not result.success:
+            self._log("Initial setup failed", "error")
+            self.progress.fail("Initial setup failed")
+            if result.stderr:
+                self.progress.info(f"  {result.stderr[:500]}")
+            if result.stdout:
+                lines = result.stdout.strip().split("\n")
+                for line in lines[-10:]:
+                    self.progress.info(f"  {line}")
+            self.progress.info(f"  Full log: {self.log_file}")
+            return False
 
         # Reboot
         if self.mode == "manual":
@@ -301,11 +360,29 @@ class Bootstrap:
             return True
 
         # Configure secrets on target
-        with self.progress.task("Configuring secrets"):
-            self.ssh.run(f"cd {self.REMOTE_DIR} && ./secrets.sh init 2>/dev/null || true")
-            for key, value in self._secrets.items():
-                if value:
-                    self.ssh.run(f"cd {self.REMOTE_DIR} && ./secrets.sh set {key} '{value}'")
+        with self.progress.task("Initializing secrets storage"):
+            result = self.ssh.run(f"cd {self.REMOTE_DIR} && ./secrets.sh init 2>&1 || true")
+            if result.stdout:
+                self.progress.info(f"  {result.stdout.split(chr(10))[0]}")
+
+        secrets_set = 0
+        secrets_failed = 0
+        for key, value in self._secrets.items():
+            if value:
+                with self.progress.task(f"Setting {key}"):
+                    result = self.ssh.run(
+                        f"cd {self.REMOTE_DIR} && ./secrets.sh set {key} '{value}' 2>&1"
+                    )
+                    if result.success:
+                        secrets_set += 1
+                    else:
+                        secrets_failed += 1
+                        self.progress.warn(f"Failed to set {key}: {result.stderr or result.stdout}")
+
+        if secrets_failed > 0:
+            self.progress.warn(f"Set {secrets_set} secrets, {secrets_failed} failed")
+        else:
+            self.progress.ok(f"Set {secrets_set} secrets")
 
         self.state.complete_phase(Phase.SECRETS, PhaseStatus.SUCCESS, "OK", start)
         self.progress.phase_summary()
@@ -336,32 +413,58 @@ class Bootstrap:
 
         # Deploy base stack
         if self.deploy_type in ["base", "full"]:
-            with self.progress.task("Running deploy-edge-server.sh"):
-                result = self.ssh.run(
-                    f"cd {self.REMOTE_DIR} && "
-                    f"eval $(./secrets.sh export) && "
-                    f"sudo -E ./deploy-edge-server.sh",
-                    timeout=self.config.timeouts.deployment_base,
-                )
-                if not result.success:
-                    self.progress.fail("Base stack deployment failed", result.stderr)
-                    return False
-                self.progress.ok("Base stack deployed")
+            self._log("Starting base stack deployment")
+            self.progress.info("Deploying base stack (Tailscale, MQTT, Home Assistant)...")
+            self.progress.info(f"  Running deploy-edge-server.sh (timeout: {self.config.timeouts.deployment_base}s)")
+            result = self.ssh.run(
+                f"cd {self.REMOTE_DIR} && "
+                f"eval $(./secrets.sh export 2>/dev/null) && "
+                f"sudo -E ./deploy-edge-server.sh 2>&1",
+                timeout=self.config.timeouts.deployment_base,
+            )
+            self._log_result("deploy-edge-server.sh", result)
+            if not result.success:
+                self._log("Base stack deployment failed", "error")
+                self.progress.fail("Base stack deployment failed")
+                if result.stderr:
+                    self.progress.info(f"  stderr: {result.stderr[:500]}")
+                if result.stdout:
+                    lines = result.stdout.strip().split("\n")
+                    self.progress.info("  Last output lines:")
+                    for line in lines[-10:]:
+                        self.progress.info(f"    {line}")
+                self.progress.info(f"  Full log: {self.log_file}")
+                return False
+            self._log("Base stack deployed successfully")
+            self.progress.ok("Base stack deployed")
 
         # Deploy security stack
         if self.deploy_type in ["security", "full"]:
             self.state.start_phase(Phase.DEPLOY_SECURITY)
-            with self.progress.task("Running deploy-security.sh"):
-                result = self.ssh.run(
-                    f"cd {self.REMOTE_DIR} && "
-                    f"eval $(./secrets.sh export) && "
-                    f"sudo -E ./deploy-security.sh",
-                    timeout=self.config.timeouts.deployment_security,
-                )
-                if not result.success:
-                    self.progress.fail("Security stack deployment failed", result.stderr)
-                    return False
-                self.progress.ok("Security stack deployed")
+            self._log("Starting security stack deployment")
+            self.progress.info("Deploying security stack (Frigate NVR)...")
+            self.progress.info(f"  Running deploy-security.sh (timeout: {self.config.timeouts.deployment_security}s)")
+            result = self.ssh.run(
+                f"cd {self.REMOTE_DIR} && "
+                f"eval $(./secrets.sh export 2>/dev/null) && "
+                f"sudo -E ./deploy-security.sh 2>&1",
+                timeout=self.config.timeouts.deployment_security,
+            )
+            self._log_result("deploy-security.sh", result)
+            if not result.success:
+                self._log("Security stack deployment failed", "error")
+                self.progress.fail("Security stack deployment failed")
+                if result.stderr:
+                    self.progress.info(f"  stderr: {result.stderr[:500]}")
+                if result.stdout:
+                    lines = result.stdout.strip().split("\n")
+                    self.progress.info("  Last output lines:")
+                    for line in lines[-10:]:
+                        self.progress.info(f"    {line}")
+                self.progress.info(f"  Full log: {self.log_file}")
+                return False
+            self._log("Security stack deployed successfully")
+            self.progress.ok("Security stack deployed")
 
         self.state.complete_phase(Phase.DEPLOY_BASE, PhaseStatus.SUCCESS, "OK", start)
         self.progress.phase_summary()

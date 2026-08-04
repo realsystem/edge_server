@@ -5,6 +5,12 @@
 # SSH connection settings
 SSH_TIMEOUT = 10
 SSH_RETRIES = 3
+# SSH_KEY_FILE = ~/.ssh/deploy
+# SSH_STRICT_HOST_KEY_CHECKING = accept-new
+
+[logging]
+# Log directory (default: ~/.edge-server/logs)
+# LOG_DIR = /var/log/edge_server
 
 [timeouts]
 # Per-phase timeouts in seconds
@@ -37,31 +43,6 @@ VERIFY_FRIGATE = true
 HA_PORT = 8123
 MQTT_PORT = 1883
 FRIGATE_PORT = 5000
-
-[unifi]
-# UniFi controller integration (optional)
-ENABLED = false
-CONTROLLER_URL = https://192.168.1.1:8443
-SITE = default
-
-# Camera VLAN settings
-CAMERA_VLAN_ID = 10
-CAMERA_VLAN_NAME = CAMERAS
-CAMERA_SUBNET = 192.168.10.0/24
-
-# IoT VLAN settings
-IOT_VLAN_ID = 20
-IOT_VLAN_NAME = IOT
-IOT_SUBNET = 192.168.20.0/24
-
-[unifi.ports]
-# Port assignments (port_number = profile_name)
-# Uncomment and customize for your setup
-# 2 = CAMERA-PORT
-# 3 = CAMERA-PORT
-# 4 = CAMERA-PORT
-# 5 = CAMERA-PORT
-# 6 = IOT-PORT
 
 [rollback]
 # Automatic rollback on failure

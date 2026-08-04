@@ -66,6 +66,13 @@ class SSHConfig:
 
 
 @dataclass
+class LoggingConfig:
+    """Logging settings."""
+
+    log_dir: str = ""  # Empty means use default (~/.edge-server/logs)
+
+
+@dataclass
 class Config:
     """Main configuration container."""
 
@@ -74,6 +81,7 @@ class Config:
     services: ServiceConfig = field(default_factory=ServiceConfig)
     rollback: RollbackConfig = field(default_factory=RollbackConfig)
     ssh: SSHConfig = field(default_factory=SSHConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
 
     @classmethod
     def load(cls, config_path: Optional[Path] = None) -> "Config":
@@ -151,6 +159,12 @@ class Config:
             config.ssh.key_file = parser.get("target", "SSH_KEY_FILE", fallback=config.ssh.key_file)
             config.ssh.strict_host_key_checking = parser.get(
                 "target", "SSH_STRICT_HOST_KEY_CHECKING", fallback=config.ssh.strict_host_key_checking
+            )
+
+        # Logging
+        if parser.has_section("logging"):
+            config.logging.log_dir = parser.get(
+                "logging", "LOG_DIR", fallback=config.logging.log_dir
             )
 
         return config
