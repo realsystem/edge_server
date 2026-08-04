@@ -179,8 +179,7 @@ class TestDeploymentPhase:
 
         mock_ssh.run.return_value = SSHResult(
             0,
-            "2024-08-04 [INFO] Starting deployment\n"
-            "2024-08-04 [OK] Docker installed\n",
+            "2024-08-04 [INFO] Starting deployment\n" "2024-08-04 [OK] Docker installed\n",
             "",
         )
 
@@ -212,8 +211,7 @@ class TestDeploymentPhase:
 
         mock_ssh.run.return_value = SSHResult(
             1,
-            "2024-08-04 [INFO] Installing Docker\n"
-            "2024-08-04 [ERROR] Failed to pull image\n",
+            "2024-08-04 [INFO] Installing Docker\n" "2024-08-04 [ERROR] Failed to pull image\n",
             "docker: Error response from daemon",
         )
 

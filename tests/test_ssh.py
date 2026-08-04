@@ -64,9 +64,7 @@ class TestSSHClient:
 
     def test_ssh_args_with_key(self):
         """Test SSH arguments with key file."""
-        client = SSHClient(
-            host="example.com", user="testuser", key_file="/path/to/key"
-        )
+        client = SSHClient(host="example.com", user="testuser", key_file="/path/to/key")
         args = client._ssh_args()
 
         assert "-i" in args
@@ -100,9 +98,7 @@ class TestSSHRunWithProgress:
             progress_calls.append(elapsed)
 
         with patch("time.sleep"):  # Skip actual sleeping
-            result = client.run_with_progress(
-                "echo test", timeout=60, on_progress=on_progress
-            )
+            result = client.run_with_progress("echo test", timeout=60, on_progress=on_progress)
 
         assert result.success is True
         assert len(progress_calls) >= 2  # Progress was called multiple times
