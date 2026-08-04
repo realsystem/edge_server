@@ -1,9 +1,6 @@
 """Tests for SSH module."""
 
-import subprocess
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from ssh import SSHClient, SSHResult
 
