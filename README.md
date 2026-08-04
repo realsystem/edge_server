@@ -11,7 +11,20 @@ Headless Ubuntu edge server for Frigate NVR, Home Assistant, Mosquitto MQTT, and
 | **Mosquitto MQTT** | Lightweight message broker implementing MQTT protocol. The glue between Frigate, Home Assistant, and IoT sensors via publish/subscribe topics. | EMQX, HiveMQ, RabbitMQ, AWS IoT Core | Free | Low |
 | **Tailscale** | Zero-config mesh VPN built on WireGuard. Secure remote access without exposing ports to the internet. | WireGuard (manual), ZeroTier, OpenVPN, Cloudflare Tunnel | Free (personal use) | Very low |
 
-## Setup Flow
+## Quick Start (from laptop)
+
+```bash
+# Interactive deployment to target server
+./bootstrap.sh 192.168.1.100
+
+# Automated with secrets file
+./bootstrap.sh --auto --secrets-file ~/.edge-secrets.env 192.168.1.100
+
+# Dry run to see what would happen
+./bootstrap.sh --dry-run 192.168.1.100
+```
+
+## Manual Setup Flow
 
 ```
 Fresh Ubuntu Server → initial-setup.sh → reboot → deploy-edge-server.sh
@@ -104,6 +117,7 @@ docker compose pull && docker compose up -d
 
 ## Files
 
+- `bootstrap.sh` — Run from laptop to deploy to remote server
 - `initial-setup.sh` — Run once on fresh Ubuntu
 - `deploy-edge-server.sh` — Main deployment script (base system)
 - `deploy-security.sh` — Camera/NVR deployment (Frigate + cameras)

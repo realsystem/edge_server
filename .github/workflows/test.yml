@@ -1,0 +1,114 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint Shell Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Run ShellCheck
+        run: |
+          shellcheck -e SC1090,SC1091,SC2034,SC2016,SC2329 \
+            bootstrap.sh \
+            secrets.sh \
+            initial-setup.sh \
+            deploy-edge-server.sh \
+            deploy-security.sh \
+            testing/test-runner.sh \
+            testing/test-runner-full.sh \
+            testing/test-lite.sh \
+            testing/test-scripts.sh
+
+  syntax:
+    name: Validate Syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check bash syntax
+        run: |
+          for script in *.sh testing/*.sh; do
+            echo "Checking $script..."
+            bash -n "$script"
+          done
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Run script tests
+        run: ./testing/test-scripts.sh
+
+  docker-compose-validate:
+    name: Validate Docker Compose
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate compose files
+        run: |
+          for file in testing/docker-compose.*.yml; do
+            echo "Validating $file..."
+            docker compose -f "$file" config > /dev/null
+          done
+
+  integration-test:
+    name: Integration Test (Docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create test directories
+        run: |
+          mkdir -p testing/mock_storage
+          mkdir -p testing/mosquitto/config
+          mkdir -p testing/frigate-lite
+
+      - name: Start lite test stack
+        run: |
+          cd testing
+          docker compose -f docker-compose.lite.yml up -d
+          sleep 30
+
+      - name: Check container status
+        run: |
+          docker ps
+          # Verify containers are running
+          docker inspect --format='{{.State.Status}}' mosquitto-test | grep -q running
+          docker inspect --format='{{.State.Status}}' frigate-test | grep -q running
+
+      - name: Test Mosquitto health
+        run: |
+          docker exec mosquitto-test mosquitto_sub -t '$SYS/#' -C 1 -W 5
+
+      - name: Test Frigate API
+        run: |
+          curl -sf http://localhost:5000/api/version || exit 1
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          docker compose -f testing/docker-compose.lite.yml logs
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker compose -f testing/docker-compose.lite.yml down -v || true

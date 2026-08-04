@@ -11,7 +11,7 @@ LITE_COMPOSE := $(TESTING_DIR)/docker-compose.lite.yml
 FULL_COMPOSE := $(TESTING_DIR)/docker-compose.mac.yml
 HARNESS_COMPOSE := $(TESTING_DIR)/docker-compose.test-harness.yml
 
-.PHONY: help check check-mem-lite check-mem-full test test-dev test-ci test-full test-full-dev start start-full stop status logs clean reset lint mem
+.PHONY: help check check-mem-lite check-mem-full test test-dev test-ci test-full test-full-dev test-scripts start start-full stop status logs clean reset lint mem
 
 help:
 	@echo "Edge Server - Local Testing"
@@ -23,6 +23,7 @@ help:
 	@echo "  make test-full-dev  - Full tests, leave stack running"
 	@echo "  make start          - Start lite stack without tests"
 	@echo "  make start-full     - Start full stack without tests"
+	@echo "  make test-scripts   - Run shell script unit tests"
 	@echo "  make stop       - Stop all containers"
 	@echo "  make status     - Show container status"
 	@echo "  make logs       - Follow logs (Ctrl+C to exit)"
@@ -157,9 +158,13 @@ reset: clean
 	@docker compose -f $(LITE_COMPOSE) pull 2>/dev/null || true
 	@echo "Ready. Run: make test"
 
+# Run shell script unit tests
+test-scripts:
+	@cd $(TESTING_DIR) && ./test-scripts.sh
+
 lint:
 	@command -v shellcheck >/dev/null || (echo "Install shellcheck: brew install shellcheck" && exit 1)
-	@shellcheck -x *.sh testing/*.sh 2>/dev/null || true
+	@shellcheck -e SC1090,SC1091,SC2034 *.sh testing/*.sh
 	@echo "Lint complete"
 
 # Show memory usage of running test containers
