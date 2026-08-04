@@ -488,7 +488,7 @@ class Bootstrap:
             result = self.ssh.run(
                 f"cd {self.REMOTE_DIR} && "
                 f"eval $(./secrets.sh export 2>/dev/null) && "
-                f"BATCH_MODE=true sudo -E ./deploy-edge-server.sh",
+                f"export BATCH_MODE=true && sudo -E ./deploy-edge-server.sh",
                 timeout=timeout,
             )
 
@@ -518,7 +518,7 @@ class Bootstrap:
             result = self.ssh.run(
                 f"cd {self.REMOTE_DIR} && "
                 f"eval $(./secrets.sh export 2>/dev/null) && "
-                f"BATCH_MODE=true sudo -E ./deploy-security.sh",
+                f"export BATCH_MODE=true && sudo -E ./deploy-security.sh",
                 timeout=timeout,
             )
 
