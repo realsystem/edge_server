@@ -53,7 +53,8 @@ step()    { echo "[..] $*"; }
 #-------------------------------------------------------------------------------
 
 load_secrets() {
-    local secrets_script="$(dirname "$0")/secrets.sh"
+    local secrets_script
+    secrets_script="$(dirname "$0")/secrets.sh"
 
     # Try to load from secrets.sh if available
     if [[ -f "$secrets_script" ]] && [[ -f "$HOME/.edge-server-secrets/secrets.enc" ]]; then
@@ -730,7 +731,9 @@ cleanup_on_error() {
     error "Deployment failed"
     if [[ -d "$APP_DIR" ]] && command -v docker &>/dev/null; then
         warn "Stopping any started containers..."
-        cd "$APP_DIR" 2>/dev/null && docker compose down 2>/dev/null || true
+        if cd "$APP_DIR" 2>/dev/null; then
+            docker compose down 2>/dev/null || true
+        fi
     fi
 }
 

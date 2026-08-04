@@ -75,6 +75,7 @@ class TestProgress:
     def test_total_elapsed(self):
         """Test elapsed time tracking."""
         import time
+
         progress = Progress()
         time.sleep(0.1)
         elapsed = progress.total_elapsed()

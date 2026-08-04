@@ -10,6 +10,7 @@ from typing import Optional
 @dataclass
 class TimeoutConfig:
     """Timeout settings for each phase."""
+
     discovery: int = 30
     prerequisites: int = 60
     initial_setup: int = 300
@@ -25,6 +26,7 @@ class TimeoutConfig:
 @dataclass
 class NetworkConfig:
     """Network configuration defaults."""
+
     default_dns: str = "8.8.8.8"
     default_gateway: str = ""
     static_ip: str = ""
@@ -33,6 +35,7 @@ class NetworkConfig:
 @dataclass
 class ServiceConfig:
     """Service verification settings."""
+
     verify_tailscale: bool = True
     verify_homeassistant: bool = True
     verify_mqtt: bool = True
@@ -45,6 +48,7 @@ class ServiceConfig:
 @dataclass
 class RollbackConfig:
     """Rollback settings."""
+
     enabled: bool = True
     snapshot_before_deploy: bool = True
     restore_on_failure: bool = True
@@ -54,6 +58,7 @@ class RollbackConfig:
 @dataclass
 class SSHConfig:
     """SSH connection settings."""
+
     user: str = ""
     timeout: int = 10
     retries: int = 3
@@ -62,6 +67,7 @@ class SSHConfig:
 @dataclass
 class Config:
     """Main configuration container."""
+
     timeouts: TimeoutConfig = field(default_factory=TimeoutConfig)
     network: NetworkConfig = field(default_factory=NetworkConfig)
     services: ServiceConfig = field(default_factory=ServiceConfig)
@@ -90,10 +96,16 @@ class Config:
             t.initial_setup = parser.getint("timeouts", "INITIAL_SETUP", fallback=t.initial_setup)
             t.reboot_wait = parser.getint("timeouts", "REBOOT_WAIT", fallback=t.reboot_wait)
             t.secrets = parser.getint("timeouts", "SECRETS", fallback=t.secrets)
-            t.deployment_base = parser.getint("timeouts", "DEPLOYMENT_BASE", fallback=t.deployment_base)
-            t.deployment_security = parser.getint("timeouts", "DEPLOYMENT_SECURITY", fallback=t.deployment_security)
+            t.deployment_base = parser.getint(
+                "timeouts", "DEPLOYMENT_BASE", fallback=t.deployment_base
+            )
+            t.deployment_security = parser.getint(
+                "timeouts", "DEPLOYMENT_SECURITY", fallback=t.deployment_security
+            )
             t.verification = parser.getint("timeouts", "VERIFICATION", fallback=t.verification)
-            t.probe_interval = parser.getint("timeouts", "PROBE_INTERVAL", fallback=t.probe_interval)
+            t.probe_interval = parser.getint(
+                "timeouts", "PROBE_INTERVAL", fallback=t.probe_interval
+            )
             t.probe_count = parser.getint("timeouts", "PROBE_COUNT", fallback=t.probe_count)
 
         # Network
@@ -105,10 +117,16 @@ class Config:
         # Services
         if parser.has_section("services"):
             s = config.services
-            s.verify_tailscale = parser.getboolean("services", "VERIFY_TAILSCALE", fallback=s.verify_tailscale)
-            s.verify_homeassistant = parser.getboolean("services", "VERIFY_HOMEASSISTANT", fallback=s.verify_homeassistant)
+            s.verify_tailscale = parser.getboolean(
+                "services", "VERIFY_TAILSCALE", fallback=s.verify_tailscale
+            )
+            s.verify_homeassistant = parser.getboolean(
+                "services", "VERIFY_HOMEASSISTANT", fallback=s.verify_homeassistant
+            )
             s.verify_mqtt = parser.getboolean("services", "VERIFY_MQTT", fallback=s.verify_mqtt)
-            s.verify_frigate = parser.getboolean("services", "VERIFY_FRIGATE", fallback=s.verify_frigate)
+            s.verify_frigate = parser.getboolean(
+                "services", "VERIFY_FRIGATE", fallback=s.verify_frigate
+            )
             s.ha_port = parser.getint("services", "HA_PORT", fallback=s.ha_port)
             s.mqtt_port = parser.getint("services", "MQTT_PORT", fallback=s.mqtt_port)
             s.frigate_port = parser.getint("services", "FRIGATE_PORT", fallback=s.frigate_port)
@@ -117,8 +135,12 @@ class Config:
         if parser.has_section("rollback"):
             r = config.rollback
             r.enabled = parser.getboolean("rollback", "ENABLED", fallback=r.enabled)
-            r.snapshot_before_deploy = parser.getboolean("rollback", "SNAPSHOT_BEFORE_DEPLOY", fallback=r.snapshot_before_deploy)
-            r.restore_on_failure = parser.getboolean("rollback", "RESTORE_ON_FAILURE", fallback=r.restore_on_failure)
+            r.snapshot_before_deploy = parser.getboolean(
+                "rollback", "SNAPSHOT_BEFORE_DEPLOY", fallback=r.snapshot_before_deploy
+            )
+            r.restore_on_failure = parser.getboolean(
+                "rollback", "RESTORE_ON_FAILURE", fallback=r.restore_on_failure
+            )
             r.snapshot_dir = parser.get("rollback", "SNAPSHOT_DIR", fallback=r.snapshot_dir)
 
         # SSH/Target

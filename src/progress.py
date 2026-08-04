@@ -10,6 +10,7 @@ from typing import Iterator, Optional
 
 class Color:
     """ANSI color codes."""
+
     RED = "\033[0;31m"
     GREEN = "\033[0;32m"
     YELLOW = "\033[0;33m"
@@ -30,6 +31,7 @@ class Color:
 
 class Status(Enum):
     """Task status indicators."""
+
     PENDING = "○"
     RUNNING = "→"
     SUCCESS = "✓"
@@ -41,6 +43,7 @@ class Status(Enum):
 @dataclass
 class TaskResult:
     """Result of a task execution."""
+
     status: Status
     message: str
     elapsed: float
@@ -100,11 +103,23 @@ class Progress:
             self._print_task_status(description, Status.FAILURE, elapsed)
             raise
 
-    def task_status(self, description: str, status: Status, elapsed: Optional[float] = None, details: Optional[str] = None) -> None:
+    def task_status(
+        self,
+        description: str,
+        status: Status,
+        elapsed: Optional[float] = None,
+        details: Optional[str] = None,
+    ) -> None:
         """Print a task status line."""
         self._print_task_status(description, status, elapsed, details)
 
-    def _print_task_status(self, description: str, status: Status, elapsed: Optional[float] = None, details: Optional[str] = None) -> None:
+    def _print_task_status(
+        self,
+        description: str,
+        status: Status,
+        elapsed: Optional[float] = None,
+        details: Optional[str] = None,
+    ) -> None:
         """Internal: print formatted task status."""
         color = {
             Status.PENDING: Color.YELLOW,
@@ -120,14 +135,19 @@ class Progress:
 
         # Clear line and print
         sys.stdout.write("\r" + " " * 80 + "\r")
-        print(f"  {color}{status.value}{Color.RESET} {description}{detail_str}".ljust(55) + elapsed_str)
+        print(
+            f"  {color}{status.value}{Color.RESET} {description}{detail_str}".ljust(55)
+            + elapsed_str
+        )
 
     def waiting(self, message: str, elapsed: float, timeout: int) -> None:
         """Update waiting status with spinner."""
         spinner = self.SPINNERS[self._spinner_idx % len(self.SPINNERS)]
         self._spinner_idx += 1
         percent = min(100, int((elapsed / timeout) * 100)) if timeout > 0 else 0
-        sys.stdout.write(f"\r  {Color.BLUE}{spinner}{Color.RESET} {message}: {int(elapsed)}s / {timeout}s [{percent}%]")
+        sys.stdout.write(
+            f"\r  {Color.BLUE}{spinner}{Color.RESET} {message}: {int(elapsed)}s / {timeout}s [{percent}%]"
+        )
         sys.stdout.flush()
 
     def clear_line(self) -> None:

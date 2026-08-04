@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 class PhaseStatus(Enum):
     """Status of a phase."""
+
     PENDING = "pending"
     RUNNING = "running"
     SUCCESS = "success"
@@ -21,6 +22,7 @@ class PhaseStatus(Enum):
 
 class Phase(Enum):
     """Bootstrap phases."""
+
     INIT = "init"
     DISCOVERY = "discovery"
     PREREQUISITES = "prerequisites"
@@ -36,6 +38,7 @@ class Phase(Enum):
 @dataclass
 class PhaseResult:
     """Result of a phase execution."""
+
     phase: Phase
     status: PhaseStatus
     message: str
@@ -52,6 +55,7 @@ class PhaseResult:
 @dataclass
 class ValidationRule:
     """A validation rule for phase transitions."""
+
     name: str
     check: Callable[[], bool]
     error_message: str
@@ -60,6 +64,7 @@ class ValidationRule:
 @dataclass
 class PhaseDefinition:
     """Definition of a phase including validations and rollback."""
+
     phase: Phase
     pre_validations: List[ValidationRule] = field(default_factory=list)
     post_validations: List[ValidationRule] = field(default_factory=list)
@@ -152,11 +157,13 @@ class StateMachine:
                 if not rule.check():
                     failed.append(rule)
             except Exception as e:
-                failed.append(ValidationRule(
-                    name=rule.name,
-                    check=rule.check,
-                    error_message=f"{rule.error_message}: {e}",
-                ))
+                failed.append(
+                    ValidationRule(
+                        name=rule.name,
+                        check=rule.check,
+                        error_message=f"{rule.error_message}: {e}",
+                    )
+                )
         return len(failed) == 0, failed
 
     def validate_post(self, phase: Phase) -> tuple:
@@ -171,11 +178,13 @@ class StateMachine:
                 if not rule.check():
                     failed.append(rule)
             except Exception as e:
-                failed.append(ValidationRule(
-                    name=rule.name,
-                    check=rule.check,
-                    error_message=f"{rule.error_message}: {e}",
-                ))
+                failed.append(
+                    ValidationRule(
+                        name=rule.name,
+                        check=rule.check,
+                        error_message=f"{rule.error_message}: {e}",
+                    )
+                )
         return len(failed) == 0, failed
 
     def start_phase(self, phase: Phase) -> float:

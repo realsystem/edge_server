@@ -3,7 +3,7 @@
 # Usage: ./test-scripts.sh
 
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 
 # Colors
 RED='\033[0;31m'

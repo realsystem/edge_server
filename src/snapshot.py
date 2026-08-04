@@ -14,6 +14,7 @@ from ssh import SSHClient
 @dataclass
 class SnapshotManifest:
     """Manifest describing a snapshot."""
+
     id: str
     created_at: str
     phase: str
@@ -75,9 +76,7 @@ class SnapshotManager:
 
         # Backup Docker container list
         if include_docker:
-            result = self.ssh.run(
-                "docker ps --format '{{.Names}}' 2>/dev/null || true"
-            )
+            result = self.ssh.run("docker ps --format '{{.Names}}' 2>/dev/null || true")
             if result.success and result.stdout:
                 containers = result.stdout.strip().split("\n")
                 manifest.docker_containers = containers
@@ -93,17 +92,22 @@ class SnapshotManager:
                         )
 
         # Write manifest
-        manifest_json = json.dumps({
-            "id": manifest.id,
-            "created_at": manifest.created_at,
-            "phase": manifest.phase,
-            "description": manifest.description,
-            "files": manifest.files,
-            "docker_containers": manifest.docker_containers,
-            "metadata": manifest.metadata,
-        }, indent=2)
+        manifest_json = json.dumps(
+            {
+                "id": manifest.id,
+                "created_at": manifest.created_at,
+                "phase": manifest.phase,
+                "description": manifest.description,
+                "files": manifest.files,
+                "docker_containers": manifest.docker_containers,
+                "metadata": manifest.metadata,
+            },
+            indent=2,
+        )
 
-        self.ssh.run(f"cat > {snapshot_path}/manifest.json << 'EOF'\n{manifest_json}\nEOF", sudo=True)
+        self.ssh.run(
+            f"cat > {snapshot_path}/manifest.json << 'EOF'\n{manifest_json}\nEOF", sudo=True
+        )
 
         # Update latest symlink
         self.ssh.run(f"ln -sfn {snapshot_path} {self.SNAPSHOT_DIR}/latest", sudo=True)
@@ -225,15 +229,20 @@ class LocalSnapshotManager:
 
         # Write manifest
         manifest_file = snapshot_path / "manifest.json"
-        manifest_file.write_text(json.dumps({
-            "id": manifest.id,
-            "created_at": manifest.created_at,
-            "phase": manifest.phase,
-            "description": manifest.description,
-            "files": manifest.files,
-            "docker_containers": manifest.docker_containers,
-            "metadata": manifest.metadata,
-        }, indent=2))
+        manifest_file.write_text(
+            json.dumps(
+                {
+                    "id": manifest.id,
+                    "created_at": manifest.created_at,
+                    "phase": manifest.phase,
+                    "description": manifest.description,
+                    "files": manifest.files,
+                    "docker_containers": manifest.docker_containers,
+                    "metadata": manifest.metadata,
+                },
+                indent=2,
+            )
+        )
 
         # Update latest symlink
         latest = self.snapshot_dir / "latest"
@@ -270,6 +279,7 @@ class LocalSnapshotManager:
                 if path.exists():
                     if path.is_dir():
                         import shutil
+
                         shutil.rmtree(path)
                     else:
                         path.unlink()

@@ -100,7 +100,9 @@ class TestMain:
 
     def test_dry_run_flag(self):
         """Test --dry-run flag is recognized."""
-        with patch.object(sys, "argv", ["bootstrap", "--dry-run", "--auto", "--skip-init", "192.0.2.1"]):
+        with patch.object(
+            sys, "argv", ["bootstrap", "--dry-run", "--auto", "--skip-init", "192.0.2.1"]
+        ):
             # This will try to run but fail on SSH - that's OK for this test
             # We just want to verify the flag is parsed
             result = main()
@@ -116,15 +118,21 @@ class TestMain:
 
     def test_timeout_override(self):
         """Test --timeout override parsing."""
-        with patch.object(sys, "argv", [
-            "bootstrap",
-            "--dry-run",
-            "--auto",
-            "--skip-init",
-            "--timeout", "discovery=120",
-            "--timeout", "deployment_base=1800",
-            "192.0.2.1"
-        ]):
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "bootstrap",
+                "--dry-run",
+                "--auto",
+                "--skip-init",
+                "--timeout",
+                "discovery=120",
+                "--timeout",
+                "deployment_base=1800",
+                "192.0.2.1",
+            ],
+        ):
             # Capture the config that gets created
             original_bootstrap_init = Bootstrap.__init__
 

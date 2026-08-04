@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Test runner with pass/fail assertions
 # Usage: ./test-runner.sh [--no-teardown]
+# shellcheck disable=SC2317
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -46,7 +47,7 @@ for arg in "$@"; do
     esac
 done
 
-# Cleanup function
+# Cleanup function (called via trap)
 cleanup() {
     if [ "$NO_TEARDOWN" = false ]; then
         section "Teardown"
@@ -142,6 +143,7 @@ fi
 section "Service Connectivity"
 
 # Test: MQTT broker accepting connections
+# shellcheck disable=SC2016 # $SYS is a literal MQTT topic, not a variable
 if timeout 5 docker exec mosquitto-test mosquitto_sub -t '$SYS/#' -C 1 -W 3 >/dev/null 2>&1; then
     pass "MQTT broker accepting connections (port 1883)"
 else

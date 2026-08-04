@@ -10,6 +10,7 @@ from typing import List, Optional, Tuple
 @dataclass
 class SSHResult:
     """Result of an SSH command."""
+
     returncode: int
     stdout: str
     stderr: str
@@ -40,9 +41,12 @@ class SSHClient:
         """Build SSH command arguments."""
         args = [
             "ssh",
-            "-o", "ConnectTimeout=" + str(self.timeout),
-            "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=" + str(self.timeout),
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            "BatchMode=yes",
         ]
         if self.key_file:
             args.extend(["-i", str(self.key_file)])
@@ -53,9 +57,12 @@ class SSHClient:
         """Build SCP command arguments."""
         args = [
             "scp",
-            "-o", "ConnectTimeout=" + str(self.timeout),
-            "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=" + str(self.timeout),
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            "BatchMode=yes",
         ]
         if self.key_file:
             args.extend(["-i", str(self.key_file)])
@@ -145,7 +152,9 @@ class SSHClient:
             time.sleep(interval)
         return False, elapsed
 
-    def run_script(self, script_path: str, env: Optional[dict] = None, sudo: bool = True, timeout: int = 600) -> SSHResult:
+    def run_script(
+        self, script_path: str, env: Optional[dict] = None, sudo: bool = True, timeout: int = 600
+    ) -> SSHResult:
         """Run a script on remote host."""
         env_str = " ".join(f"{k}='{v}'" for k, v in (env or {}).items())
         if env_str:
@@ -167,9 +176,11 @@ class SSHClient:
         for line in result.stdout.split("\n"):
             if "|" in line:
                 parts = line.split("|")
-                containers.append({
-                    "name": parts[0],
-                    "status": parts[1] if len(parts) > 1 else "",
-                    "ports": parts[2] if len(parts) > 2 else "",
-                })
+                containers.append(
+                    {
+                        "name": parts[0],
+                        "status": parts[1] if len(parts) > 1 else "",
+                        "ports": parts[2] if len(parts) > 2 else "",
+                    }
+                )
         return containers

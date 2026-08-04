@@ -247,7 +247,9 @@ class Bootstrap:
         if self.mode == "manual":
             if not self._confirm("Reboot target now?"):
                 self.progress.skip("Reboot skipped")
-                self.state.complete_phase(Phase.INITIAL_SETUP, PhaseStatus.SUCCESS, "No reboot", start)
+                self.state.complete_phase(
+                    Phase.INITIAL_SETUP, PhaseStatus.SUCCESS, "No reboot", start
+                )
                 return True
 
         with self.progress.task("Rebooting"):
@@ -283,7 +285,9 @@ class Bootstrap:
         if self.secrets_file and self.secrets_file.exists():
             self._load_secrets_file()
         else:
-            self._secrets["TAILSCALE_AUTH_KEY"] = self._prompt("Tailscale auth key", "", secret=True)
+            self._secrets["TAILSCALE_AUTH_KEY"] = self._prompt(
+                "Tailscale auth key", "", secret=True
+            )
             self._secrets["MQTT_USER"] = self._prompt("MQTT username", "homeassistant")
             self._secrets["MQTT_PASS"] = self._prompt("MQTT password", "", secret=True)
             self._secrets["REOLINK_USER"] = self._prompt("Camera username", "admin")
@@ -394,7 +398,9 @@ class Bootstrap:
                 self.config.services.ha_port,
             )
             if health.status == HealthStatus.HEALTHY:
-                self.progress.ok(f"Home Assistant: http://{self.target}:{self.config.services.ha_port}")
+                self.progress.ok(
+                    f"Home Assistant: http://{self.target}:{self.config.services.ha_port}"
+                )
                 passed += 1
             else:
                 self.progress.warn(f"Home Assistant: {health.message}")
@@ -417,7 +423,9 @@ class Bootstrap:
                 self.config.services.frigate_port,
             )
             if health.status == HealthStatus.HEALTHY:
-                self.progress.ok(f"Frigate: http://{self.target}:{self.config.services.frigate_port}")
+                self.progress.ok(
+                    f"Frigate: http://{self.target}:{self.config.services.frigate_port}"
+                )
                 passed += 1
             else:
                 self.progress.warn(f"Frigate: {health.message}")
@@ -465,6 +473,7 @@ class Bootstrap:
         display_default = f" [{default}]" if default and not secret else ""
         if secret:
             import getpass
+
             value = getpass.getpass(f"  {prompt}{display_default}: ")
         else:
             value = input(f"  {prompt}{display_default}: ")
@@ -503,7 +512,9 @@ Examples:
     parser.add_argument("--auto", action="store_true", help="Non-interactive mode")
     parser.add_argument("--config", type=Path, help="Config file path")
     parser.add_argument("--secrets-file", type=Path, help="Secrets file path")
-    parser.add_argument("--deploy", choices=["base", "security", "full"], default="full", help="Deployment type")
+    parser.add_argument(
+        "--deploy", choices=["base", "security", "full"], default="full", help="Deployment type"
+    )
     parser.add_argument("--user", default=os.environ.get("USER", "root"), help="SSH user")
     parser.add_argument("--skip-init", action="store_true", help="Skip initial setup")
     parser.add_argument("--no-rollback", action="store_true", help="Disable automatic rollback")

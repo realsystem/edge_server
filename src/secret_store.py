@@ -15,6 +15,7 @@ import base64
 @dataclass
 class Secret:
     """A single secret."""
+
     key: str
     value: str
 
@@ -48,7 +49,9 @@ class SecretsManager:
             return self._password
         if pwd := os.environ.get("SECRETS_PASSWORD"):
             return pwd
-        raise ValueError("No password provided. Set SECRETS_PASSWORD or pass password to constructor.")
+        raise ValueError(
+            "No password provided. Set SECRETS_PASSWORD or pass password to constructor."
+        )
 
     def _get_fernet(self) -> Fernet:
         """Get or create Fernet instance."""

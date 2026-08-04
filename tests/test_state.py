@@ -159,15 +159,17 @@ class TestStateMachine:
         sm = StateMachine()
 
         # Register phase with validations
-        sm.register_phase(PhaseDefinition(
-            phase=Phase.DISCOVERY,
-            pre_validations=[
-                ValidationRule("check_true", lambda: True, "Should pass"),
-            ],
-            post_validations=[
-                ValidationRule("check_false", lambda: False, "Should fail"),
-            ],
-        ))
+        sm.register_phase(
+            PhaseDefinition(
+                phase=Phase.DISCOVERY,
+                pre_validations=[
+                    ValidationRule("check_true", lambda: True, "Should pass"),
+                ],
+                post_validations=[
+                    ValidationRule("check_false", lambda: False, "Should fail"),
+                ],
+            )
+        )
 
         # Pre-validation passes
         valid, failed = sm.validate_pre(Phase.DISCOVERY)
@@ -185,14 +187,18 @@ class TestStateMachine:
         rollback_called = []
 
         sm = StateMachine()
-        sm.register_phase(PhaseDefinition(
-            phase=Phase.DISCOVERY,
-            rollback=lambda: rollback_called.append(Phase.DISCOVERY) or True,
-        ))
-        sm.register_phase(PhaseDefinition(
-            phase=Phase.PREREQUISITES,
-            rollback=lambda: rollback_called.append(Phase.PREREQUISITES) or True,
-        ))
+        sm.register_phase(
+            PhaseDefinition(
+                phase=Phase.DISCOVERY,
+                rollback=lambda: rollback_called.append(Phase.DISCOVERY) or True,
+            )
+        )
+        sm.register_phase(
+            PhaseDefinition(
+                phase=Phase.PREREQUISITES,
+                rollback=lambda: rollback_called.append(Phase.PREREQUISITES) or True,
+            )
+        )
 
         # Set up state
         sm.current_phase = Phase.PREREQUISITES

@@ -81,6 +81,7 @@ class TestServiceChecker:
 
     def test_check_http_success(self):
         """Test checking working HTTP endpoint."""
+
         # Start a simple HTTP server
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
@@ -107,6 +108,7 @@ class TestServiceChecker:
 
     def test_check_http_json(self):
         """Test checking HTTP JSON endpoint."""
+
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
                 self.send_response(200)
@@ -137,6 +139,7 @@ class TestServiceChecker:
 
     def test_check_http_expected_codes(self):
         """Test checking HTTP with expected codes including 401."""
+
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
                 self.send_response(401)

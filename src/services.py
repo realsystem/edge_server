@@ -14,6 +14,7 @@ from ssh import SSHClient
 
 class HealthStatus(Enum):
     """Service health status."""
+
     HEALTHY = "healthy"
     UNHEALTHY = "unhealthy"
     UNKNOWN = "unknown"
@@ -23,6 +24,7 @@ class HealthStatus(Enum):
 @dataclass
 class ServiceHealth:
     """Health check result for a service."""
+
     name: str
     status: HealthStatus
     message: str
@@ -80,6 +82,7 @@ class ServiceChecker:
         try:
             req = urllib.request.Request(url, method="GET")
             import time
+
             start = time.monotonic()
             with urllib.request.urlopen(req, timeout=timeout) as response:
                 elapsed = time.monotonic() - start
@@ -132,6 +135,7 @@ class ServiceChecker:
         try:
             req = urllib.request.Request(url, method="GET")
             import time
+
             start = time.monotonic()
             with urllib.request.urlopen(req, timeout=timeout) as response:
                 elapsed = time.monotonic() - start
@@ -217,7 +221,9 @@ class ServiceChecker:
                 message="Failed to parse status",
             )
 
-    def check_mqtt(self, host: str = "localhost", port: int = 1883, timeout: int = 5) -> ServiceHealth:
+    def check_mqtt(
+        self, host: str = "localhost", port: int = 1883, timeout: int = 5
+    ) -> ServiceHealth:
         """Check MQTT broker via subscribe test."""
         cmd = f"timeout {timeout} mosquitto_sub -h {host} -p {port} -t '$SYS/#' -C 1 -W {timeout}"
         if self.ssh:
@@ -229,9 +235,11 @@ class ServiceChecker:
                 result_proc = subprocess.run(
                     cmd, shell=True, capture_output=True, text=True, timeout=timeout + 5
                 )
+
                 class Result:
                     success = result_proc.returncode == 0
                     stderr = result_proc.stderr
+
                 result = Result()
             except Exception as e:
                 return ServiceHealth(
@@ -249,7 +257,7 @@ class ServiceChecker:
         return ServiceHealth(
             name="mqtt",
             status=HealthStatus.UNHEALTHY,
-            message=result.stderr if hasattr(result, 'stderr') else "No response",
+            message=result.stderr if hasattr(result, "stderr") else "No response",
         )
 
     def check_docker_container(self, container_name: str) -> ServiceHealth:
@@ -260,10 +268,12 @@ class ServiceChecker:
         else:
             try:
                 proc = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+
                 class Result:
                     success = proc.returncode == 0
                     stdout = proc.stdout.strip()
                     stderr = proc.stderr
+
                 result = Result()
             except Exception as e:
                 return ServiceHealth(
