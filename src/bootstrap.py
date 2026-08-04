@@ -298,7 +298,7 @@ class Bootstrap:
         )
 
         def on_setup_line(line: str) -> None:
-            if line.startswith("[") or line.startswith(">>>"):
+            if "[INFO]" in line or "[OK]" in line or "[WARN]" in line or "[ERROR]" in line:
                 self.progress.info(f"  {line}")
             self._log(f"[initial-setup] {line}")
 
@@ -489,7 +489,7 @@ class Bootstrap:
             )
 
             def on_deploy_line(line: str) -> None:
-                if line.startswith("[") or line.startswith(">>>"):
+                if "[INFO]" in line or "[OK]" in line or "[WARN]" in line or "[ERROR]" in line:
                     self.progress.info(f"    {line}")
                 self._log(f"[deploy-edge-server] {line}")
 
@@ -526,7 +526,7 @@ class Bootstrap:
             )
 
             def on_security_line(line: str) -> None:
-                if line.startswith("[") or line.startswith(">>>"):
+                if "[INFO]" in line or "[OK]" in line or "[WARN]" in line or "[ERROR]" in line:
                     self.progress.info(f"    {line}")
                 self._log(f"[deploy-security] {line}")
 
