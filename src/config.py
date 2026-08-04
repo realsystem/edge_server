@@ -73,6 +73,13 @@ class LoggingConfig:
 
 
 @dataclass
+class SecretsConfig:
+    """Secrets settings."""
+
+    secrets_dir: str = ""  # Empty means use default (~/.edge-server-secrets)
+
+
+@dataclass
 class Config:
     """Main configuration container."""
 
@@ -82,6 +89,7 @@ class Config:
     rollback: RollbackConfig = field(default_factory=RollbackConfig)
     ssh: SSHConfig = field(default_factory=SSHConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    secrets: SecretsConfig = field(default_factory=SecretsConfig)
 
     @classmethod
     def load(cls, config_path: Optional[Path] = None) -> "Config":
@@ -165,6 +173,12 @@ class Config:
         if parser.has_section("logging"):
             config.logging.log_dir = parser.get(
                 "logging", "LOG_DIR", fallback=config.logging.log_dir
+            )
+
+        # Secrets
+        if parser.has_section("secrets"):
+            config.secrets.secrets_dir = parser.get(
+                "secrets", "SECRETS_DIR", fallback=config.secrets.secrets_dir
             )
 
         return config

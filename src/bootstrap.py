@@ -17,6 +17,7 @@ from ssh import SSHClient, SSHResult
 from state import Phase, PhaseStatus, StateMachine
 
 DEFAULT_LOG_DIR = Path.home() / ".edge-server" / "logs"
+DEFAULT_SECRETS_DIR = "~/.edge-server-secrets"
 
 
 class Bootstrap:
@@ -79,8 +80,10 @@ class Bootstrap:
         )
         self.logger = logging.getLogger("bootstrap")
         self.log_file = log_file
+        self.secrets_dir = self.config.secrets.secrets_dir or DEFAULT_SECRETS_DIR
         self.logger.info(f"Bootstrap started for target: {self.target}")
         self.logger.info(f"Mode: {self.mode}, Deploy type: {self.deploy_type}")
+        self.logger.info(f"Secrets dir: {self.secrets_dir}")
 
     def _log(self, message: str, level: str = "info") -> None:
         """Log a message."""
@@ -224,13 +227,15 @@ class Bootstrap:
             return True
 
         # Copy scripts
-        with self.progress.task("Copying scripts"):
-            self.ssh.mkdir(self.REMOTE_DIR)
-            scripts = [self.script_dir / s for s in self.SCRIPTS if (self.script_dir / s).exists()]
-            if not self.ssh.copy_files(scripts, self.REMOTE_DIR):
-                self.progress.fail("Failed to copy scripts")
-                return False
-            self.ssh.run(f"chmod +x {self.REMOTE_DIR}/*.sh")
+        self.progress.info(f"Copying scripts to {self.target}:{self.REMOTE_DIR}...")
+        self.ssh.mkdir(self.REMOTE_DIR)
+        scripts = [self.script_dir / s for s in self.SCRIPTS if (self.script_dir / s).exists()]
+        self.progress.info(f"  Scripts: {', '.join(s.name for s in scripts)}")
+        if not self.ssh.copy_files(scripts, self.REMOTE_DIR):
+            self.progress.fail("Failed to copy scripts")
+            return False
+        self.ssh.run(f"chmod +x {self.REMOTE_DIR}/*.sh")
+        self.progress.ok(f"Copied {len(scripts)} scripts")
 
         self.state.complete_phase(Phase.PREREQUISITES, PhaseStatus.SUCCESS, "OK", start)
         self.progress.phase_summary()
@@ -268,12 +273,13 @@ class Bootstrap:
 
         # Create snapshot before changes
         if self.config.rollback.snapshot_before_deploy:
-            with self.progress.task("Creating snapshot"):
-                self.snapshots.create(
-                    "initial_setup",
-                    "Before initial setup",
-                    paths=["/etc/netplan"],
-                )
+            self.progress.info("Creating pre-setup snapshot...")
+            self.snapshots.create(
+                "initial_setup",
+                "Before initial setup",
+                paths=["/etc/netplan"],
+            )
+            self.progress.ok("Snapshot created")
 
         # Run initial setup
         env = {}
@@ -360,30 +366,71 @@ class Bootstrap:
             return True
 
         # Configure secrets on target
-        with self.progress.task("Initializing secrets storage"):
-            result = self.ssh.run(f"cd {self.REMOTE_DIR} && ./secrets.sh init 2>&1 || true")
-            if result.stdout:
-                self.progress.info(f"  {result.stdout.split(chr(10))[0]}")
+        # Check if secrets already initialized
+        check_result = self.ssh.run(f"[ -f {self.secrets_dir}/secrets.enc ]")
+        if check_result.success:
+            self.progress.ok("Secrets storage already initialized")
+        else:
+            # Need to initialize - get password from user in manual mode
+            if self.mode == "manual":
+                secrets_pass = self._prompt("Create secrets storage password", "", secret=True)
+                if not secrets_pass:
+                    self.progress.fail("Secrets password required")
+                    self.state.complete_phase(Phase.SECRETS, PhaseStatus.FAILED, "No password", start)
+                    return False
+            else:
+                secrets_pass = os.environ.get("SECRETS_PASSWORD", "")
+                if not secrets_pass:
+                    self.progress.fail("SECRETS_PASSWORD env var required in auto mode")
+                    self.state.complete_phase(Phase.SECRETS, PhaseStatus.FAILED, "No password", start)
+                    return False
+
+            self.progress.info("Initializing secrets storage...")
+            result = self.ssh.run(
+                f"cd {self.REMOTE_DIR} && SECRETS_DIR='{self.secrets_dir}' SECRETS_PASSWORD='{secrets_pass}' "
+                f"./secrets.sh init <<< $'{secrets_pass}\\n{secrets_pass}' 2>&1"
+            )
+            self._log_result("secrets.sh init", result)
+            if not result.success:
+                self.progress.fail("Failed to initialize secrets storage")
+                if result.stdout:
+                    self.progress.info(f"  {result.stdout}")
+                if result.stderr:
+                    self.progress.info(f"  {result.stderr}")
+                self.progress.info(f"  Log: {self.log_file}")
+                self.state.complete_phase(Phase.SECRETS, PhaseStatus.FAILED, "Init failed", start)
+                return False
+            self.progress.ok("Secrets storage initialized")
+            # Store password for subsequent set commands
+            os.environ["SECRETS_PASSWORD"] = secrets_pass
 
         secrets_set = 0
         secrets_failed = 0
+        secrets_pass = os.environ.get("SECRETS_PASSWORD", "")
+        self.progress.info("Setting secrets...")
         for key, value in self._secrets.items():
             if value:
-                with self.progress.task(f"Setting {key}"):
-                    result = self.ssh.run(
-                        f"cd {self.REMOTE_DIR} && ./secrets.sh set {key} '{value}' 2>&1"
-                    )
-                    if result.success:
-                        secrets_set += 1
-                    else:
-                        secrets_failed += 1
-                        self.progress.warn(f"Failed to set {key}: {result.stderr or result.stdout}")
+                self.progress.info(f"  Setting {key}...")
+                env_prefix = f"SECRETS_DIR='{self.secrets_dir}'"
+                if secrets_pass:
+                    env_prefix += f" SECRETS_PASSWORD='{secrets_pass}'"
+                cmd = f"cd {self.REMOTE_DIR} && {env_prefix} ./secrets.sh set {key} '{value}' 2>&1"
+                result = self.ssh.run(cmd)
+                self._log_result(f"secrets.sh set {key}", result)
+                if result.success:
+                    secrets_set += 1
+                    self.progress.ok(f"    {key} set")
+                else:
+                    secrets_failed += 1
+                    self.progress.fail(f"    Failed: {result.stderr or result.stdout}")
 
         if secrets_failed > 0:
-            self.progress.warn(f"Set {secrets_set} secrets, {secrets_failed} failed")
-        else:
-            self.progress.ok(f"Set {secrets_set} secrets")
+            self.progress.fail(f"Set {secrets_set} secrets, {secrets_failed} failed")
+            self.progress.info(f"  Log: {self.log_file}")
+            self.state.complete_phase(Phase.SECRETS, PhaseStatus.FAILED, f"{secrets_failed} failed", start)
+            return False
 
+        self.progress.ok(f"Set {secrets_set} secrets")
         self.state.complete_phase(Phase.SECRETS, PhaseStatus.SUCCESS, "OK", start)
         self.progress.phase_summary()
         return True
@@ -403,13 +450,14 @@ class Bootstrap:
 
         # Create snapshot before deployment
         if self.config.rollback.snapshot_before_deploy:
-            with self.progress.task("Creating snapshot"):
-                self.snapshots.create(
-                    "deploy",
-                    "Before deployment",
-                    paths=["/opt/edge-server"],
-                    include_docker=True,
-                )
+            self.progress.info("Creating pre-deployment snapshot...")
+            self.snapshots.create(
+                "deploy",
+                "Before deployment",
+                paths=["/opt/edge-server"],
+                include_docker=True,
+            )
+            self.progress.ok("Snapshot created")
 
         # Deploy base stack
         if self.deploy_type in ["base", "full"]:
