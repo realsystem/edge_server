@@ -1,0 +1,67 @@
+# Lightweight Test Stack for MacBook
+# Single mock camera, minimal memory footprint
+
+services:
+  # Combined RTSP server + stream generator (single container)
+  mock-camera:
+    image: bluenviron/mediamtx:latest
+    container_name: mock-camera
+    restart: unless-stopped
+    ports:
+      - "8554:8554"
+    environment:
+      - MTX_PATHS_CAM1_SOURCE=publisher
+      - MTX_PATHS_CAM1_SUB_SOURCE=publisher
+    mem_limit: 128m
+
+  # Single ffmpeg stream (one camera only)
+  stream-gen:
+    image: jrottenberg/ffmpeg:4.4-alpine
+    container_name: stream-gen
+    restart: unless-stopped
+    depends_on:
+      - mock-camera
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        sleep 3
+        ffmpeg -re -f lavfi -i "testsrc=size=640x360:rate=5" \
+          -c:v libx264 -preset ultrafast -tune zerolatency -g 15 \
+          -f rtsp rtsp://mock-camera:8554/cam1
+    mem_limit: 128m
+
+  # Mosquitto MQTT (lightweight)
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: mosquitto-test
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config:ro
+    mem_limit: 64m
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-t", "$$SYS/#", "-C", "1", "-W", "3"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Frigate with reduced resources (1 camera, CPU detection)
+  frigate:
+    image: ghcr.io/blakeblackshear/frigate:stable
+    container_name: frigate-test
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      - TZ=America/Los_Angeles
+    volumes:
+      - ./frigate-lite:/config
+      - ./mock_storage:/media/frigate
+    shm_size: "64mb"
+    mem_limit: 1g
+    cpus: 2
+    depends_on:
+      mosquitto:
+        condition: service_healthy

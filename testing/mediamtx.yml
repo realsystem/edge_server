@@ -1,0 +1,35 @@
+# MediaMTX Configuration for Mock RTSP Streams
+
+logLevel: info
+logDestinations: [stdout]
+
+# RTSP server
+rtsp: true
+rtspAddress: :8554
+
+# RTMP server
+rtmp: true
+rtmpAddress: :1935
+
+# HLS server
+hls: true
+hlsAddress: :8888
+
+# WebRTC server
+webrtc: true
+webrtcAddress: :8889
+
+# Path defaults
+pathDefaults:
+  source: publisher
+
+# Named paths for cameras
+paths:
+  cam1_front:
+  cam1_front_sub:
+  cam2_rear:
+  cam2_rear_sub:
+  cam3_side:
+  cam3_side_sub:
+  cam4_gate:
+  cam4_gate_sub:

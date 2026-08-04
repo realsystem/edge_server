@@ -1,0 +1,140 @@
+# Mock RTSP Camera Feed Generator
+# Simulates 4x Reolink RLC-510A dual-stream cameras for local testing
+#
+# Streams provided:
+#   Main (1080p): rtsp://localhost:8554/cam1_front, cam2_rear, cam3_side, cam4_gate
+#   Sub (360p):   rtsp://localhost:8554/cam1_front_sub, cam2_rear_sub, etc.
+
+services:
+  #-----------------------------------------------------------------------------
+  # MediaMTX RTSP Server (formerly rtsp-simple-server)
+  #-----------------------------------------------------------------------------
+  rtsp-server:
+    image: bluenviron/mediamtx:latest
+    container_name: mock-rtsp-server
+    restart: unless-stopped
+    mem_limit: 64m
+    ports:
+      - "8554:8554"   # RTSP
+      - "1935:1935"   # RTMP
+      - "8888:8888"   # HLS
+      - "8889:8889"   # WebRTC
+    environment:
+      - MTX_PROTOCOLS=tcp
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro
+    networks:
+      - test-network
+
+  #-----------------------------------------------------------------------------
+  # Mock Camera Stream Generators (FFmpeg)
+  # Each publishes main (1080p) and sub (360p) streams
+  #-----------------------------------------------------------------------------
+
+  # Camera 1: Front
+  mock-cam1:
+    image: linuxserver/ffmpeg:latest
+    container_name: mock-cam1
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: 0.5
+    depends_on:
+      - rtsp-server
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        sleep 5
+        ffmpeg -re -f lavfi -i "testsrc2=size=1920x1080:rate=15,drawtext=text='CAM1 FRONT %{localtime}':fontsize=48:fontcolor=white:x=50:y=50" \
+               -f lavfi -i "sine=frequency=1000:sample_rate=48000" \
+               -c:v libx264 -preset ultrafast -tune zerolatency -g 30 -keyint_min 30 \
+               -c:a aac -b:a 64k \
+               -f rtsp -rtsp_transport tcp rtsp://rtsp-server:8554/cam1_front &
+        ffmpeg -re -f lavfi -i "testsrc2=size=640x360:rate=5,drawtext=text='CAM1 FRONT SUB %{localtime}':fontsize=24:fontcolor=white:x=20:y=20" \
+               -c:v libx264 -preset ultrafast -tune zerolatency -g 15 \
+               -f rtsp -rtsp_transport tcp rtsp://rtsp-server:8554/cam1_front_sub &
+        wait
+    networks:
+      - test-network
+
+  # Camera 2: Rear
+  mock-cam2:
+    image: linuxserver/ffmpeg:latest
+    container_name: mock-cam2
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: 0.5
+    depends_on:
+      - rtsp-server
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        sleep 6
+        ffmpeg -re -f lavfi -i "testsrc2=size=1920x1080:rate=15,drawtext=text='CAM2 REAR %{localtime}':fontsize=48:fontcolor=yellow:x=50:y=50" \
+               -f lavfi -i "sine=frequency=800:sample_rate=48000" \
+               -c:v libx264 -preset ultrafast -tune zerolatency -g 30 -keyint_min 30 \
+               -c:a aac -b:a 64k \
+               -f rtsp -rtsp_transport tcp rtsp://rtsp-server:8554/cam2_rear &
+        ffmpeg -re -f lavfi -i "testsrc2=size=640x360:rate=5,drawtext=text='CAM2 REAR SUB %{localtime}':fontsize=24:fontcolor=yellow:x=20:y=20" \
+               -c:v libx264 -preset ultrafast -tune zerolatency -g 15 \
+               -f rtsp -rtsp_transport tcp rtsp://rtsp-server:8554/cam2_rear_sub &
+        wait
+    networks:
+      - test-network
+
+  # Camera 3: Side
+  mock-cam3:
+    image: linuxserver/ffmpeg:latest
+    container_name: mock-cam3
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: 0.5
+    depends_on:
+      - rtsp-server
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        sleep 7
+        ffmpeg -re -f lavfi -i "testsrc2=size=1920x1080:rate=15,drawtext=text='CAM3 SIDE %{localtime}':fontsize=48:fontcolor=cyan:x=50:y=50" \
+               -f lavfi -i "sine=frequency=600:sample_rate=48000" \
+               -c:v libx264 -preset ultrafast -tune zerolatency -g 30 -keyint_min 30 \
+               -c:a aac -b:a 64k \
+               -f rtsp -rtsp_transport tcp rtsp://rtsp-server:8554/cam3_side &
+        ffmpeg -re -f lavfi -i "testsrc2=size=640x360:rate=5,drawtext=text='CAM3 SIDE SUB %{localtime}':fontsize=24:fontcolor=cyan:x=20:y=20" \
+               -c:v libx264 -preset ultrafast -tune zerolatency -g 15 \
+               -f rtsp -rtsp_transport tcp rtsp://rtsp-server:8554/cam3_side_sub &
+        wait
+    networks:
+      - test-network
+
+  # Camera 4: Gate
+  mock-cam4:
+    image: linuxserver/ffmpeg:latest
+    container_name: mock-cam4
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: 0.5
+    depends_on:
+      - rtsp-server
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        sleep 8
+        ffmpeg -re -f lavfi -i "testsrc2=size=1920x1080:rate=15,drawtext=text='CAM4 GATE %{localtime}':fontsize=48:fontcolor=magenta:x=50:y=50" \
+               -f lavfi -i "sine=frequency=400:sample_rate=48000" \
+               -c:v libx264 -preset ultrafast -tune zerolatency -g 30 -keyint_min 30 \
+               -c:a aac -b:a 64k \
+               -f rtsp -rtsp_transport tcp rtsp://rtsp-server:8554/cam4_gate &
+        ffmpeg -re -f lavfi -i "testsrc2=size=640x360:rate=5,drawtext=text='CAM4 GATE SUB %{localtime}':fontsize=24:fontcolor=magenta:x=20:y=20" \
+               -c:v libx264 -preset ultrafast -tune zerolatency -g 15 \
+               -f rtsp -rtsp_transport tcp rtsp://rtsp-server:8554/cam4_gate_sub &
+        wait
+    networks:
+      - test-network
+
+networks:
+  test-network:
+    name: edge-server-test

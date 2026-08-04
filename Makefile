@@ -1,0 +1,186 @@
+# Edge Server - Local Testing
+#
+# Usage:
+#   make test        - Start lightweight test stack (1 camera)
+#   make test-full   - Start full test stack (4 cameras)
+#   make stop        - Stop all containers
+#   make clean       - Stop and remove all data
+
+TESTING_DIR := testing
+LITE_COMPOSE := $(TESTING_DIR)/docker-compose.lite.yml
+FULL_COMPOSE := $(TESTING_DIR)/docker-compose.mac.yml
+HARNESS_COMPOSE := $(TESTING_DIR)/docker-compose.test-harness.yml
+
+.PHONY: help check check-mem-lite check-mem-full test test-dev test-ci test-full test-full-dev start start-full stop status logs clean reset lint mem
+
+help:
+	@echo "Edge Server - Local Testing"
+	@echo ""
+	@echo "Targets:"
+	@echo "  make test           - Run lite tests with pass/fail (auto-teardown)"
+	@echo "  make test-dev       - Lite tests, leave stack running"
+	@echo "  make test-full      - Run full tests (4 cameras, HA, auto-teardown)"
+	@echo "  make test-full-dev  - Full tests, leave stack running"
+	@echo "  make start          - Start lite stack without tests"
+	@echo "  make start-full     - Start full stack without tests"
+	@echo "  make stop       - Stop all containers"
+	@echo "  make status     - Show container status"
+	@echo "  make logs       - Follow logs (Ctrl+C to exit)"
+	@echo "  make clean      - Stop and remove all test data"
+	@echo "  make lint       - Check shell scripts with shellcheck"
+	@echo "  make mem        - Show memory usage of running containers"
+	@echo ""
+	@echo "Memory Requirements:"
+	@echo "  Lite test:  ~1.3 GB (1 camera)"
+	@echo "  Full test:  ~3.2 GB (4 cameras + Home Assistant)"
+	@echo ""
+	@echo "Access (after start):"
+	@echo "  Frigate:  http://localhost:5000"
+	@echo "  MQTT:     localhost:1883"
+
+check:
+	@docker info >/dev/null 2>&1 || (echo "ERROR: Docker not running" && exit 1)
+	@echo "Docker OK"
+
+# Check memory requirements (in MB)
+LITE_MEM_REQUIRED := 1500
+FULL_MEM_REQUIRED := 3500
+
+check-mem-lite: check
+	@echo "Checking memory for lite test (requires $(LITE_MEM_REQUIRED) MB)..."
+	@mem=$$(docker info --format '{{.MemTotal}}' 2>/dev/null); \
+	if [ -z "$$mem" ] || [ "$$mem" = "0" ]; then \
+		echo "WARN: Could not detect Docker memory limit, skipping check"; \
+	else \
+		mem_mb=$$(echo "$$mem" | awk '{print int($$1/1024/1024)}'); \
+		echo "Docker memory limit: $${mem_mb} MB"; \
+		if [ "$${mem_mb}" -lt "$(LITE_MEM_REQUIRED)" ]; then \
+			echo "ERROR: Insufficient memory. Need $(LITE_MEM_REQUIRED) MB, have $${mem_mb} MB"; \
+			echo "Tip: Increase Docker memory in Docker Desktop > Settings > Resources"; \
+			exit 1; \
+		fi; \
+		echo "Memory OK"; \
+	fi
+
+check-mem-full: check
+	@echo "Checking memory for full test (requires $(FULL_MEM_REQUIRED) MB)..."
+	@mem=$$(docker info --format '{{.MemTotal}}' 2>/dev/null); \
+	if [ -z "$$mem" ] || [ "$$mem" = "0" ]; then \
+		echo "WARN: Could not detect Docker memory limit, skipping check"; \
+	else \
+		mem_mb=$$(echo "$$mem" | awk '{print int($$1/1024/1024)}'); \
+		echo "Docker memory limit: $${mem_mb} MB"; \
+		if [ "$${mem_mb}" -lt "$(FULL_MEM_REQUIRED)" ]; then \
+			echo "ERROR: Insufficient memory. Need $(FULL_MEM_REQUIRED) MB, have $${mem_mb} MB"; \
+			echo "Tip: Increase Docker memory in Docker Desktop > Settings > Resources"; \
+			exit 1; \
+		fi; \
+		echo "Memory OK"; \
+	fi
+
+dirs:
+	@mkdir -p $(TESTING_DIR)/mock_storage
+	@mkdir -p $(TESTING_DIR)/mosquitto/config
+	@mkdir -p $(TESTING_DIR)/frigate-lite
+
+# Run tests with assertions (tears down after)
+test: check
+	@cd $(TESTING_DIR) && ./test-runner.sh
+
+# Run tests but leave stack running for debugging
+test-dev: check
+	@cd $(TESTING_DIR) && ./test-runner.sh --no-teardown
+
+# CI-friendly test run
+test-ci: check
+	@cd $(TESTING_DIR) && NO_COLOR=1 ./test-runner.sh
+
+# Start stack without running tests
+start: check check-mem-lite dirs
+	@echo "Starting lightweight test stack..."
+	@docker compose -f $(LITE_COMPOSE) up -d
+	@echo "Waiting 20s for services..."
+	@sleep 20
+	@$(MAKE) -s status
+	@echo ""
+	@echo "Frigate: http://localhost:5000"
+
+# Full test - 4 mock cameras with assertions
+test-full: check
+	@cd $(TESTING_DIR) && ./test-runner-full.sh
+
+# Full test, leave stack running for debugging
+test-full-dev: check
+	@cd $(TESTING_DIR) && ./test-runner-full.sh --no-teardown
+
+# Start full stack without tests
+start-full: check check-mem-full dirs
+	@echo "Starting mock camera harness..."
+	@docker compose -f $(HARNESS_COMPOSE) up -d
+	@echo "Waiting 15s for streams..."
+	@sleep 15
+	@echo "Starting security stack..."
+	@docker compose -f $(FULL_COMPOSE) --env-file $(TESTING_DIR)/.env.mac up -d
+	@echo "Waiting 20s for services..."
+	@sleep 20
+	@$(MAKE) -s status
+	@echo ""
+	@echo "Frigate: http://localhost:5000"
+
+stop: check
+	@docker compose -f $(LITE_COMPOSE) down 2>/dev/null || true
+	@docker compose -f $(FULL_COMPOSE) down 2>/dev/null || true
+	@docker compose -f $(HARNESS_COMPOSE) down 2>/dev/null || true
+	@echo "Stopped"
+
+status: check
+	@echo "Containers:"
+	@docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | grep -E "frigate|mosquitto|mock|home" || echo "None running"
+
+logs: check
+	@docker compose -f $(LITE_COMPOSE) logs -f 2>/dev/null || \
+		docker compose -f $(FULL_COMPOSE) logs -f 2>/dev/null || \
+		echo "No stack running"
+
+logs-frigate:
+	@docker logs -f frigate-test 2>/dev/null || echo "Frigate not running"
+
+clean: stop
+	@rm -rf $(TESTING_DIR)/mock_storage
+	@rm -rf $(TESTING_DIR)/frigate-lite/*.db
+	@rm -rf $(TESTING_DIR)/mosquitto/data
+	@rm -rf $(TESTING_DIR)/mosquitto/log
+	@docker network rm edge-server-test 2>/dev/null || true
+	@echo "Cleaned"
+
+reset: clean
+	@docker compose -f $(LITE_COMPOSE) pull 2>/dev/null || true
+	@echo "Ready. Run: make test"
+
+lint:
+	@command -v shellcheck >/dev/null || (echo "Install shellcheck: brew install shellcheck" && exit 1)
+	@shellcheck -x *.sh testing/*.sh 2>/dev/null || true
+	@echo "Lint complete"
+
+# Show memory usage of running test containers
+mem: check
+	@echo ""
+	@echo "Container Memory Usage:"
+	@echo "----------------------------------------"
+	@docker stats --no-stream --format "table {{.Name}}\t{{.MemUsage}}\t{{.MemPerc}}" 2>/dev/null | grep -E "frigate|mosquitto|mock|stream|home" || echo "No test containers running"
+	@echo ""
+	@echo "Memory Limits (from compose):"
+	@echo "----------------------------------------"
+	@echo "Lite Stack (~1.3 GB total):"
+	@echo "  mock-camera (mediamtx):    128 MB"
+	@echo "  stream-gen (ffmpeg):       128 MB"
+	@echo "  mosquitto:                  64 MB"
+	@echo "  frigate:                 1,024 MB"
+	@echo ""
+	@echo "Full Stack (~3.2 GB total):"
+	@echo "  rtsp-server (mediamtx):    ~50 MB"
+	@echo "  mock-cam1..4 (ffmpeg x4): ~400 MB"
+	@echo "  mosquitto:                 ~50 MB"
+	@echo "  frigate:               ~1,500 MB"
+	@echo "  homeassistant:           ~500 MB"
+	@echo "  (+ Docker overhead):     ~700 MB"

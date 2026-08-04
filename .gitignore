@@ -1,0 +1,22 @@
+# Runtime data
+testing/mock_storage/
+testing/frigate-lite/*.db
+testing/frigate-lite/*.db-*
+testing/frigate-lite/.exports
+testing/frigate-lite/.jwt_secret
+testing/frigate-lite/.timeline
+testing/frigate-lite/.vacuum
+testing/frigate-lite/backup_config.yaml
+testing/frigate-lite/go2rtc_homekit.yml
+testing/frigate-mac/
+testing/mosquitto/data/
+testing/mosquitto/log/
+testing/ha-config/
+
+# Secrets
+.env
+*.enc
+~/.edge-server-secrets/
+
+# OS
+.DS_Store

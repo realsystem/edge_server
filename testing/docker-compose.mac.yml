@@ -1,0 +1,92 @@
+# macOS-Adapted Security Stack for Local Testing
+# Runs on Docker Desktop / OrbStack without Linux-specific hardware dependencies
+#
+# Differences from production:
+#   - No VA-API/GPU acceleration (CPU-only decoding)
+#   - No network_mode: host (explicit port mappings)
+#   - Cameras point to local mock RTSP streams
+#   - Local mock_storage directory instead of /mnt/storage
+
+services:
+  #-----------------------------------------------------------------------------
+  # Mosquitto MQTT Broker
+  #-----------------------------------------------------------------------------
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: mosquitto-test
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config:ro
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+    mem_limit: 64m
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-t", "$$SYS/#", "-C", "1", "-i", "healthcheck", "-W", "3"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - edge-test
+
+  #-----------------------------------------------------------------------------
+  # Frigate NVR (macOS-compatible: CPU-only, no VA-API)
+  #-----------------------------------------------------------------------------
+  frigate:
+    image: ghcr.io/blakeblackshear/frigate:stable
+    container_name: frigate-test
+    restart: unless-stopped
+    privileged: false
+    shm_size: "128mb"
+    mem_limit: 1536m
+    cpus: 4
+    ports:
+      - "5000:5000"   # Web UI
+      - "8555:8555"   # WebRTC
+      # Note: 8554 not mapped - harness RTSP server uses it
+    environment:
+      - TZ=${TZ:-America/Los_Angeles}
+    volumes:
+      - ./frigate-mac/config.yml:/config/config.yml:ro
+      - ./frigate-mac:/config
+      - ./mock_storage:/media/frigate
+      - type: tmpfs
+        target: /tmp/cache
+        tmpfs:
+          size: 536870912
+    # No /dev/dri device mapping on macOS
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - edge-test
+
+  #-----------------------------------------------------------------------------
+  # Home Assistant
+  #-----------------------------------------------------------------------------
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: homeassistant-test
+    restart: unless-stopped
+    mem_limit: 512m
+    ports:
+      - "8123:8123"
+    volumes:
+      - ./ha-config:/config
+    environment:
+      - TZ=${TZ:-America/Los_Angeles}
+    depends_on:
+      - mosquitto
+      - frigate
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - edge-test
+
+networks:
+  edge-test:
+    name: edge-server-test
+    external: true

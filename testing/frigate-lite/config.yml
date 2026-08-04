@@ -1,0 +1,38 @@
+# Frigate Lite Config - Single camera, minimal resources
+
+mqtt:
+  enabled: true
+  host: mosquitto-test
+  port: 1883
+
+database:
+  path: /config/frigate.db
+
+ffmpeg:
+  hwaccel_args: []
+
+detectors:
+  cpu1:
+    type: cpu
+    num_threads: 2
+
+record:
+  enabled: false
+
+snapshots:
+  enabled: false
+
+cameras:
+  cam1:
+    enabled: true
+    ffmpeg:
+      inputs:
+        - path: rtsp://mock-camera:8554/cam1
+          roles:
+            - detect
+    detect:
+      enabled: true
+      width: 640
+      height: 360
+      fps: 5
+version: 0.17-0
