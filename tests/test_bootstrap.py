@@ -1,12 +1,14 @@
 """Tests for bootstrap module."""
 
+import io
 import sys
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from bootstrap import Bootstrap, main
 from config import Config
+from ssh import SSHResult
 
 
 class TestBootstrap:
@@ -150,3 +152,130 @@ class TestMain:
             assert captured_config is not None
             assert captured_config.timeouts.discovery == 120
             assert captured_config.timeouts.deployment_base == 1800
+
+
+class TestDeploymentPhase:
+    """Tests for deployment phase with progress output."""
+
+    def test_deployment_shows_progress(self, capsys):
+        """Test that deployment phase shows progress spinner."""
+        config = Config()
+        config.ssh.user = "testuser"
+        config.timeouts.deployment_base = 10
+
+        bootstrap = Bootstrap(
+            target="192.168.1.100",
+            config=config,
+            mode="auto",
+            deploy_type="base",
+            dry_run=False,
+        )
+
+        # Mock SSH client
+        mock_ssh = MagicMock()
+        bootstrap.ssh = mock_ssh
+
+        # Mock snapshots
+        mock_snapshots = MagicMock()
+        bootstrap.snapshots = mock_snapshots
+        bootstrap.config.rollback.snapshot_before_deploy = False
+
+        # Track progress calls
+        progress_calls = []
+
+        def mock_run_with_progress(command, timeout=None, on_progress=None):
+            # Simulate calling progress a few times
+            if on_progress:
+                for i in range(3):
+                    on_progress(float(i))
+                    progress_calls.append(i)
+            # Return successful result with some output
+            return SSHResult(
+                0,
+                "2024-08-04 [INFO] Starting deployment\n"
+                "2024-08-04 [OK] Docker installed\n"
+                "2024-08-04 [OK] Services started\n",
+                "",
+            )
+
+        mock_ssh.run_with_progress = mock_run_with_progress
+
+        # Run deployment phase
+        result = bootstrap._phase_deployment()
+
+        assert result is True
+        assert len(progress_calls) == 3  # Progress was called
+
+        # Check output contains summary lines
+        captured = capsys.readouterr()
+        assert "[OK]" in captured.out or "[INFO]" in captured.out
+
+    def test_deployment_shows_output_on_success(self, capsys):
+        """Test that deployment shows [OK]/[INFO] lines after completion."""
+        config = Config()
+        config.ssh.user = "testuser"
+        config.timeouts.deployment_base = 10
+
+        bootstrap = Bootstrap(
+            target="192.168.1.100",
+            config=config,
+            mode="auto",
+            deploy_type="base",
+            dry_run=False,
+        )
+
+        mock_ssh = MagicMock()
+        bootstrap.ssh = mock_ssh
+        mock_snapshots = MagicMock()
+        bootstrap.snapshots = mock_snapshots
+        bootstrap.config.rollback.snapshot_before_deploy = False
+
+        mock_ssh.run_with_progress.return_value = SSHResult(
+            0,
+            "2024-08-04 [INFO] Installing Docker\n"
+            "2024-08-04 [OK] Docker ready\n"
+            "2024-08-04 [INFO] Starting containers\n"
+            "2024-08-04 [OK] All services running\n",
+            "",
+        )
+
+        result = bootstrap._phase_deployment()
+
+        assert result is True
+        captured = capsys.readouterr()
+        # Should show the [OK] and [INFO] lines
+        assert "Docker" in captured.out or "services" in captured.out
+
+    def test_deployment_shows_error_on_failure(self, capsys):
+        """Test that deployment shows error output on failure."""
+        config = Config()
+        config.ssh.user = "testuser"
+        config.timeouts.deployment_base = 10
+
+        bootstrap = Bootstrap(
+            target="192.168.1.100",
+            config=config,
+            mode="auto",
+            deploy_type="base",
+            dry_run=False,
+        )
+
+        mock_ssh = MagicMock()
+        bootstrap.ssh = mock_ssh
+        mock_snapshots = MagicMock()
+        bootstrap.snapshots = mock_snapshots
+        bootstrap.config.rollback.snapshot_before_deploy = False
+
+        mock_ssh.run_with_progress.return_value = SSHResult(
+            1,
+            "2024-08-04 [INFO] Installing Docker\n"
+            "2024-08-04 [ERROR] Failed to pull image\n",
+            "docker: Error response from daemon",
+        )
+
+        result = bootstrap._phase_deployment()
+
+        assert result is False
+        captured = capsys.readouterr()
+        # Should show error details
+        assert "failed" in captured.out.lower() or "error" in captured.out.lower()
