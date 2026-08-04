@@ -124,14 +124,28 @@ class SSHClient:
                     stdout, stderr = process.communicate()
                     return SSHResult(-1, stdout.strip(), "Command timed out")
 
-                # Poll status file if provided
-                status = ""
+                # Poll status file if provided (quick SSH with short timeout)
+                status = last_status
                 if status_file:
-                    status_result = self.run(f"cat {status_file} 2>/dev/null || true")
-                    if status_result.success and status_result.stdout:
-                        status = status_result.stdout.strip()
-                        if status != last_status:
+                    status_args = [
+                        "ssh",
+                        "-o", "ConnectTimeout=2",
+                        "-o", "StrictHostKeyChecking=" + self.strict_host_key_checking,
+                        "-o", "BatchMode=yes",
+                    ]
+                    if self.key_file:
+                        status_args.extend(["-i", self.key_file])
+                    status_args.append(f"{self.user}@{self.host}")
+                    status_args.append(f"cat {status_file} 2>/dev/null || true")
+                    try:
+                        status_proc = subprocess.run(
+                            status_args, capture_output=True, text=True, timeout=3
+                        )
+                        if status_proc.stdout:
+                            status = status_proc.stdout.strip()
                             last_status = status
+                    except Exception:
+                        pass
 
                 if on_progress:
                     on_progress(elapsed, status)
