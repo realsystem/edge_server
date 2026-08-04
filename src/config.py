@@ -166,7 +166,9 @@ class Config:
             config.ssh.retries = parser.getint("target", "SSH_RETRIES", fallback=config.ssh.retries)
             config.ssh.key_file = parser.get("target", "SSH_KEY_FILE", fallback=config.ssh.key_file)
             config.ssh.strict_host_key_checking = parser.get(
-                "target", "SSH_STRICT_HOST_KEY_CHECKING", fallback=config.ssh.strict_host_key_checking
+                "target",
+                "SSH_STRICT_HOST_KEY_CHECKING",
+                fallback=config.ssh.strict_host_key_checking,
             )
 
         # Logging

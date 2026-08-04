@@ -44,9 +44,12 @@ class SSHClient:
         """Build SSH command arguments."""
         args = [
             "ssh",
-            "-o", "ConnectTimeout=" + str(self.timeout),
-            "-o", "StrictHostKeyChecking=" + self.strict_host_key_checking,
-            "-o", "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=" + str(self.timeout),
+            "-o",
+            "StrictHostKeyChecking=" + self.strict_host_key_checking,
+            "-o",
+            "BatchMode=yes",
         ]
         if self.key_file:
             args.extend(["-i", self.key_file])
@@ -57,9 +60,12 @@ class SSHClient:
         """Build SCP command arguments."""
         args = [
             "scp",
-            "-o", "ConnectTimeout=" + str(self.timeout),
-            "-o", "StrictHostKeyChecking=" + self.strict_host_key_checking,
-            "-o", "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=" + str(self.timeout),
+            "-o",
+            "StrictHostKeyChecking=" + self.strict_host_key_checking,
+            "-o",
+            "BatchMode=yes",
         ]
         if self.key_file:
             args.extend(["-i", self.key_file])
@@ -120,9 +126,7 @@ class SSHClient:
                     process.kill()
                     return SSHResult(-1, "\n".join(stdout_lines), "Command timed out")
 
-                readable, _, _ = select.select(
-                    [process.stdout, process.stderr], [], [], 0.1
-                )
+                readable, _, _ = select.select([process.stdout, process.stderr], [], [], 0.1)
 
                 for stream in readable:
                     line = stream.readline()

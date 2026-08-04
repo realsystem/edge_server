@@ -66,7 +66,9 @@ class Bootstrap:
 
     def _setup_logging(self) -> None:
         """Setup logging to local file."""
-        log_dir = Path(self.config.logging.log_dir) if self.config.logging.log_dir else DEFAULT_LOG_DIR
+        log_dir = (
+            Path(self.config.logging.log_dir) if self.config.logging.log_dir else DEFAULT_LOG_DIR
+        )
         log_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_file = log_dir / f"bootstrap_{self.target}_{timestamp}.log"
@@ -291,7 +293,9 @@ class Bootstrap:
             env["DNS"] = dns
 
         self._log(f"Running initial-setup.sh with env: {env}")
-        self.progress.info(f"Running initial-setup.sh (timeout: {self.config.timeouts.initial_setup}s)...")
+        self.progress.info(
+            f"Running initial-setup.sh (timeout: {self.config.timeouts.initial_setup}s)..."
+        )
 
         def on_setup_line(line: str) -> None:
             if line.startswith("[") or line.startswith(">>>"):
@@ -387,7 +391,9 @@ class Bootstrap:
                     secrets_pass = self._prompt("Create secrets storage password", "", secret=True)
                 if not secrets_pass:
                     self.progress.fail("Secrets password required")
-                    self.state.complete_phase(Phase.SECRETS, PhaseStatus.FAILED, "No password", start)
+                    self.state.complete_phase(
+                        Phase.SECRETS, PhaseStatus.FAILED, "No password", start
+                    )
                     return False
             else:
                 self.progress.fail("SECRETS_PASSWORD env var required in auto mode")
@@ -399,7 +405,7 @@ class Bootstrap:
         else:
             self.progress.info("Initializing secrets storage...")
             result = self.ssh.run(
-                f'cd {self.REMOTE_DIR} && SECRETS_DIR="{self.secrets_dir}" SECRETS_PASSWORD=\'{secrets_pass}\' '
+                f"cd {self.REMOTE_DIR} && SECRETS_DIR=\"{self.secrets_dir}\" SECRETS_PASSWORD='{secrets_pass}' "
                 f"./secrets.sh init <<< $'{secrets_pass}\\n{secrets_pass}' 2>&1"
             )
             self._log_result("secrets.sh init", result)
@@ -440,7 +446,9 @@ class Bootstrap:
         if secrets_failed > 0:
             self.progress.fail(f"Set {secrets_set} secrets, {secrets_failed} failed")
             self.progress.info(f"  Log: {self.log_file}")
-            self.state.complete_phase(Phase.SECRETS, PhaseStatus.FAILED, f"{secrets_failed} failed", start)
+            self.state.complete_phase(
+                Phase.SECRETS, PhaseStatus.FAILED, f"{secrets_failed} failed", start
+            )
             return False
 
         self.progress.ok(f"Set {secrets_set} secrets")
@@ -476,7 +484,9 @@ class Bootstrap:
         if self.deploy_type in ["base", "full"]:
             self._log("Starting base stack deployment")
             self.progress.info("Deploying base stack (Tailscale, MQTT, Home Assistant)...")
-            self.progress.info(f"  Running deploy-edge-server.sh (timeout: {self.config.timeouts.deployment_base}s)")
+            self.progress.info(
+                f"  Running deploy-edge-server.sh (timeout: {self.config.timeouts.deployment_base}s)"
+            )
 
             def on_deploy_line(line: str) -> None:
                 if line.startswith("[") or line.startswith(">>>"):
@@ -511,7 +521,9 @@ class Bootstrap:
             self.state.start_phase(Phase.DEPLOY_SECURITY)
             self._log("Starting security stack deployment")
             self.progress.info("Deploying security stack (Frigate NVR)...")
-            self.progress.info(f"  Running deploy-security.sh (timeout: {self.config.timeouts.deployment_security}s)")
+            self.progress.info(
+                f"  Running deploy-security.sh (timeout: {self.config.timeouts.deployment_security}s)"
+            )
 
             def on_security_line(line: str) -> None:
                 if line.startswith("[") or line.startswith(">>>"):
