@@ -489,8 +489,7 @@ class Bootstrap:
             )
 
             def on_deploy_line(line: str) -> None:
-                if "[INFO]" in line or "[OK]" in line or "[WARN]" in line or "[ERROR]" in line:
-                    self.progress.info(f"    {line}")
+                self.progress.info(f"    {line}")
                 self._log(f"[deploy-edge-server] {line}")
 
             result = self.ssh.run_streaming(

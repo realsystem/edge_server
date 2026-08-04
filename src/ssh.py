@@ -103,7 +103,10 @@ class SSHClient:
         if sudo:
             command = f"sudo {command}"
 
-        args = self._ssh_args() + [command]
+        # Use -tt to force PTY allocation for real-time output
+        args = self._ssh_args()
+        args.insert(1, "-tt")
+        args.append(command)
         cmd_timeout = timeout or self.timeout * 10
 
         stdout_lines = []
