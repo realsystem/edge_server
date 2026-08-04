@@ -97,10 +97,9 @@ class SSHClient:
         command: str,
         timeout: Optional[int] = None,
         sudo: bool = False,
-        on_progress: Optional[Callable[[float, str], None]] = None,
-        status_file: Optional[str] = None,
+        on_progress: Optional[Callable[[float], None]] = None,
     ) -> SSHResult:
-        """Execute a remote command with progress callback (elapsed time, status)."""
+        """Execute a remote command with progress callback (elapsed time)."""
         if sudo:
             command = f"sudo {command}"
 
@@ -116,7 +115,6 @@ class SSHClient:
             )
 
             start_time = time.monotonic()
-            last_status = ""
             while process.poll() is None:
                 elapsed = time.monotonic() - start_time
                 if cmd_timeout and elapsed > cmd_timeout:
@@ -124,32 +122,9 @@ class SSHClient:
                     stdout, stderr = process.communicate()
                     return SSHResult(-1, stdout.strip(), "Command timed out")
 
-                # Poll status file if provided (quick SSH with short timeout)
-                status = last_status
-                if status_file:
-                    status_args = [
-                        "ssh",
-                        "-o", "ConnectTimeout=2",
-                        "-o", "StrictHostKeyChecking=" + self.strict_host_key_checking,
-                        "-o", "BatchMode=yes",
-                    ]
-                    if self.key_file:
-                        status_args.extend(["-i", self.key_file])
-                    status_args.append(f"{self.user}@{self.host}")
-                    status_args.append(f"cat {status_file} 2>/dev/null || true")
-                    try:
-                        status_proc = subprocess.run(
-                            status_args, capture_output=True, text=True, timeout=3
-                        )
-                        if status_proc.stdout:
-                            status = status_proc.stdout.strip()
-                            last_status = status
-                    except Exception:
-                        pass
-
                 if on_progress:
-                    on_progress(elapsed, status)
-                time.sleep(2)
+                    on_progress(elapsed)
+                time.sleep(1)
 
             stdout, stderr = process.communicate()
             return SSHResult(process.returncode, stdout.strip(), stderr.strip())
@@ -225,8 +200,6 @@ class SSHClient:
         env: Optional[dict] = None,
         sudo: bool = True,
         timeout: int = 600,
-        on_progress: Optional[Callable[[float, str], None]] = None,
-        status_file: Optional[str] = None,
     ) -> SSHResult:
         """Run a script on remote host."""
         env_str = " ".join(f"{k}='{v}'" for k, v in (env or {}).items())
@@ -235,10 +208,6 @@ class SSHClient:
             command = f"cd $(dirname {script_path}) && {env_str} {sudo_prefix} {script_path} 2>&1"
         else:
             command = f"cd $(dirname {script_path}) && {sudo_prefix} {script_path} 2>&1"
-        if on_progress:
-            return self.run_with_progress(
-                command, timeout=timeout, on_progress=on_progress, status_file=status_file
-            )
         return self.run(command, timeout=timeout)
 
     def get_docker_containers(self, filter_name: Optional[str] = None) -> List[dict]:

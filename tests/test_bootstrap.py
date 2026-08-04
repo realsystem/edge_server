@@ -180,31 +180,18 @@ class TestDeploymentPhase:
         bootstrap.snapshots = mock_snapshots
         bootstrap.config.rollback.snapshot_before_deploy = False
 
-        # Track progress calls
-        progress_calls = []
-
-        def mock_run_with_progress(command, timeout=None, on_progress=None, status_file=None):
-            # Simulate calling progress a few times
-            if on_progress:
-                for i in range(3):
-                    on_progress(float(i), f"Step {i}")
-                    progress_calls.append(i)
-            # Return successful result with some output
-            return SSHResult(
-                0,
-                "2024-08-04 [INFO] Starting deployment\n"
-                "2024-08-04 [OK] Docker installed\n"
-                "2024-08-04 [OK] Services started\n",
-                "",
-            )
-
-        mock_ssh.run_with_progress = mock_run_with_progress
+        mock_ssh.run.return_value = SSHResult(
+            0,
+            "2024-08-04 [INFO] Starting deployment\n"
+            "2024-08-04 [OK] Docker installed\n"
+            "2024-08-04 [OK] Services started\n",
+            "",
+        )
 
         # Run deployment phase
         result = bootstrap._phase_deployment()
 
         assert result is True
-        assert len(progress_calls) == 3  # Progress was called
 
         # Check output contains summary lines
         captured = capsys.readouterr()
@@ -230,7 +217,7 @@ class TestDeploymentPhase:
         bootstrap.snapshots = mock_snapshots
         bootstrap.config.rollback.snapshot_before_deploy = False
 
-        mock_ssh.run_with_progress.return_value = SSHResult(
+        mock_ssh.run.return_value = SSHResult(
             0,
             "2024-08-04 [INFO] Installing Docker\n"
             "2024-08-04 [OK] Docker ready\n"
@@ -266,7 +253,7 @@ class TestDeploymentPhase:
         bootstrap.snapshots = mock_snapshots
         bootstrap.config.rollback.snapshot_before_deploy = False
 
-        mock_ssh.run_with_progress.return_value = SSHResult(
+        mock_ssh.run.return_value = SSHResult(
             1,
             "2024-08-04 [INFO] Installing Docker\n"
             "2024-08-04 [ERROR] Failed to pull image\n",
