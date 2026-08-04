@@ -484,7 +484,6 @@ class Bootstrap:
             self.progress.info("Deploying base stack (Tailscale, MQTT, Home Assistant)...")
             timeout = self.config.timeouts.deployment_base
 
-            # Run script - output will be captured and shown after
             result = self.ssh.run(
                 f"cd {self.REMOTE_DIR} && "
                 f"eval $(./secrets.sh export 2>/dev/null) && "
@@ -492,15 +491,16 @@ class Bootstrap:
                 timeout=timeout,
             )
 
-            # Show all output
-            if result.stdout:
-                for line in result.stdout.split("\n"):
-                    if line.strip():
-                        self.progress.info(f"  {line}")
             self._log_result("deploy-edge-server.sh", result)
             if not result.success:
                 self._log("Base stack deployment failed", "error")
                 self.progress.fail("Base stack deployment failed")
+                # Show last output lines on failure
+                if result.stdout:
+                    self.progress.info("  Output:")
+                    for line in result.stdout.split("\n")[-20:]:
+                        if line.strip():
+                            self.progress.info(f"    {line}")
                 self.progress.info(f"  Full log: {self.log_file}")
                 return False
             self._log("Base stack deployed successfully")
@@ -513,7 +513,6 @@ class Bootstrap:
             self.progress.info("Deploying security stack (Frigate NVR)...")
             timeout = self.config.timeouts.deployment_security
 
-            # Run script - output will be captured and shown after
             result = self.ssh.run(
                 f"cd {self.REMOTE_DIR} && "
                 f"eval $(./secrets.sh export 2>/dev/null) && "
@@ -521,15 +520,15 @@ class Bootstrap:
                 timeout=timeout,
             )
 
-            # Show all output
-            if result.stdout:
-                for line in result.stdout.split("\n"):
-                    if line.strip():
-                        self.progress.info(f"  {line}")
-
             self._log_result("deploy-security.sh", result)
             if not result.success:
                 self._log("Security stack deployment failed", "error")
+                # Show last output lines on failure
+                if result.stdout:
+                    self.progress.info("  Output:")
+                    for line in result.stdout.split("\n")[-20:]:
+                        if line.strip():
+                            self.progress.info(f"    {line}")
                 self.progress.fail("Security stack deployment failed")
                 self.progress.info(f"  Full log: {self.log_file}")
                 return False
