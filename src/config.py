@@ -61,6 +61,8 @@ class SSHConfig:
     user: str = ""
     timeout: int = 10
     retries: int = 3
+    key_file: str = ""
+    strict_host_key_checking: str = "accept-new"  # yes, no, accept-new
 
 
 @dataclass
@@ -146,6 +148,10 @@ class Config:
         if parser.has_section("target"):
             config.ssh.timeout = parser.getint("target", "SSH_TIMEOUT", fallback=config.ssh.timeout)
             config.ssh.retries = parser.getint("target", "SSH_RETRIES", fallback=config.ssh.retries)
+            config.ssh.key_file = parser.get("target", "SSH_KEY_FILE", fallback=config.ssh.key_file)
+            config.ssh.strict_host_key_checking = parser.get(
+                "target", "SSH_STRICT_HOST_KEY_CHECKING", fallback=config.ssh.strict_host_key_checking
+            )
 
         return config
 
@@ -196,6 +202,8 @@ class Config:
         parser["target"] = {
             "SSH_TIMEOUT": str(self.ssh.timeout),
             "SSH_RETRIES": str(self.ssh.retries),
+            "SSH_KEY_FILE": self.ssh.key_file,
+            "SSH_STRICT_HOST_KEY_CHECKING": self.ssh.strict_host_key_checking,
         }
 
         with open(config_path, "w") as f:

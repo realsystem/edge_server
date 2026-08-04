@@ -29,27 +29,26 @@ class SSHClient:
         user: str,
         timeout: int = 10,
         retries: int = 3,
-        key_file: Optional[Path] = None,
+        key_file: Optional[str] = None,
+        strict_host_key_checking: str = "accept-new",
     ):
         self.host = host
         self.user = user
         self.timeout = timeout
         self.retries = retries
         self.key_file = key_file
+        self.strict_host_key_checking = strict_host_key_checking
 
     def _ssh_args(self) -> List[str]:
         """Build SSH command arguments."""
         args = [
             "ssh",
-            "-o",
-            "ConnectTimeout=" + str(self.timeout),
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            "-o",
-            "BatchMode=yes",
+            "-o", "ConnectTimeout=" + str(self.timeout),
+            "-o", "StrictHostKeyChecking=" + self.strict_host_key_checking,
+            "-o", "BatchMode=yes",
         ]
         if self.key_file:
-            args.extend(["-i", str(self.key_file)])
+            args.extend(["-i", self.key_file])
         args.append(f"{self.user}@{self.host}")
         return args
 
@@ -57,15 +56,12 @@ class SSHClient:
         """Build SCP command arguments."""
         args = [
             "scp",
-            "-o",
-            "ConnectTimeout=" + str(self.timeout),
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            "-o",
-            "BatchMode=yes",
+            "-o", "ConnectTimeout=" + str(self.timeout),
+            "-o", "StrictHostKeyChecking=" + self.strict_host_key_checking,
+            "-o", "BatchMode=yes",
         ]
         if self.key_file:
-            args.extend(["-i", str(self.key_file)])
+            args.extend(["-i", self.key_file])
         return args
 
     def run(self, command: str, timeout: Optional[int] = None, sudo: bool = False) -> SSHResult:

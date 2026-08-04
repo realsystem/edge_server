@@ -122,6 +122,8 @@ class Bootstrap:
             user=self.config.ssh.user,
             timeout=self.config.ssh.timeout,
             retries=self.config.ssh.retries,
+            key_file=self.config.ssh.key_file or None,
+            strict_host_key_checking=self.config.ssh.strict_host_key_checking,
         )
 
         with self.progress.task("SSH connection"):
@@ -516,6 +518,12 @@ Examples:
         "--deploy", choices=["base", "security", "full"], default="full", help="Deployment type"
     )
     parser.add_argument("--user", default=os.environ.get("USER", "root"), help="SSH user")
+    parser.add_argument("--key", "-i", help="SSH private key file")
+    parser.add_argument(
+        "--no-host-key-check",
+        action="store_true",
+        help="Disable SSH host key checking (StrictHostKeyChecking=no)",
+    )
     parser.add_argument("--skip-init", action="store_true", help="Skip initial setup")
     parser.add_argument("--no-rollback", action="store_true", help="Disable automatic rollback")
     parser.add_argument("--dry-run", action="store_true", help="Show what would happen")
@@ -526,6 +534,10 @@ Examples:
     # Load config
     config = Config.load(args.config)
     config.ssh.user = args.user
+    if args.key:
+        config.ssh.key_file = args.key
+    if args.no_host_key_check:
+        config.ssh.strict_host_key_checking = "no"
 
     # Apply timeout overrides
     if args.timeout:
