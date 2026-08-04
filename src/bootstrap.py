@@ -293,21 +293,19 @@ class Bootstrap:
             env["DNS"] = dns
 
         self._log(f"Running initial-setup.sh with env: {env}")
-        self.progress.info(
-            f"Running initial-setup.sh (timeout: {self.config.timeouts.initial_setup}s)..."
-        )
+        timeout = self.config.timeouts.initial_setup
+        self.progress.info(f"Running initial-setup.sh (timeout: {timeout}s)...")
 
-        def on_setup_line(line: str) -> None:
-            if "[INFO]" in line or "[OK]" in line or "[WARN]" in line or "[ERROR]" in line:
-                self.progress.info(f"  {line}")
-            self._log(f"[initial-setup] {line}")
+        def on_setup_progress(elapsed: float) -> None:
+            self.progress.waiting("initial-setup.sh", elapsed, timeout)
 
         result = self.ssh.run_script(
             f"{self.REMOTE_DIR}/initial-setup.sh",
             env=env,
-            timeout=self.config.timeouts.initial_setup,
-            on_line=on_setup_line,
+            timeout=timeout,
+            on_progress=on_setup_progress,
         )
+        self.progress.clear_line()
         self._log_result("initial-setup.sh", result)
         if not result.success:
             self._log("Initial setup failed", "error")
@@ -484,21 +482,19 @@ class Bootstrap:
         if self.deploy_type in ["base", "full"]:
             self._log("Starting base stack deployment")
             self.progress.info("Deploying base stack (Tailscale, MQTT, Home Assistant)...")
-            self.progress.info(
-                f"  Running deploy-edge-server.sh (timeout: {self.config.timeouts.deployment_base}s)"
-            )
+            timeout = self.config.timeouts.deployment_base
 
-            def on_deploy_line(line: str) -> None:
-                print(f"    [STREAM] {line}", flush=True)
-                self._log(f"[deploy-edge-server] {line}")
+            def on_progress(elapsed: float) -> None:
+                self.progress.waiting("deploy-edge-server.sh", elapsed, timeout)
 
-            result = self.ssh.run_streaming(
+            result = self.ssh.run_with_progress(
                 f"cd {self.REMOTE_DIR} && "
                 f"eval $(./secrets.sh export 2>/dev/null) && "
-                f"stdbuf -oL sudo -E ./deploy-edge-server.sh 2>&1",
-                timeout=self.config.timeouts.deployment_base,
-                on_line=on_deploy_line,
+                f"sudo -E ./deploy-edge-server.sh 2>&1",
+                timeout=timeout,
+                on_progress=on_progress,
             )
+            self.progress.clear_line()
             self._log_result("deploy-edge-server.sh", result)
             if not result.success:
                 self._log("Base stack deployment failed", "error")
@@ -514,28 +510,30 @@ class Bootstrap:
                 return False
             self._log("Base stack deployed successfully")
             self.progress.ok("Base stack deployed")
+            # Show summary from output
+            if result.stdout:
+                for line in result.stdout.split("\n"):
+                    if "[OK]" in line or "[INFO]" in line:
+                        self.progress.info(f"    {line}")
 
         # Deploy security stack
         if self.deploy_type in ["security", "full"]:
             self.state.start_phase(Phase.DEPLOY_SECURITY)
             self._log("Starting security stack deployment")
             self.progress.info("Deploying security stack (Frigate NVR)...")
-            self.progress.info(
-                f"  Running deploy-security.sh (timeout: {self.config.timeouts.deployment_security}s)"
-            )
+            timeout = self.config.timeouts.deployment_security
 
-            def on_security_line(line: str) -> None:
-                if "[INFO]" in line or "[OK]" in line or "[WARN]" in line or "[ERROR]" in line:
-                    self.progress.info(f"    {line}")
-                self._log(f"[deploy-security] {line}")
+            def on_security_progress(elapsed: float) -> None:
+                self.progress.waiting("deploy-security.sh", elapsed, timeout)
 
-            result = self.ssh.run_streaming(
+            result = self.ssh.run_with_progress(
                 f"cd {self.REMOTE_DIR} && "
                 f"eval $(./secrets.sh export 2>/dev/null) && "
-                f"stdbuf -oL sudo -E ./deploy-security.sh 2>&1",
-                timeout=self.config.timeouts.deployment_security,
-                on_line=on_security_line,
+                f"sudo -E ./deploy-security.sh 2>&1",
+                timeout=timeout,
+                on_progress=on_security_progress,
             )
+            self.progress.clear_line()
             self._log_result("deploy-security.sh", result)
             if not result.success:
                 self._log("Security stack deployment failed", "error")
@@ -551,6 +549,11 @@ class Bootstrap:
                 return False
             self._log("Security stack deployed successfully")
             self.progress.ok("Security stack deployed")
+            # Show summary from output
+            if result.stdout:
+                for line in result.stdout.split("\n"):
+                    if "[OK]" in line or "[INFO]" in line:
+                        self.progress.info(f"    {line}")
 
         self.state.complete_phase(Phase.DEPLOY_BASE, PhaseStatus.SUCCESS, "OK", start)
         self.progress.phase_summary()

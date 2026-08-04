@@ -92,68 +92,43 @@ class SSHClient:
         except Exception as e:
             return SSHResult(-1, "", str(e))
 
-    def run_streaming(
+    def run_with_progress(
         self,
         command: str,
         timeout: Optional[int] = None,
         sudo: bool = False,
-        on_line: Optional[Callable[[str], None]] = None,
+        on_progress: Optional[Callable[[float], None]] = None,
     ) -> SSHResult:
-        """Execute a remote command with streaming output."""
+        """Execute a remote command with progress callback (elapsed time)."""
         if sudo:
             command = f"sudo {command}"
 
-        # Build SSH args - use regular args but wrap command with unbuffer/stdbuf
         args = self._ssh_args() + [command]
-
         cmd_timeout = timeout or self.timeout * 10
 
-        stdout_lines = []
-
         try:
-            # Merge stderr into stdout for simpler streaming
             process = subprocess.Popen(
                 args,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stderr=subprocess.PIPE,
                 text=True,
-                bufsize=0,  # Unbuffered
             )
 
-            import threading
+            start_time = time.monotonic()
+            while process.poll() is None:
+                elapsed = time.monotonic() - start_time
+                if cmd_timeout and elapsed > cmd_timeout:
+                    process.kill()
+                    stdout, stderr = process.communicate()
+                    return SSHResult(-1, stdout.strip(), "Command timed out")
+                if on_progress:
+                    on_progress(elapsed)
+                time.sleep(1)
 
-            timed_out = [False]
-
-            def timeout_killer():
-                timed_out[0] = True
-                process.kill()
-
-            timer = threading.Timer(cmd_timeout, timeout_killer)
-            timer.start()
-
-            try:
-                while True:
-                    line = process.stdout.readline()
-                    if not line and process.poll() is not None:
-                        break
-                    if line:
-                        line = line.rstrip("\n\r")
-                        stdout_lines.append(line)
-                        if on_line:
-                            on_line(line)
-            finally:
-                timer.cancel()
-
-            if timed_out[0]:
-                return SSHResult(-1, "\n".join(stdout_lines), "Command timed out")
-
-            return SSHResult(
-                process.returncode,
-                "\n".join(stdout_lines),
-                "",
-            )
+            stdout, stderr = process.communicate()
+            return SSHResult(process.returncode, stdout.strip(), stderr.strip())
         except Exception as e:
-            return SSHResult(-1, "\n".join(stdout_lines), str(e))
+            return SSHResult(-1, "", str(e))
 
     def test_connection(self) -> bool:
         """Test if SSH connection works."""
@@ -224,17 +199,17 @@ class SSHClient:
         env: Optional[dict] = None,
         sudo: bool = True,
         timeout: int = 600,
-        on_line: Optional[Callable[[str], None]] = None,
+        on_progress: Optional[Callable[[float], None]] = None,
     ) -> SSHResult:
         """Run a script on remote host."""
         env_str = " ".join(f"{k}='{v}'" for k, v in (env or {}).items())
-        sudo_prefix = "stdbuf -oL sudo -E" if sudo else ""
+        sudo_prefix = "sudo -E" if sudo else ""
         if env_str:
             command = f"cd $(dirname {script_path}) && {env_str} {sudo_prefix} {script_path} 2>&1"
         else:
             command = f"cd $(dirname {script_path}) && {sudo_prefix} {script_path} 2>&1"
-        if on_line:
-            return self.run_streaming(command, timeout=timeout, on_line=on_line)
+        if on_progress:
+            return self.run_with_progress(command, timeout=timeout, on_progress=on_progress)
         return self.run(command, timeout=timeout)
 
     def get_docker_containers(self, filter_name: Optional[str] = None) -> List[dict]:
