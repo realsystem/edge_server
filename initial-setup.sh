@@ -7,8 +7,8 @@
 
 set -euo pipefail
 
-info()    { echo "[OK] $*"; }
-warn()    { echo "[WARN] $*"; }
+info()    { printf '[OK] %s\n' "$*"; }
+warn()    { printf '[WARN] %s\n' "$*"; }
 
 # Must run as root
 [[ $EUID -ne 0 ]] && { echo "Run with sudo"; exit 1; }

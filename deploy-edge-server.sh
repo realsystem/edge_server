@@ -52,7 +52,7 @@ log() {
     local message="$*"
     local timestamp
     timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "${timestamp} [${level}] ${message}" | tee -a "$LOG_FILE"
+    printf '%s [%s] %s\n' "$timestamp" "$level" "$message" | stdbuf -oL tee -a "$LOG_FILE"
 }
 
 info()    { log "INFO" "$*"; }
