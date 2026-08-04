@@ -1,5 +1,7 @@
 # Edge Server
 
+[![Test](https://github.com/realsystem/edge_server/actions/workflows/test.yml/badge.svg)](https://github.com/realsystem/edge_server/actions/workflows/test.yml)
+
 Headless Ubuntu edge server for Frigate NVR, Home Assistant, Mosquitto MQTT, and Tailscale.
 
 ## Components
