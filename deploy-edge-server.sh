@@ -40,6 +40,9 @@ TIMEZONE="${TIMEZONE:-America/Los_Angeles}"
 MQTT_USER="${MQTT_USER:-admin}"
 MQTT_PASS="${MQTT_PASS:-}"
 
+# Batch mode - skip interactive prompts (set to "true" for automated runs)
+BATCH_MODE="${BATCH_MODE:-false}"
+
 #-------------------------------------------------------------------------------
 # LOGGING & UTILITIES
 #-------------------------------------------------------------------------------
@@ -113,7 +116,7 @@ preflight_checks() {
     fi
 
     # Prompt for external drive UUID if not set
-    if [[ -z "$EXTERNAL_DRIVE_UUID" ]]; then
+    if [[ -z "$EXTERNAL_DRIVE_UUID" ]] && [[ "$BATCH_MODE" != "true" ]]; then
         info "Available block devices:"
         lsblk -o NAME,UUID,SIZE,FSTYPE,MOUNTPOINT
         echo
@@ -122,16 +125,21 @@ preflight_checks() {
 
     # Prompt for MQTT password if not set
     if [[ -z "$MQTT_PASS" ]]; then
-        read -rsp "Enter MQTT password for user '$MQTT_USER': " MQTT_PASS
-        echo
-        if [[ -z "$MQTT_PASS" ]]; then
+        if [[ "$BATCH_MODE" == "true" ]]; then
             MQTT_PASS=$(openssl rand -base64 16)
-            warn "Generated random MQTT password: $MQTT_PASS"
+            info "Generated random MQTT password"
+        else
+            read -rsp "Enter MQTT password for user '$MQTT_USER': " MQTT_PASS
+            echo
+            if [[ -z "$MQTT_PASS" ]]; then
+                MQTT_PASS=$(openssl rand -base64 16)
+                warn "Generated random MQTT password: $MQTT_PASS"
+            fi
         fi
     fi
 
     # Prompt for Tailscale auth key if not set
-    if [[ -z "$TAILSCALE_AUTH_KEY" ]]; then
+    if [[ -z "$TAILSCALE_AUTH_KEY" ]] && [[ "$BATCH_MODE" != "true" ]]; then
         read -rp "Enter Tailscale auth key (or press Enter to skip Tailscale setup): " TAILSCALE_AUTH_KEY
     fi
 
