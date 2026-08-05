@@ -7,6 +7,8 @@
 
 set -euo pipefail
 
+BATCH_MODE="${BATCH_MODE:-false}"
+
 info()    { printf '[OK] %s\n' "$*"; }
 warn()    { printf '[WARN] %s\n' "$*"; }
 
@@ -23,8 +25,11 @@ apt install -y vim curl wget htop parted
 #-------------------------------------------------------------------------------
 # Configure static IP (optional)
 #-------------------------------------------------------------------------------
-echo
-read -rp "Configure static IP? [y/N]: " configure_ip
+configure_ip="n"
+if [[ "$BATCH_MODE" != "true" ]]; then
+    echo
+    read -rp "Configure static IP? [y/N]: " configure_ip
+fi
 if [[ "$configure_ip" =~ ^[Yy]$ ]]; then
     # Detect primary interface
     iface=$(ip route | awk '/default/ {print $5; exit}')
@@ -60,12 +65,14 @@ fi
 #-------------------------------------------------------------------------------
 # Prepare external storage
 #-------------------------------------------------------------------------------
-echo
-info "Available block devices:"
-lsblk -o NAME,SIZE,TYPE,MOUNTPOINT,UUID | grep -v "loop"
-echo
-
-read -rp "Format external drive for Frigate storage? [y/N]: " format_drive
+format_drive="n"
+if [[ "$BATCH_MODE" != "true" ]]; then
+    echo
+    info "Available block devices:"
+    lsblk -o NAME,SIZE,TYPE,MOUNTPOINT,UUID | grep -v "loop"
+    echo
+    read -rp "Format external drive for Frigate storage? [y/N]: " format_drive
+fi
 if [[ "$format_drive" =~ ^[Yy]$ ]]; then
     read -rp "Enter device name (e.g., sdb): " drive_name
     drive="/dev/${drive_name}"
@@ -97,9 +104,11 @@ fi
 #-------------------------------------------------------------------------------
 # Show drive UUIDs
 #-------------------------------------------------------------------------------
-echo
-info "External drive UUIDs (for deploy-edge-server.sh):"
-blkid | grep -v "loop" | grep -v "$(df / | tail -1 | awk '{print $1}')"
+if [[ "$BATCH_MODE" != "true" ]]; then
+    echo
+    info "External drive UUIDs (for deploy-edge-server.sh):"
+    blkid | grep -v "loop" | grep -v "$(df / | tail -1 | awk '{print $1}')" || true
+fi
 
 #-------------------------------------------------------------------------------
 # Done

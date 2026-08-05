@@ -25,10 +25,10 @@ TAILSCALE_AUTH_KEY="${TAILSCALE_AUTH_KEY:-}"
 EXTERNAL_DRIVE_UUID="${EXTERNAL_DRIVE_UUID:-}"
 
 # Storage mount point
-STORAGE_MOUNT="/mnt/storage"
+STORAGE_MOUNT="${EDGE_STORAGE_DIR:-/mnt/storage}"
 
 # Application directory
-APP_DIR="/opt/edge-server"
+APP_DIR="${EDGE_SERVER_DIR:-/opt/edge-server}"
 
 # Local subnet for firewall rules (CIDR notation)
 LOCAL_SUBNET="${LOCAL_SUBNET:-192.168.0.0/16}"
@@ -409,7 +409,8 @@ services:
     image: ghcr.io/home-assistant/home-assistant:stable
     container_name: homeassistant
     restart: unless-stopped
-    network_mode: host
+    ports:
+      - "8123:8123"
     privileged: true
     environment:
       - TZ=${TIMEZONE:-America/Los_Angeles}
@@ -438,7 +439,7 @@ services:
       - FRIGATE_RTSP_PASSWORD=${FRIGATE_RTSP_PASSWORD:-}
     volumes:
       - ./frigate/config.yml:/config/config.yml:ro
-      - /mnt/storage/frigate:/media/frigate
+      - __STORAGE_MOUNT__/frigate:/media/frigate
       - type: tmpfs
         target: /tmp/cache
         tmpfs:
@@ -453,6 +454,9 @@ networks:
     name: edge-server
     driver: bridge
 EOF
+
+    # Substitute storage mount path
+    sed -i "s|__STORAGE_MOUNT__|${STORAGE_MOUNT}|g" "$APP_DIR/docker-compose.yml"
 
     #---------------------------------------------------------------------------
     # Mosquitto Configuration
@@ -509,18 +513,9 @@ ffmpeg:
 
 record:
   enabled: true
-  retain:
-    days: 7
-    mode: motion
-  events:
-    retain:
-      default: 14
-      mode: motion
 
 snapshots:
   enabled: true
-  retain:
-    default: 14
 
 cameras:
   # Placeholder camera - replace with your actual camera

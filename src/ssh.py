@@ -27,6 +27,7 @@ class SSHClient:
         self,
         host: str,
         user: str,
+        port: int = 22,
         timeout: int = 10,
         retries: int = 3,
         key_file: Optional[str] = None,
@@ -34,6 +35,7 @@ class SSHClient:
     ):
         self.host = host
         self.user = user
+        self.port = port
         self.timeout = timeout
         self.retries = retries
         self.key_file = key_file
@@ -49,6 +51,8 @@ class SSHClient:
             "StrictHostKeyChecking=" + self.strict_host_key_checking,
             "-o",
             "BatchMode=yes",
+            "-p",
+            str(self.port),
         ]
         if self.key_file:
             args.extend(["-i", self.key_file])
@@ -65,6 +69,8 @@ class SSHClient:
             "StrictHostKeyChecking=" + self.strict_host_key_checking,
             "-o",
             "BatchMode=yes",
+            "-P",
+            str(self.port),
         ]
         if self.key_file:
             args.extend(["-i", self.key_file])
@@ -199,6 +205,7 @@ class SSHClient:
         env: Optional[dict] = None,
         sudo: bool = True,
         timeout: int = 600,
+        on_progress: Optional[Callable[[float], None]] = None,
     ) -> SSHResult:
         """Run a script on remote host."""
         env_str = " ".join(f"{k}='{v}'" for k, v in (env or {}).items())
@@ -207,6 +214,8 @@ class SSHClient:
             command = f"cd $(dirname {script_path}) && {env_str} {sudo_prefix} {script_path} 2>&1"
         else:
             command = f"cd $(dirname {script_path}) && {sudo_prefix} {script_path} 2>&1"
+        if on_progress:
+            return self.run_with_progress(command, timeout=timeout, on_progress=on_progress)
         return self.run(command, timeout=timeout)
 
     def get_docker_containers(self, filter_name: Optional[str] = None) -> List[dict]:

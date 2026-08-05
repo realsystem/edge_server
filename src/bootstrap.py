@@ -99,6 +99,17 @@ class Bootstrap:
         if result.stderr:
             self.logger.warning(f"[{phase}] stderr:\n{result.stderr}")
 
+    def _ssh_command(self) -> str:
+        """Build SSH command string for display."""
+        parts = ["ssh"]
+        if self.config.ssh.key_file:
+            key_path = Path(self.config.ssh.key_file).expanduser().resolve()
+            parts.append(f"-i {key_path}")
+        if self.config.ssh.port != 22:
+            parts.append(f"-p {self.config.ssh.port}")
+        parts.append(f"{self.config.ssh.user}@{self.target}")
+        return " ".join(parts)
+
     def run(self) -> bool:
         """Run the bootstrap process."""
         self.progress.header("Edge Server Bootstrap", self.mode.title(), self.dry_run)
@@ -167,6 +178,7 @@ class Bootstrap:
         self.ssh = SSHClient(
             host=self.target,
             user=self.config.ssh.user,
+            port=self.config.ssh.port,
             timeout=self.config.ssh.timeout,
             retries=self.config.ssh.retries,
             key_file=self.config.ssh.key_file or None,
@@ -292,6 +304,8 @@ class Bootstrap:
         if dns:
             env["DNS"] = dns
 
+        if self.mode == "auto":
+            env["BATCH_MODE"] = "true"
         self._log(f"Running initial-setup.sh with env: {env}")
         timeout = self.config.timeouts.initial_setup
         self.progress.info(f"Running initial-setup.sh (timeout: {timeout}s)...")
@@ -362,12 +376,12 @@ class Bootstrap:
             self._load_secrets_file()
         else:
             self._secrets["TAILSCALE_AUTH_KEY"] = self._prompt(
-                "Tailscale auth key", "", secret=True
+                "TAILSCALE_AUTH_KEY", "", secret=True
             )
-            self._secrets["MQTT_USER"] = self._prompt("MQTT username", "homeassistant")
-            self._secrets["MQTT_PASS"] = self._prompt("MQTT password", "", secret=True)
-            self._secrets["REOLINK_USER"] = self._prompt("Camera username", "admin")
-            self._secrets["REOLINK_PASS"] = self._prompt("Camera password", "", secret=True)
+            self._secrets["MQTT_USER"] = self._prompt("MQTT_USER", "homeassistant")
+            self._secrets["MQTT_PASS"] = self._prompt("MQTT_PASS", "", secret=True)
+            self._secrets["REOLINK_USER"] = self._prompt("REOLINK_USER", "admin")
+            self._secrets["REOLINK_PASS"] = self._prompt("REOLINK_PASS", "", secret=True)
 
         if self.dry_run:
             self.progress.dry_run("Would configure secrets on target")
@@ -483,14 +497,22 @@ class Bootstrap:
             self._log("Starting base stack deployment")
             self.progress.info("Deploying base stack (Tailscale, MQTT, Home Assistant)...")
             self.progress.info(
-                f"  Tail log: ssh {self.target} tail -f /var/log/edge-server-deploy.log"
+                f"  Tail log: {self._ssh_command()} tail -f /var/log/edge-server-deploy.log"
             )
             timeout = self.config.timeouts.deployment_base
 
+            deploy_env = "export BATCH_MODE=true"
+            if self.config.deploy.edge_server_dir:
+                deploy_env += f" EDGE_SERVER_DIR={self.config.deploy.edge_server_dir}"
+            if self.config.deploy.edge_storage_dir:
+                deploy_env += f" EDGE_STORAGE_DIR={self.config.deploy.edge_storage_dir}"
+
+            secrets_pass = os.environ.get("SECRETS_PASSWORD", "")
             result = self.ssh.run(
                 f"cd {self.REMOTE_DIR} && "
+                f"export SECRETS_PASSWORD='{secrets_pass}' && "
                 f"eval $(./secrets.sh export 2>/dev/null) && "
-                f"export BATCH_MODE=true && sudo -E ./deploy-edge-server.sh",
+                f"{deploy_env} && sudo -E ./deploy-edge-server.sh",
                 timeout=timeout,
             )
 
@@ -509,20 +531,21 @@ class Bootstrap:
             self._log("Base stack deployed successfully")
             self.progress.ok("Base stack deployed")
 
-        # Deploy security stack
-        if self.deploy_type in ["security", "full"]:
+        # Deploy security stack (only if base stack wasn't deployed - they overlap)
+        if self.deploy_type == "security":
             self.state.start_phase(Phase.DEPLOY_SECURITY)
             self._log("Starting security stack deployment")
             self.progress.info("Deploying security stack (Frigate NVR)...")
             self.progress.info(
-                f"  Tail log: ssh {self.target} tail -f /var/log/edge-server-deploy.log"
+                f"  Tail log: {self._ssh_command()} tail -f /var/log/edge-server-deploy.log"
             )
             timeout = self.config.timeouts.deployment_security
 
             result = self.ssh.run(
                 f"cd {self.REMOTE_DIR} && "
+                f"export SECRETS_PASSWORD='{secrets_pass}' && "
                 f"eval $(./secrets.sh export 2>/dev/null) && "
-                f"export BATCH_MODE=true && sudo -E ./deploy-security.sh",
+                f"{deploy_env} && sudo -E ./deploy-security.sh",
                 timeout=timeout,
             )
 
@@ -622,7 +645,7 @@ class Bootstrap:
         urls = {
             "Home Assistant": f"http://{self.target}:{self.config.services.ha_port}",
             "MQTT": f"{self.target}:{self.config.services.mqtt_port}",
-            "SSH": f"ssh {self.config.ssh.user}@{self.target}",
+            "SSH": self._ssh_command(),
         }
         if self.deploy_type in ["security", "full"]:
             urls["Frigate"] = f"http://{self.target}:{self.config.services.frigate_port}"
@@ -648,7 +671,9 @@ class Bootstrap:
     def _prompt(self, prompt: str, default: str = "", secret: bool = False) -> str:
         """Prompt for input in manual mode."""
         if self.mode == "auto":
-            return self._secrets.get(prompt.upper().replace(" ", "_"), default)
+            key = prompt.upper().replace(" ", "_")
+            # Check env vars first, then stored secrets, then default
+            return os.environ.get(key, self._secrets.get(key, default))
 
         display_default = f" [{default}]" if default and not secret else ""
         if secret:
@@ -695,7 +720,7 @@ Examples:
     parser.add_argument(
         "--deploy", choices=["base", "security", "full"], default="full", help="Deployment type"
     )
-    parser.add_argument("--user", default=os.environ.get("USER", "root"), help="SSH user")
+    parser.add_argument("--user", help="SSH user (default: from config or current user)")
     parser.add_argument("--key", "-i", help="SSH private key file")
     parser.add_argument(
         "--no-host-key-check",
@@ -711,7 +736,10 @@ Examples:
 
     # Load config
     config = Config.load(args.config)
-    config.ssh.user = args.user
+    if args.user:
+        config.ssh.user = args.user
+    elif not config.ssh.user:
+        config.ssh.user = os.environ.get("USER", "root")
     if args.key:
         config.ssh.key_file = args.key
     if args.no_host_key_check:

@@ -1,0 +1,25 @@
+services:
+  target:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: edge-server-test-target
+    hostname: test-target
+    ports:
+      - "2222:22"
+    volumes:
+      # Mount host Docker socket to alternate location (systemd manages /var/run)
+      - /var/run/docker.sock:/docker.sock
+      # Persist SSH keys between restarts
+      - ./ssh_keys:/home/testuser/.ssh
+      # Required for systemd
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      # Shared directory - same path in container and on host so docker mounts work
+      - /tmp/edge-server-test:/tmp/edge-server-test
+      - /tmp/edge-server-test-storage:/tmp/edge-server-test-storage
+    environment:
+      # Override default paths for test environment
+      - EDGE_SERVER_DIR=/tmp/edge-server-test
+      - EDGE_STORAGE_DIR=/tmp/edge-server-test-storage
+    privileged: true
+    restart: unless-stopped

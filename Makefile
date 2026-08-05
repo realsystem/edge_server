@@ -15,7 +15,7 @@ LITE_COMPOSE := $(TESTS_DIR)/docker-compose.lite.yml
 FULL_COMPOSE := $(TESTS_DIR)/docker-compose.mac.yml
 HARNESS_COMPOSE := $(TESTS_DIR)/docker-compose.test-harness.yml
 
-.PHONY: help setup pytest check check-mem-lite check-mem-full test test-dev test-ci test-full test-full-dev test-scripts start start-full stop status logs clean reset lint mem
+.PHONY: help setup pytest check check-mem-lite check-mem-full test test-dev test-ci test-full test-full-dev test-scripts start start-full stop status logs clean reset lint mem target-start target-stop target-ssh
 
 help:
 	@echo "Edge Server - Local Testing"
@@ -30,12 +30,17 @@ help:
 	@echo "  make start          - Start lite stack without tests"
 	@echo "  make start-full     - Start full stack without tests"
 	@echo "  make test-scripts   - Run shell script unit tests"
-	@echo "  make stop       - Stop all containers"
-	@echo "  make status     - Show container status"
-	@echo "  make logs       - Follow logs (Ctrl+C to exit)"
-	@echo "  make clean      - Stop and remove all test data"
-	@echo "  make lint       - Check shell scripts with shellcheck"
-	@echo "  make mem        - Show memory usage of running containers"
+	@echo "  make stop           - Stop all containers"
+	@echo "  make status         - Show container status"
+	@echo "  make logs           - Follow logs (Ctrl+C to exit)"
+	@echo "  make clean          - Stop and remove all test data"
+	@echo "  make lint           - Check shell scripts with shellcheck"
+	@echo "  make mem            - Show memory usage of running containers"
+	@echo ""
+	@echo "Test Target (deployment testing without real hardware):"
+	@echo "  make target-start   - Start Ubuntu container with SSH (port 2222)"
+	@echo "  make target-stop    - Stop test target container"
+	@echo "  make target-ssh     - SSH into test target"
 	@echo ""
 	@echo "Memory Requirements:"
 	@echo "  Lite test:  ~1.3 GB (1 camera)"
@@ -227,3 +232,19 @@ mem: check
 	@echo "  frigate:               ~1,500 MB"
 	@echo "  homeassistant:           ~500 MB"
 	@echo "  (+ Docker overhead):     ~700 MB"
+
+# Test target container for deployment testing
+TARGET_DIR := $(TESTS_DIR)/target
+TARGET_COMPOSE := $(TARGET_DIR)/docker-compose.yml
+
+target-start: check
+	@cd $(TARGET_DIR) && ./setup.sh
+
+target-stop: check
+	@docker rm -f frigate homeassistant mosquitto 2>/dev/null || true
+	@docker compose -f $(TARGET_COMPOSE) down 2>/dev/null || true
+	@rm -rf /tmp/edge-server-test /tmp/edge-server-test-storage 2>/dev/null || true
+	@echo "Test target and edge-server containers stopped"
+
+target-ssh:
+	@ssh -i $(TARGET_DIR)/ssh_keys/id_ed25519 -p 2222 testuser@localhost

@@ -59,6 +59,7 @@ class SSHConfig:
     """SSH connection settings."""
 
     user: str = ""
+    port: int = 22
     timeout: int = 10
     retries: int = 3
     key_file: str = ""
@@ -80,6 +81,14 @@ class SecretsConfig:
 
 
 @dataclass
+class DeployConfig:
+    """Deploy settings."""
+
+    edge_server_dir: str = ""  # Empty means use default (/opt/edge-server)
+    edge_storage_dir: str = ""  # Empty means use default (/mnt/storage)
+
+
+@dataclass
 class Config:
     """Main configuration container."""
 
@@ -90,6 +99,7 @@ class Config:
     ssh: SSHConfig = field(default_factory=SSHConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     secrets: SecretsConfig = field(default_factory=SecretsConfig)
+    deploy: DeployConfig = field(default_factory=DeployConfig)
 
     @classmethod
     def load(cls, config_path: Optional[Path] = None) -> "Config":
@@ -162,6 +172,7 @@ class Config:
 
         # SSH/Target
         if parser.has_section("target"):
+            config.ssh.port = parser.getint("target", "SSH_PORT", fallback=config.ssh.port)
             config.ssh.timeout = parser.getint("target", "SSH_TIMEOUT", fallback=config.ssh.timeout)
             config.ssh.retries = parser.getint("target", "SSH_RETRIES", fallback=config.ssh.retries)
             config.ssh.key_file = parser.get("target", "SSH_KEY_FILE", fallback=config.ssh.key_file)
@@ -170,6 +181,7 @@ class Config:
                 "SSH_STRICT_HOST_KEY_CHECKING",
                 fallback=config.ssh.strict_host_key_checking,
             )
+            config.ssh.user = parser.get("target", "SSH_USER", fallback=config.ssh.user)
 
         # Logging
         if parser.has_section("logging"):
@@ -181,6 +193,15 @@ class Config:
         if parser.has_section("secrets"):
             config.secrets.secrets_dir = parser.get(
                 "secrets", "SECRETS_DIR", fallback=config.secrets.secrets_dir
+            )
+
+        # Deploy
+        if parser.has_section("deploy"):
+            config.deploy.edge_server_dir = parser.get(
+                "deploy", "EDGE_SERVER_DIR", fallback=config.deploy.edge_server_dir
+            )
+            config.deploy.edge_storage_dir = parser.get(
+                "deploy", "EDGE_STORAGE_DIR", fallback=config.deploy.edge_storage_dir
             )
 
         return config
@@ -230,10 +251,12 @@ class Config:
 
         # Target/SSH
         parser["target"] = {
+            "SSH_PORT": str(self.ssh.port),
             "SSH_TIMEOUT": str(self.ssh.timeout),
             "SSH_RETRIES": str(self.ssh.retries),
             "SSH_KEY_FILE": self.ssh.key_file,
             "SSH_STRICT_HOST_KEY_CHECKING": self.ssh.strict_host_key_checking,
+            "SSH_USER": self.ssh.user,
         }
 
         with open(config_path, "w") as f:
