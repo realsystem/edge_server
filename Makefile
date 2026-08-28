@@ -346,6 +346,7 @@ RENOGY_ROVER := $(VENV_DIR)/bin/renogy-rover
 renogy-setup:
 	@if [ ! -f $(PIP) ]; then $(MAKE) setup; fi
 	@echo "Installing renogy-rover CLI..."
+	@$(PIP) install -r $(RENOGY_DIR)/requirements.txt
 	@$(PIP) install -e $(RENOGY_DIR)
 	@echo "Done. Run: make renogy-check"
 
