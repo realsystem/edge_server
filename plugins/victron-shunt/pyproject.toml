@@ -13,17 +13,18 @@ dependencies = [
     "victron-ble>=0.6.0",
     "click>=8.0.0",
     "pyyaml>=6.0",
+    "paho-mqtt>=2.0.0",
 ]
 
 [project.scripts]
 victron-shunt = "victron_shunt.cli:main"
 
 [project.optional-dependencies]
-mqtt = ["paho-mqtt>=1.6.0"]
 dev = ["pytest", "ruff"]
 
-[tool.setuptools.packages.find]
-include = ["victron_shunt*"]
+[tool.setuptools]
+packages = ["victron_shunt"]
+package-dir = {"victron_shunt" = "src"}
 
 [tool.ruff]
 line-length = 88

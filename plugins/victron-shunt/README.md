@@ -1,6 +1,7 @@
 # Victron Smart Shunt BLE Reader
 
 CLI tool to read battery data from Victron Smart Shunt via Bluetooth Low Energy.
+Publishes to MQTT for Home Assistant integration.
 
 ## Quick Start
 
@@ -10,8 +11,14 @@ make victron-setup   # Install into project venv
 make victron-check   # Check Bluetooth
 make victron-scan    # Scan for devices
 
-# Read data (get key from Victron Connect app)
-.venv/bin/victron-shunt read --address AA:BB:CC:DD:EE:FF --key <YOUR_KEY>
+# Save config (one time)
+.venv/bin/victron-shunt config --address AA:BB:CC:DD:EE:FF --key <YOUR_KEY>
+
+# Read data
+.venv/bin/victron-shunt read
+
+# Read with MQTT publishing
+.venv/bin/victron-shunt read --mqtt --continuous
 ```
 
 ### Manual install (standalone venv)
@@ -30,30 +37,88 @@ victron-shunt check
 ```bash
 victron-shunt check
 ```
-Verifies Bluetooth adapter is available and working.
 
 ### Scan for Devices
 ```bash
-# Find Victron devices
-victron-shunt scan
+victron-shunt scan          # Find Victron devices
+victron-shunt scan --all    # Find all BLE devices
+```
 
-# Find all BLE devices (debugging)
-victron-shunt scan --all
+### Configure
+```bash
+# Save device config
+victron-shunt config --address AA:BB:CC:DD:EE:FF --key <key>
+
+# Configure MQTT
+victron-shunt config --mqtt-host localhost --mqtt-user edge
+
+# Show current config
+victron-shunt config --show
 ```
 
 ### Read Data
 ```bash
 # Single reading
-victron-shunt read -a AA:BB:CC:DD:EE:FF -k <encryption_key>
+victron-shunt read
 
 # Continuous mode
-victron-shunt read -a AA:BB:CC:DD:EE:FF -k <encryption_key> --continuous
+victron-shunt read --continuous
+
+# With MQTT publishing
+victron-shunt read --mqtt --continuous
 ```
 
-### Get Encryption Key
+### Run as Service
 ```bash
-victron-shunt info
+# Runs continuously with MQTT, designed for systemd
+victron-shunt service
 ```
+
+## Configuration
+
+Configuration is loaded in order of precedence (highest first):
+1. **CLI arguments** (`--address`, `--key`)
+2. **Environment variables** (`VICTRON_ADDRESS`, `VICTRON_KEY`, etc.)
+3. **Config file** (first found is used)
+
+Config file locations searched:
+- `~/.config/victron-shunt.yaml` (user config, created by `config` command)
+- `/etc/victron-shunt/config.yaml` (system config, used by service)
+
+### Creating config
+
+```bash
+# Interactive - saves to ~/.config/victron-shunt.yaml
+victron-shunt config --address AA:BB:CC:DD:EE:FF --key <key>
+
+# With MQTT settings
+victron-shunt config --address AA:BB:CC:DD:EE:FF --key <key> \
+    --mqtt-host localhost --mqtt-user edge
+
+# View current config
+victron-shunt config --show
+```
+
+### Config file format
+
+```yaml
+address: "AA:BB:CC:DD:EE:FF"
+key: "0df4d0395b7d1a876c0c33ecb9e70dcd"
+mqtt:
+  host: localhost
+  port: 1883
+  user: edge
+  topic_prefix: victron/smartshunt
+```
+
+### Environment variables
+
+Override any config file setting:
+- `VICTRON_ADDRESS` - Device MAC address
+- `VICTRON_KEY` - Encryption key
+- `MQTT_HOST`, `MQTT_PORT`, `MQTT_USER`, `MQTT_PASS`
+
+Useful for systemd service with `EnvironmentFile`.
 
 ## Getting the Encryption Key
 
@@ -64,19 +129,43 @@ victron-shunt info
 5. Find **Encryption data** - tap to reveal
 6. Copy the 32-character hex key
 
-## Ubuntu Setup
+## MQTT Topics
 
-On Ubuntu, ensure BlueZ is installed and running:
+When running with `--mqtt` or as a service:
+
+| Topic | Description |
+|-------|-------------|
+| `victron/smartshunt/voltage` | Battery voltage (V) |
+| `victron/smartshunt/current` | Current (A, positive=charging) |
+| `victron/smartshunt/power` | Power (W) |
+| `victron/smartshunt/soc` | State of charge (%) |
+| `victron/smartshunt/consumed_ah` | Consumed Ah |
+| `victron/smartshunt/state` | Combined JSON |
+
+Home Assistant auto-discovery is published on connect.
+
+## Systemd Service
+
+For production deployment, install via deploy script or manually:
 
 ```bash
-# Install BlueZ
+sudo cp victron-shunt.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable victron-shunt
+sudo systemctl start victron-shunt
+
+# View logs
+journalctl -u victron-shunt -f
+```
+
+## Ubuntu Setup
+
+Ensure BlueZ is installed:
+
+```bash
 sudo apt install bluez
-
-# Start Bluetooth service
-sudo systemctl start bluetooth
 sudo systemctl enable bluetooth
-
-# Check adapter
+sudo systemctl start bluetooth
 hciconfig -a
 ```
 

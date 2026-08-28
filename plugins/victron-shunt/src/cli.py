@@ -110,8 +110,9 @@ def scan(timeout: float, show_all: bool):
 @click.option("--key", "-k", help="Encryption key (hex)")
 @click.option("--timeout", "-t", default=30.0, help="Read timeout in seconds")
 @click.option("--continuous", "-c", is_flag=True, help="Continuous reading mode")
+@click.option("--mqtt", is_flag=True, help="Publish to MQTT broker")
 @click.pass_context
-def read(ctx, address: str, key: str, timeout: float, continuous: bool):
+def read(ctx, address: str, key: str, timeout: float, continuous: bool, mqtt: bool):
     """Read data from Victron Smart Shunt."""
     config: Config = ctx.obj["config"]
 
@@ -132,6 +133,20 @@ def read(ctx, address: str, key: str, timeout: float, continuous: bool):
         click.secho(f"Invalid key length: {len(key)} (expected 32 hex chars)", fg="red")
         sys.exit(1)
 
+    # Setup MQTT if requested
+    mqtt_pub = None
+    if mqtt:
+        from .mqtt import MQTTPublisher
+        click.echo(f"Connecting to MQTT broker {config.mqtt.host}:{config.mqtt.port}...")
+        try:
+            mqtt_pub = MQTTPublisher(config.mqtt)
+            mqtt_pub.connect()
+            mqtt_pub.publish_discovery()
+            click.secho("MQTT connected, discovery published", fg="green")
+        except Exception as e:
+            click.secho(f"MQTT connection failed: {e}", fg="red")
+            sys.exit(1)
+
     reader = VictronReader(address, key)
 
     if continuous:
@@ -144,11 +159,16 @@ def read(ctx, address: str, key: str, timeout: float, continuous: bool):
                 f"P: {r.power:+8.1f}W | "
                 f"SoC: {r.soc:5.1f}%"
             )
+            if mqtt_pub:
+                mqtt_pub.publish_reading(r)
 
         try:
             run_async(reader.read_continuous(on_reading))
         except KeyboardInterrupt:
             click.echo("\nStopped")
+        finally:
+            if mqtt_pub:
+                mqtt_pub.disconnect()
     else:
         click.echo(f"Reading from {address} (timeout {timeout}s)...")
 
@@ -161,7 +181,14 @@ def read(ctx, address: str, key: str, timeout: float, continuous: bool):
             click.echo("  - Wrong encryption key")
             click.echo("  - Device not advertising (wake it up)")
             click.echo("  - Out of range")
+            if mqtt_pub:
+                mqtt_pub.disconnect()
             sys.exit(1)
+
+        if mqtt_pub:
+            mqtt_pub.publish_reading(reading)
+            mqtt_pub.disconnect()
+            click.secho("Published to MQTT", fg="green")
 
         click.echo()
         click.secho("Battery Status:", fg="green", bold=True)
@@ -257,6 +284,91 @@ def info():
     click.echo("The key looks like: 0df4d0395b7d1a876c0c33ecb9e70dcd")
     click.echo()
     click.echo("Note: Keep this key secret - it allows reading your battery data")
+
+
+@cli.command()
+@click.pass_context
+def service(ctx):
+    """Run as a service (continuous MQTT publishing, minimal output).
+
+    Designed to run under systemd. Reads config from file/env vars.
+    Logs to stdout for journald capture.
+    """
+    import logging
+    import signal
+    import time as time_module
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    log = logging.getLogger("victron-shunt")
+
+    config: Config = ctx.obj["config"]
+
+    errors = config.validate()
+    if errors:
+        for err in errors:
+            log.error(f"Config error: {err}")
+        sys.exit(1)
+
+    key = config.key.replace(" ", "").replace("-", "").replace(":", "")
+
+    # Setup MQTT
+    from .mqtt import MQTTPublisher
+
+    log.info(f"Connecting to MQTT {config.mqtt.host}:{config.mqtt.port}")
+    mqtt_pub = MQTTPublisher(config.mqtt)
+
+    try:
+        mqtt_pub.connect()
+        mqtt_pub.publish_discovery()
+        log.info("MQTT connected, HA discovery published")
+    except Exception as e:
+        log.error(f"MQTT connection failed: {e}")
+        sys.exit(1)
+
+    # Setup reader
+    reader = VictronReader(config.address, key)
+    log.info(f"Monitoring Victron device {config.address}")
+
+    # Handle signals
+    running = True
+
+    def handle_signal(signum, frame):
+        nonlocal running
+        log.info(f"Received signal {signum}, shutting down")
+        running = False
+
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGINT, handle_signal)
+
+    reading_count = 0
+    last_log = 0
+
+    def on_reading(r):
+        nonlocal reading_count, last_log
+        mqtt_pub.publish_reading(r)
+        reading_count += 1
+
+        # Log every 60 seconds
+        now = time_module.time()
+        if now - last_log >= 60:
+            log.info(
+                f"V={r.voltage:.2f}V I={r.current:+.2f}A "
+                f"P={r.power:+.1f}W SoC={r.soc:.1f}% "
+                f"(readings: {reading_count})"
+            )
+            last_log = now
+
+    try:
+        run_async(reader.read_continuous(on_reading))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        mqtt_pub.disconnect()
+        log.info("Service stopped")
 
 
 def main():
