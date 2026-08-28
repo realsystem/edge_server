@@ -1,0 +1,7 @@
+# NUT user definitions
+
+[admin]
+    password = edgeserver
+    upsmon master
+    actions = SET
+    instcmds = ALL

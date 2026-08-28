@@ -49,6 +49,12 @@ VICTRON_INSTALL="${VICTRON_INSTALL:-}"
 VICTRON_ADDRESS="${VICTRON_ADDRESS:-}"
 VICTRON_KEY="${VICTRON_KEY:-}"
 
+# NUT Power Monitor (auto-shutdown on battery)
+# Set to "true" to install on laptop, or leave empty for auto-detect
+NUT_POWER_INSTALL="${NUT_POWER_INSTALL:-}"
+NUT_SHUTDOWN_DELAY="${NUT_SHUTDOWN_DELAY:-600}"  # Seconds on battery before shutdown
+NUT_LOW_BATTERY="${NUT_LOW_BATTERY:-10}"          # Shutdown below this battery %
+
 #-------------------------------------------------------------------------------
 # LOGGING & UTILITIES
 #-------------------------------------------------------------------------------
@@ -379,6 +385,63 @@ install_victron() {
         success "Victron Smart Shunt monitor installed"
     else
         warn "Victron installation failed - check logs"
+    fi
+}
+
+install_nut_power() {
+    # Auto-detect laptop (has battery)
+    local has_battery=false
+    if [ -d /sys/class/power_supply/BAT0 ] || [ -d /sys/class/power_supply/BAT1 ]; then
+        has_battery=true
+    fi
+
+    # Check if we should install
+    if [[ "$NUT_POWER_INSTALL" != "true" ]]; then
+        if [[ "$BATCH_MODE" == "true" ]]; then
+            if [[ "$has_battery" == "true" ]]; then
+                info "Laptop detected but NUT_POWER_INSTALL not set - skipping power monitor"
+            fi
+            return 0
+        fi
+
+        if [[ "$has_battery" != "true" ]]; then
+            info "No battery detected - skipping power monitor"
+            return 0
+        fi
+
+        echo ""
+        echo "=== Power Loss Monitor (NUT) ==="
+        echo "Laptop battery detected. Install automatic shutdown on power loss?"
+        echo "Default: Shutdown after 10 minutes on battery"
+        echo ""
+        if ! confirm "Install power loss monitor?"; then
+            info "Skipping power monitor installation"
+            return 0
+        fi
+    fi
+
+    info "Installing NUT power monitor..."
+
+    # Find the plugin directory
+    local plugin_dir=""
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    if [[ -d "${script_dir}/plugins/nut-power" ]]; then
+        plugin_dir="${script_dir}/plugins/nut-power"
+    else
+        warn "NUT power plugin not found, skipping installation"
+        return 0
+    fi
+
+    # Set configuration from environment
+    export NUT_SHUTDOWN_DELAY="${NUT_SHUTDOWN_DELAY:-600}"
+    export NUT_LOW_BATTERY="${NUT_LOW_BATTERY:-10}"
+
+    if bash "${plugin_dir}/install.sh"; then
+        success "NUT power monitor installed (shutdown after $((NUT_SHUTDOWN_DELAY / 60)) min on battery)"
+    else
+        warn "NUT installation failed - check logs"
     fi
 }
 
@@ -918,6 +981,7 @@ main() {
     create_systemd_service
     start_services
     install_victron
+    install_nut_power
     show_summary
 
     info "Deployment completed successfully at $(date)"

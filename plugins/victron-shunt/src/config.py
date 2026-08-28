@@ -29,12 +29,22 @@ class MQTTConfig:
 
 
 @dataclass
+class ShutdownConfig:
+    """Power loss shutdown settings."""
+
+    enabled: bool = False
+    delay_minutes: int = 10
+    min_soc: Optional[float] = None  # Also shutdown if SoC drops below this
+
+
+@dataclass
 class Config:
     """Victron Smart Shunt configuration."""
 
     address: Optional[str] = None
     key: Optional[str] = None
     mqtt: MQTTConfig = field(default_factory=MQTTConfig)
+    shutdown: ShutdownConfig = field(default_factory=ShutdownConfig)
 
     @classmethod
     def load(cls, config_path: Optional[Path] = None) -> "Config":

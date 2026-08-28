@@ -1,0 +1,27 @@
+[Unit]
+Description=Battery Status Poller for NUT
+Documentation=https://networkupstools.org/
+After=nut-server.service
+Before=nut-monitor.service
+Wants=nut-server.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/battery-poller.sh
+Restart=always
+RestartSec=10
+
+# Environment
+Environment=NUT_POLL_INTERVAL=30
+Environment=NUT_LOW_BATTERY=10
+
+# Run as root to read /sys
+User=root
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=battery-poller
+
+[Install]
+WantedBy=multi-user.target

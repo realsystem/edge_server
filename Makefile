@@ -15,7 +15,7 @@ LITE_COMPOSE := $(TESTS_DIR)/docker-compose.lite.yml
 FULL_COMPOSE := $(TESTS_DIR)/docker-compose.mac.yml
 HARNESS_COMPOSE := $(TESTS_DIR)/docker-compose.test-harness.yml
 
-.PHONY: help setup pytest check check-mem-lite check-mem-full test test-dev test-ci test-full test-full-dev test-scripts start start-full stop status logs clean reset lint mem target-start target-stop target-ssh victron-setup victron-check victron-scan victron-install victron-test
+.PHONY: help setup pytest check check-mem-lite check-mem-full test test-dev test-ci test-full test-full-dev test-scripts start start-full stop status logs clean reset lint mem target-start target-stop target-ssh victron-setup victron-check victron-scan victron-install victron-test nut-install nut-status nut-uninstall
 
 help:
 	@echo "Edge Server - Local Testing"
@@ -48,6 +48,11 @@ help:
 	@echo "  make victron-scan    - Scan for Victron BLE devices"
 	@echo "  make victron-test    - Run victron-shunt unit tests"
 	@echo "  make victron-install - Install systemd service (requires sudo)"
+	@echo ""
+	@echo "NUT Power Monitor (laptop battery shutdown):"
+	@echo "  make nut-install     - Install NUT power monitor (requires sudo)"
+	@echo "  make nut-status      - Show battery/UPS status"
+	@echo "  make nut-uninstall   - Remove NUT power monitor"
 	@echo ""
 	@echo "Memory Requirements:"
 	@echo "  Lite test:  ~1.3 GB (1 camera)"
@@ -303,3 +308,19 @@ victron-test: $(VICTRON_SHUNT)
 
 $(VICTRON_SHUNT):
 	@$(MAKE) victron-setup
+
+# NUT Power Monitor
+NUT_DIR := plugins/nut-power
+
+nut-install:
+	@if [ ! -d /sys/class/power_supply ]; then \
+		echo "ERROR: /sys/class/power_supply not found (not Linux?)"; \
+		exit 1; \
+	fi
+	sudo $(NUT_DIR)/install.sh
+
+nut-status:
+	@upsc laptop 2>/dev/null || echo "NUT not installed or not running"
+
+nut-uninstall:
+	sudo $(NUT_DIR)/uninstall.sh
