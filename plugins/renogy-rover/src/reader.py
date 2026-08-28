@@ -188,8 +188,15 @@ class RenogyReader:
         battery_current = signed_reg(2) / 100.0
 
         # Temperatures (offset 3-4)
-        controller_temp = signed_reg(3)
-        battery_temp = signed_reg(4)
+        # Renogy stores temps as: upper byte = sign (0=positive, 1=negative), lower byte = value
+        def parse_temp(offset: int) -> int:
+            val = reg(offset)
+            sign = (val >> 8) & 0xFF
+            temp = val & 0xFF
+            return -temp if sign else temp
+
+        controller_temp = parse_temp(3)
+        battery_temp = parse_temp(4)
 
         # Load (offset 5-7)
         load_voltage = reg(5) / 10.0
