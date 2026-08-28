@@ -71,15 +71,20 @@ class VictronReader:
                 device_instance = device_class(self.encryption_key)
                 parsed = device_instance.parse(raw_bytes)
 
+                voltage = parsed.get_voltage() if hasattr(parsed, 'get_voltage') else 0.0
+                current = parsed.get_current() if hasattr(parsed, 'get_current') else 0.0
+                soc = parsed.get_soc() if hasattr(parsed, 'get_soc') else 0.0
+                consumed = parsed.get_consumed_ah() if hasattr(parsed, 'get_consumed_ah') else None
+                remaining = parsed.get_remaining_mins() if hasattr(parsed, 'get_remaining_mins') else None
+
                 result = ShuntReading(
-                    voltage=getattr(parsed, "voltage", 0.0) or 0.0,
-                    current=getattr(parsed, "current", 0.0) or 0.0,
-                    soc=getattr(parsed, "soc", 0.0) or 0.0,
-                    power=(getattr(parsed, "voltage", 0.0) or 0.0)
-                    * (getattr(parsed, "current", 0.0) or 0.0),
-                    consumed_ah=getattr(parsed, "consumed_ah", None),
-                    time_remaining=getattr(parsed, "remaining_mins", None),
-                    raw_data=vars(parsed) if hasattr(parsed, "__dict__") else None,
+                    voltage=voltage or 0.0,
+                    current=current or 0.0,
+                    soc=soc or 0.0,
+                    power=(voltage or 0.0) * (current or 0.0),
+                    consumed_ah=consumed,
+                    time_remaining=remaining,
+                    raw_data={"model": parsed.get_model_name()} if hasattr(parsed, 'get_model_name') else None,
                 )
                 event.set()
 
@@ -127,14 +132,19 @@ class VictronReader:
                 device_instance = device_class(self.encryption_key)
                 parsed = device_instance.parse(raw_bytes)
 
+                voltage = parsed.get_voltage() if hasattr(parsed, 'get_voltage') else 0.0
+                current = parsed.get_current() if hasattr(parsed, 'get_current') else 0.0
+                soc = parsed.get_soc() if hasattr(parsed, 'get_soc') else 0.0
+                consumed = parsed.get_consumed_ah() if hasattr(parsed, 'get_consumed_ah') else None
+                remaining = parsed.get_remaining_mins() if hasattr(parsed, 'get_remaining_mins') else None
+
                 reading = ShuntReading(
-                    voltage=getattr(parsed, "voltage", 0.0) or 0.0,
-                    current=getattr(parsed, "current", 0.0) or 0.0,
-                    soc=getattr(parsed, "soc", 0.0) or 0.0,
-                    power=(getattr(parsed, "voltage", 0.0) or 0.0)
-                    * (getattr(parsed, "current", 0.0) or 0.0),
-                    consumed_ah=getattr(parsed, "consumed_ah", None),
-                    time_remaining=getattr(parsed, "remaining_mins", None),
+                    voltage=voltage or 0.0,
+                    current=current or 0.0,
+                    soc=soc or 0.0,
+                    power=(voltage or 0.0) * (current or 0.0),
+                    consumed_ah=consumed,
+                    time_remaining=remaining,
                 )
 
                 if (
