@@ -2,9 +2,11 @@
 
 import asyncio
 import sys
+from pathlib import Path
 
 import click
 
+from .config import CONFIG_PATHS, Config
 from .reader import VictronReader
 from .scanner import check_bluetooth, scan_all_devices, scan_victron_devices
 
@@ -14,15 +16,23 @@ def run_async(coro):
     return asyncio.get_event_loop().run_until_complete(coro)
 
 
+pass_config = click.make_pass_decorator(Config, ensure=True)
+
+
 @click.group()
+@click.option("--config", "-c", "config_path", type=click.Path(exists=True, path_type=Path),
+              help="Config file path (default: ~/.config/victron-shunt.yaml)")
 @click.version_option()
-def cli():
+@click.pass_context
+def cli(ctx, config_path):
     """Victron Smart Shunt BLE reader.
 
-    First run 'check' to verify Bluetooth, then 'scan' to find devices,
-    then 'read' with the device address and encryption key.
+    Configuration is loaded from ~/.config/victron-shunt.yaml or /etc/victron-shunt/config.yaml.
+    Environment variables (VICTRON_ADDRESS, VICTRON_KEY, MQTT_*) override config file values.
+    CLI arguments override everything.
     """
-    pass
+    ctx.ensure_object(dict)
+    ctx.obj["config"] = Config.load(config_path)
 
 
 @cli.command()
@@ -90,20 +100,33 @@ def scan(timeout: float, show_all: bool):
             click.echo(f"    Signal:  {dev.rssi} dBm")
             click.echo()
 
-        click.echo("To read data, get encryption key from Victron Connect app:")
-        click.echo("  Device > Settings (gear) > Product Info > Encryption data")
-        click.echo()
-        click.echo("Then run:")
-        click.echo(f"  victron-shunt read --address {devices[0].address} --key <YOUR_KEY>")
+        click.echo("To save config and read data:")
+        click.echo(f"  victron-shunt config --address {devices[0].address} --key <YOUR_KEY>")
+        click.echo("  victron-shunt read")
 
 
 @cli.command()
-@click.option("--address", "-a", required=True, help="Device MAC address")
-@click.option("--key", "-k", required=True, help="Encryption key (hex)")
+@click.option("--address", "-a", help="Device MAC address")
+@click.option("--key", "-k", help="Encryption key (hex)")
 @click.option("--timeout", "-t", default=30.0, help="Read timeout in seconds")
 @click.option("--continuous", "-c", is_flag=True, help="Continuous reading mode")
-def read(address: str, key: str, timeout: float, continuous: bool):
+@click.pass_context
+def read(ctx, address: str, key: str, timeout: float, continuous: bool):
     """Read data from Victron Smart Shunt."""
+    config: Config = ctx.obj["config"]
+
+    # CLI args override config
+    address = address or config.address
+    key = key or config.key
+
+    if not address or not key:
+        click.secho("Error: address and key required", fg="red")
+        click.echo("\nProvide via:")
+        click.echo("  1. Config file: victron-shunt config --address XX --key YY")
+        click.echo("  2. CLI args: victron-shunt read --address XX --key YY")
+        click.echo("  3. Env vars: VICTRON_ADDRESS, VICTRON_KEY")
+        sys.exit(1)
+
     key = key.replace(" ", "").replace("-", "").replace(":", "")
     if len(key) != 32:
         click.secho(f"Invalid key length: {len(key)} (expected 32 hex chars)", fg="red")
@@ -159,6 +182,65 @@ def read(address: str, key: str, timeout: float, continuous: bool):
             for k, v in reading.raw_data.items():
                 if not k.startswith("_"):
                     click.echo(f"  {k}: {v}")
+
+
+@cli.command("config")
+@click.option("--address", "-a", help="Device MAC address")
+@click.option("--key", "-k", help="Encryption key (hex)")
+@click.option("--mqtt-host", help="MQTT broker host")
+@click.option("--mqtt-port", type=int, help="MQTT broker port")
+@click.option("--mqtt-user", help="MQTT username")
+@click.option("--show", is_flag=True, help="Show current config")
+@click.pass_context
+def config_cmd(ctx, address, key, mqtt_host, mqtt_port, mqtt_user, show):
+    """Show or update configuration."""
+    config: Config = ctx.obj["config"]
+
+    if show or (not address and not key and not mqtt_host and not mqtt_port and not mqtt_user):
+        # Show current config
+        click.echo("Configuration:")
+        click.echo(f"  Address: {config.address or '(not set)'}")
+        click.echo(f"  Key:     {'*' * 8 + config.key[-8:] if config.key else '(not set)'}")
+        click.echo(f"  MQTT:    {config.mqtt.host}:{config.mqtt.port}")
+        if config.mqtt.user:
+            click.echo(f"  MQTT user: {config.mqtt.user}")
+        click.echo()
+        click.echo("Config files searched:")
+        for path in CONFIG_PATHS:
+            exists = " (found)" if path.exists() else ""
+            click.echo(f"  {path}{exists}")
+        click.echo()
+        click.echo("Environment variables:")
+        click.echo("  VICTRON_ADDRESS, VICTRON_KEY")
+        click.echo("  MQTT_HOST, MQTT_PORT, MQTT_USER, MQTT_PASS")
+        return
+
+    # Update config
+    if address:
+        config.address = address
+    if key:
+        config.key = key.replace(" ", "").replace("-", "").replace(":", "")
+    if mqtt_host:
+        config.mqtt.host = mqtt_host
+    if mqtt_port:
+        config.mqtt.port = mqtt_port
+    if mqtt_user:
+        config.mqtt.user = mqtt_user
+
+    # Validate
+    errors = config.validate()
+    if errors:
+        click.secho("Config validation errors:", fg="yellow")
+        for err in errors:
+            click.echo(f"  - {err}")
+        click.echo()
+
+    # Save to user config
+    config_path = CONFIG_PATHS[0]
+    config.save(config_path)
+    click.secho(f"Config saved to {config_path}", fg="green")
+    click.echo()
+    click.echo("Test with: victron-shunt read")
 
 
 @cli.command()
