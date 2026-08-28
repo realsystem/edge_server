@@ -20,11 +20,16 @@ dependencies = [
 victron-shunt = "victron_shunt.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest", "ruff"]
+dev = ["pytest>=7.0", "pytest-cov", "ruff"]
 
 [tool.setuptools]
 packages = ["victron_shunt"]
 package-dir = {"victron_shunt" = "src"}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v"
 
 [tool.ruff]
 line-length = 88
