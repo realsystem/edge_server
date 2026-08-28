@@ -287,9 +287,10 @@ def info():
 
 
 @cli.command()
+@click.option("--no-mqtt", is_flag=True, help="Run without MQTT (logging only)")
 @click.pass_context
-def service(ctx):
-    """Run as a service (continuous MQTT publishing, minimal output).
+def service(ctx, no_mqtt: bool):
+    """Run as a service (continuous monitoring, optional MQTT).
 
     Designed to run under systemd. Reads config from file/env vars.
     Logs to stdout for journald capture.
@@ -315,19 +316,22 @@ def service(ctx):
 
     key = config.key.replace(" ", "").replace("-", "").replace(":", "")
 
-    # Setup MQTT
-    from .mqtt import MQTTPublisher
+    # Setup MQTT (optional)
+    mqtt_pub = None
+    if not no_mqtt and config.mqtt.host:
+        from .mqtt import MQTTPublisher
 
-    log.info(f"Connecting to MQTT {config.mqtt.host}:{config.mqtt.port}")
-    mqtt_pub = MQTTPublisher(config.mqtt)
-
-    try:
-        mqtt_pub.connect()
-        mqtt_pub.publish_discovery()
-        log.info("MQTT connected, HA discovery published")
-    except Exception as e:
-        log.error(f"MQTT connection failed: {e}")
-        sys.exit(1)
+        log.info(f"Connecting to MQTT {config.mqtt.host}:{config.mqtt.port}")
+        try:
+            mqtt_pub = MQTTPublisher(config.mqtt)
+            mqtt_pub.connect()
+            mqtt_pub.publish_discovery()
+            log.info("MQTT connected, HA discovery published")
+        except Exception as e:
+            log.warning(f"MQTT connection failed: {e} - continuing without MQTT")
+            mqtt_pub = None
+    else:
+        log.info("Running without MQTT (logging only)")
 
     # Setup reader
     reader = VictronReader(config.address, key)
@@ -349,7 +353,8 @@ def service(ctx):
 
     def on_reading(r):
         nonlocal reading_count, last_log
-        mqtt_pub.publish_reading(r)
+        if mqtt_pub:
+            mqtt_pub.publish_reading(r)
         reading_count += 1
 
         # Log every 60 seconds
@@ -367,7 +372,8 @@ def service(ctx):
     except KeyboardInterrupt:
         pass
     finally:
-        mqtt_pub.disconnect()
+        if mqtt_pub:
+            mqtt_pub.disconnect()
         log.info("Service stopped")
 
 
