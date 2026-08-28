@@ -348,24 +348,41 @@ def service(ctx, no_mqtt: bool):
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
-    reading_count = 0
+    start_time = time_module.time()
+    readings_this_minute = 0
     last_log = 0
+    last_rate = 0
+
+    def format_uptime(seconds):
+        days, remainder = divmod(int(seconds), 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes, _ = divmod(remainder, 60)
+        if days > 0:
+            return f"{days}d {hours}h"
+        elif hours > 0:
+            return f"{hours}h {minutes}m"
+        else:
+            return f"{minutes}m"
 
     def on_reading(r):
-        nonlocal reading_count, last_log
+        nonlocal readings_this_minute, last_log, last_rate
         if mqtt_pub:
             mqtt_pub.publish_reading(r)
-        reading_count += 1
+        readings_this_minute += 1
 
         # Log every 60 seconds
         now = time_module.time()
         if now - last_log >= 60:
+            uptime = format_uptime(now - start_time)
+            rate = readings_this_minute
             log.info(
                 f"V={r.voltage:.2f}V I={r.current:+.2f}A "
                 f"P={r.power:+.1f}W SoC={r.soc:.1f}% "
-                f"(readings: {reading_count})"
+                f"({rate}/min, uptime: {uptime})"
             )
             last_log = now
+            last_rate = rate
+            readings_this_minute = 0
 
     try:
         run_async(reader.read_continuous(on_reading))
