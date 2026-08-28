@@ -36,8 +36,7 @@ cp "$SCRIPT_DIR/requirements.txt" "$INSTALL_DIR/"
 echo "Creating Python virtual environment..."
 python3 -m venv "$INSTALL_DIR/venv"
 "$INSTALL_DIR/venv/bin/pip" install --upgrade pip -q
-"$INSTALL_DIR/venv/bin/pip" install -e "$INSTALL_DIR" -q
-"$INSTALL_DIR/venv/bin/pip" install paho-mqtt -q
+"$INSTALL_DIR/venv/bin/pip" install "$INSTALL_DIR" -q
 
 # Create config file
 echo "Creating config file..."

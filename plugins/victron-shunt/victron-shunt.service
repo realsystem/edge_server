@@ -6,7 +6,7 @@ Wants=bluetooth.target
 
 [Service]
 Type=simple
-ExecStart=/opt/victron-shunt/venv/bin/victron-shunt service
+ExecStart=/opt/victron-shunt/venv/bin/python -m victron_shunt.cli service
 Restart=always
 RestartSec=10
 
