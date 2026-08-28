@@ -43,6 +43,12 @@ MQTT_PASS="${MQTT_PASS:-}"
 # Batch mode - skip interactive prompts (set to "true" for automated runs)
 BATCH_MODE="${BATCH_MODE:-false}"
 
+# Victron Smart Shunt (optional BLE battery monitor)
+# Set to "true" to install, or leave empty to be prompted
+VICTRON_INSTALL="${VICTRON_INSTALL:-}"
+VICTRON_ADDRESS="${VICTRON_ADDRESS:-}"
+VICTRON_KEY="${VICTRON_KEY:-}"
+
 #-------------------------------------------------------------------------------
 # LOGGING & UTILITIES
 #-------------------------------------------------------------------------------
@@ -293,6 +299,87 @@ install_tailscale() {
     fi
 
     success "Tailscale configured"
+}
+
+install_victron() {
+    # Check if we should install
+    if [[ "$VICTRON_INSTALL" != "true" ]]; then
+        if [[ "$BATCH_MODE" == "true" ]]; then
+            info "Skipping Victron Smart Shunt (VICTRON_INSTALL not set)"
+            return 0
+        fi
+
+        echo ""
+        echo "=== Victron Smart Shunt Monitor (Optional) ==="
+        echo "Monitor battery via Bluetooth and publish to MQTT/Home Assistant"
+        echo ""
+        if ! confirm "Install Victron Smart Shunt monitor?"; then
+            info "Skipping Victron Smart Shunt installation"
+            return 0
+        fi
+    fi
+
+    # Get device address if not set
+    if [[ -z "$VICTRON_ADDRESS" ]]; then
+        if [[ "$BATCH_MODE" == "true" ]]; then
+            warn "Skipping Victron: VICTRON_ADDRESS not set in batch mode"
+            return 0
+        fi
+        echo ""
+        echo "Get the device address from Victron Connect app:"
+        echo "  Device > Settings > Product Info > MAC Address"
+        echo ""
+        read -rp "Victron MAC address (e.g., AA:BB:CC:DD:EE:FF): " VICTRON_ADDRESS
+        if [[ -z "$VICTRON_ADDRESS" ]]; then
+            warn "No address provided, skipping Victron installation"
+            return 0
+        fi
+    fi
+
+    # Get encryption key if not set
+    if [[ -z "$VICTRON_KEY" ]]; then
+        if [[ "$BATCH_MODE" == "true" ]]; then
+            warn "Skipping Victron: VICTRON_KEY not set in batch mode"
+            return 0
+        fi
+        echo ""
+        echo "Get the encryption key from Victron Connect app:"
+        echo "  Device > Settings > Product Info > Encryption data"
+        echo ""
+        read -rp "Encryption key (32 hex characters): " VICTRON_KEY
+        if [[ -z "$VICTRON_KEY" ]]; then
+            warn "No key provided, skipping Victron installation"
+            return 0
+        fi
+    fi
+
+    info "Installing Victron Smart Shunt monitor..."
+
+    # Find the plugin directory (deployed alongside this script or in plugins/)
+    local plugin_dir=""
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    if [[ -d "${script_dir}/plugins/victron-shunt" ]]; then
+        plugin_dir="${script_dir}/plugins/victron-shunt"
+    elif [[ -d "${script_dir}/victron-shunt" ]]; then
+        plugin_dir="${script_dir}/victron-shunt"
+    else
+        warn "Victron plugin not found, skipping installation"
+        return 0
+    fi
+
+    # Run the install script
+    export VICTRON_ADDRESS
+    export VICTRON_KEY
+    export MQTT_USER
+    export MQTT_PASS
+
+    if bash "${plugin_dir}/install.sh"; then
+        success "Victron Smart Shunt monitor installed"
+    else
+        warn "Victron installation failed - check logs"
+    fi
 }
 
 #-------------------------------------------------------------------------------
@@ -779,6 +866,13 @@ show_summary() {
     echo "  - Restart stack:   sudo systemctl restart edge-server"
     echo "  - Stack status:    cd ${APP_DIR} && docker compose ps"
     echo "  - Update images:   cd ${APP_DIR} && docker compose pull && docker compose up -d"
+    if systemctl is-enabled victron-shunt &>/dev/null; then
+        echo ""
+        echo "Victron Smart Shunt:"
+        echo "  - View logs:       journalctl -u victron-shunt -f"
+        echo "  - MQTT topics:     victron/smartshunt/voltage, current, soc, power"
+        echo "  - Config:          /etc/victron-shunt/config.yaml"
+    fi
     echo
     echo "Next Steps:"
     echo "  1. Configure your cameras in ${APP_DIR}/frigate/config.yml"
@@ -823,6 +917,7 @@ main() {
     create_app_stack
     create_systemd_service
     start_services
+    install_victron
     show_summary
 
     info "Deployment completed successfully at $(date)"
