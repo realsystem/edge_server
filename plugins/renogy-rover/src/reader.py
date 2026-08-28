@@ -29,7 +29,7 @@ class RoverReading:
 
     # Battery
     battery_voltage: float  # V
-    battery_current: float  # A
+    battery_current: float  # A (charging current from PV)
     battery_soc: int  # %
     battery_temp: Optional[int] = None  # °C
 
@@ -172,7 +172,21 @@ class RenogyReader:
         return loop.run_until_complete(self.read_once(timeout))
 
     def _parse_reading(self, data: bytes) -> RoverReading:
-        """Parse register data into RoverReading."""
+        """Parse register data into RoverReading.
+
+        Renogy Rover register map (starting at 0x0100):
+        Offset 0  (0x0100): Battery SOC %
+        Offset 1  (0x0101): Battery Voltage × 0.1
+        Offset 2  (0x0102): Charging Current × 0.01 (to battery)
+        Offset 3  (0x0103): Controller Temp (upper=sign, lower=value)
+        Offset 4  (0x0104): Battery Temp (upper=sign, lower=value)
+        Offset 5  (0x0105): Load Voltage × 0.1
+        Offset 6  (0x0106): Load Current × 0.01
+        Offset 7  (0x0107): Load Power (W)
+        Offset 8  (0x0108): PV Voltage × 0.1
+        Offset 9  (0x0109): PV Current × 0.01
+        Offset 10 (0x010A): Charging Power (W)
+        """
         raw = {}
 
         # Parse 16-bit registers (big-endian)
@@ -185,7 +199,14 @@ class RenogyReader:
         # Battery (registers 0x0100+)
         battery_soc = reg(0)
         battery_voltage = reg(1) / 10.0
-        battery_current = signed_reg(2) / 100.0
+
+        # PV / Solar (offset 8-10)
+        pv_voltage = reg(8) / 10.0
+        pv_current = reg(9) / 100.0
+        pv_power = reg(10)  # Charging power in watts
+
+        # Use PV current as charging current (matches what Renogy app displays)
+        charging_current = pv_current
 
         # Temperatures (offset 3-4)
         # Renogy stores temps as: upper byte = sign (0=negative, 1=positive), lower byte = value
@@ -203,13 +224,8 @@ class RenogyReader:
         load_current = reg(6) / 100.0
         load_power = reg(7)
 
-        # PV / Solar (offset 8-10)
-        pv_voltage = reg(8) / 10.0
-        pv_current = reg(9) / 100.0
-        pv_power = reg(10)
-
-        # Daily stats (offset 11-13)
-        daily_ah = reg(13)
+        # Daily stats (offset 11+)
+        daily_ah = reg(13) if len(data) >= 28 else 0
         daily_energy = daily_ah * battery_voltage
 
         # Charging state (offset 32)
@@ -222,14 +238,14 @@ class RenogyReader:
         raw = {
             "battery_soc": battery_soc,
             "battery_voltage": battery_voltage,
-            "battery_current": battery_current,
+            "charging_current_reg2": reg(2) / 100.0,  # Original register
+            "pv_current": pv_current,
             "controller_temp": controller_temp,
             "battery_temp": battery_temp,
             "load_voltage": load_voltage,
             "load_current": load_current,
             "load_power": load_power,
             "pv_voltage": pv_voltage,
-            "pv_current": pv_current,
             "pv_power": pv_power,
             "charge_state_code": charge_state_code,
             "daily_ah": daily_ah,
@@ -237,7 +253,7 @@ class RenogyReader:
 
         return RoverReading(
             battery_voltage=battery_voltage,
-            battery_current=battery_current,
+            battery_current=charging_current,  # PV current = charging current
             battery_soc=battery_soc,
             battery_temp=battery_temp if battery_temp != 0 else None,
             pv_voltage=pv_voltage,
@@ -250,7 +266,7 @@ class RenogyReader:
             load_power=load_power,
             load_enabled=load_enabled,
             daily_energy=daily_energy,
-            total_energy=0.0,  # Would need separate register read
+            total_energy=0.0,
             raw_data=raw,
         )
 
