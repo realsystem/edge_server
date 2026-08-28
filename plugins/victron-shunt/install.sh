@@ -38,18 +38,23 @@ python3 -m venv "$INSTALL_DIR/venv"
 "$INSTALL_DIR/venv/bin/pip" install --upgrade pip -q
 "$INSTALL_DIR/venv/bin/pip" install "$INSTALL_DIR" -q
 
-# Create config file
-echo "Creating config file..."
-cat > "$CONFIG_DIR/config.yaml" << EOF
+# Create config file (only if not exists, to preserve user changes)
+if [[ ! -f "$CONFIG_DIR/config.yaml" ]]; then
+    echo "Creating config file..."
+    cat > "$CONFIG_DIR/config.yaml" << EOF
 address: "${VICTRON_ADDRESS}"
 key: "${VICTRON_KEY}"
 mqtt:
   host: localhost
   port: 1883
-  user: ${MQTT_USER:-}
+  user: ${MQTT_USER:-admin}
+  password: ${MQTT_PASS:-}
   topic_prefix: victron/smartshunt
 EOF
-chmod 600 "$CONFIG_DIR/config.yaml"
+    chmod 600 "$CONFIG_DIR/config.yaml"
+else
+    echo "Config file exists, preserving..."
+fi
 
 # Install systemd service
 echo "Installing systemd service..."

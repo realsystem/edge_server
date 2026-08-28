@@ -297,6 +297,8 @@ victron-install:
 		echo 'mqtt:' | sudo tee -a /etc/victron-shunt/config.yaml > /dev/null; \
 		echo '  host: localhost' | sudo tee -a /etc/victron-shunt/config.yaml > /dev/null; \
 		echo '  port: 1883' | sudo tee -a /etc/victron-shunt/config.yaml > /dev/null; \
+		echo '  user: admin' | sudo tee -a /etc/victron-shunt/config.yaml > /dev/null; \
+		echo '  # password: from MQTT_PASS env var' | sudo tee -a /etc/victron-shunt/config.yaml > /dev/null; \
 	fi
 	sudo systemctl daemon-reload
 	sudo systemctl enable victron-shunt

@@ -752,6 +752,29 @@ EOF
         info "Created initial Home Assistant configuration"
     fi
 
+    # Add NUT integration if installed
+    if systemctl is-enabled nut-monitor &>/dev/null; then
+        if ! grep -q "platform: nut" "$APP_DIR/ha-config/configuration.yaml" 2>/dev/null; then
+            info "Adding NUT integration to Home Assistant..."
+            cat >> "$APP_DIR/ha-config/configuration.yaml" << 'EOF'
+
+# NUT UPS/Battery Monitor
+sensor:
+  - platform: nut
+    host: 127.0.0.1
+    port: 3493
+    username: admin
+    password: edgeserver
+    resources:
+      - battery.charge
+      - battery.charge.low
+      - ups.status
+      - input.transfer.reason
+EOF
+            info "NUT integration added to HA config"
+        fi
+    fi
+
     # Set correct ownership for mosquitto
     chown -R 1883:1883 "$APP_DIR/mosquitto"
 
