@@ -337,13 +337,12 @@ def service(ctx, no_mqtt: bool):
     reader = VictronReader(config.address, key)
     log.info(f"Monitoring Victron device {config.address}")
 
-    # Handle signals
-    running = True
+    # Stop event for graceful shutdown
+    stop_event = asyncio.Event()
 
     def handle_signal(signum, frame):
-        nonlocal running
         log.info(f"Received signal {signum}, shutting down")
-        running = False
+        stop_event.set()
 
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
@@ -385,7 +384,7 @@ def service(ctx, no_mqtt: bool):
             readings_this_minute = 0
 
     try:
-        run_async(reader.read_continuous(on_reading))
+        run_async(reader.read_continuous(on_reading, stop_event=stop_event))
     except KeyboardInterrupt:
         pass
     finally:

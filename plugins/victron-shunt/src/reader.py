@@ -103,7 +103,7 @@ class VictronReader:
 
         return result
 
-    async def read_continuous(self, callback, interval: float = 1.0):
+    async def read_continuous(self, callback, interval: float = 1.0, stop_event: asyncio.Event = None):
         """Continuously read and call callback with new readings."""
         if BleakScanner is None:
             raise RuntimeError("bleak not installed")
@@ -163,6 +163,8 @@ class VictronReader:
 
         try:
             while True:
+                if stop_event and stop_event.is_set():
+                    break
                 await asyncio.sleep(interval)
         finally:
             await scanner.stop()
