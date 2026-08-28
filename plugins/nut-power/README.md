@@ -20,6 +20,12 @@ sudo ./plugins/nut-power/install.sh
 sudo NUT_SHUTDOWN_DELAY=300 NUT_LOW_BATTERY=15 ./plugins/nut-power/install.sh
 ```
 
+## Shutdown Triggers
+
+The system will shutdown when EITHER condition is met:
+1. **On battery for 10 minutes** (configurable via `NUT_SHUTDOWN_DELAY`)
+2. **Battery drops below 20%** (configurable via `NUT_LOW_BATTERY`)
+
 ## Configuration
 
 Edit `/etc/nut/upsmon.conf`:

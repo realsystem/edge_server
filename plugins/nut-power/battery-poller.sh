@@ -49,15 +49,18 @@ write_nut_status() {
     local capacity="$1"
     local ac_online="$2"
     local status
+    local charge_status
 
     if [ "$ac_online" = "1" ]; then
         status="OL"  # Online (on AC power)
+        charge_status="charging"
     else
         status="OB"  # On Battery
+        charge_status="discharging"
     fi
 
     # Low battery flag
-    local low_battery="${NUT_LOW_BATTERY:-10}"
+    local low_battery="${NUT_LOW_BATTERY:-20}"
     if [ "$capacity" -le "$low_battery" ]; then
         status="$status LB"  # Add Low Battery flag
     fi
@@ -66,10 +69,15 @@ write_nut_status() {
     cat > "$DUMMY_FILE" << EOF
 battery.charge: $capacity
 battery.charge.low: $low_battery
+battery.charge.warning: $((low_battery + 10))
+battery.runtime: 0
 ups.status: $status
+ups.load: 0
 device.type: ups
 ups.mfr: Linux
 ups.model: Laptop Battery
+battery.type: Li-ion
+input.transfer.reason: $charge_status
 EOF
 }
 

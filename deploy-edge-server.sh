@@ -53,7 +53,7 @@ VICTRON_KEY="${VICTRON_KEY:-}"
 # Set to "true" to install on laptop, or leave empty for auto-detect
 NUT_POWER_INSTALL="${NUT_POWER_INSTALL:-}"
 NUT_SHUTDOWN_DELAY="${NUT_SHUTDOWN_DELAY:-600}"  # Seconds on battery before shutdown
-NUT_LOW_BATTERY="${NUT_LOW_BATTERY:-10}"          # Shutdown below this battery %
+NUT_LOW_BATTERY="${NUT_LOW_BATTERY:-20}"          # Shutdown below this battery %
 
 #-------------------------------------------------------------------------------
 # LOGGING & UTILITIES
