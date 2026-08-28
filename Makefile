@@ -300,7 +300,13 @@ victron-install:
 	fi
 	sudo systemctl daemon-reload
 	sudo systemctl enable victron-shunt
-	@echo "Done. Edit /etc/victron-shunt/config.yaml then: sudo systemctl start victron-shunt"
+	@if grep -q "XX:XX:XX:XX:XX:XX" /etc/victron-shunt/config.yaml 2>/dev/null; then \
+		echo "Done. Edit /etc/victron-shunt/config.yaml then: sudo systemctl start victron-shunt"; \
+	else \
+		echo "Starting victron-shunt service..."; \
+		sudo systemctl start victron-shunt; \
+		echo "Done. Check status: sudo systemctl status victron-shunt"; \
+	fi
 
 victron-test: $(VICTRON_SHUNT)
 	@$(PIP) install pytest pytest-cov -q
