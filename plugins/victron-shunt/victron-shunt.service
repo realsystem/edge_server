@@ -1,0 +1,34 @@
+[Unit]
+Description=Victron Smart Shunt BLE Monitor
+Documentation=https://github.com/yourusername/edge-server
+After=network.target bluetooth.target mosquitto.service
+Wants=bluetooth.target
+
+[Service]
+Type=simple
+ExecStart=/opt/victron-shunt/venv/bin/victron-shunt service
+Restart=always
+RestartSec=10
+
+# Config file location
+Environment=XDG_CONFIG_HOME=/etc
+
+# Can also use EnvironmentFile for secrets:
+# EnvironmentFile=/etc/victron-shunt/env
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+# Bluetooth requires some capabilities
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=victron-shunt
+
+[Install]
+WantedBy=multi-user.target
