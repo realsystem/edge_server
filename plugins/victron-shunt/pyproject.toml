@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "victron-shunt"
+version = "0.1.0"
+description = "Victron Smart Shunt BLE reader"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "bleak>=0.21.0",
+    "victron-ble>=0.6.0",
+    "click>=8.0.0",
+]
+
+[project.scripts]
+victron-shunt = "victron_shunt.cli:main"
+
+[project.optional-dependencies]
+mqtt = ["paho-mqtt>=1.6.0"]
+dev = ["pytest", "ruff"]
+
+[tool.setuptools.packages.find]
+include = ["victron_shunt*"]
+
+[tool.ruff]
+line-length = 88

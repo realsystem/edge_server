@@ -15,7 +15,7 @@ LITE_COMPOSE := $(TESTS_DIR)/docker-compose.lite.yml
 FULL_COMPOSE := $(TESTS_DIR)/docker-compose.mac.yml
 HARNESS_COMPOSE := $(TESTS_DIR)/docker-compose.test-harness.yml
 
-.PHONY: help setup pytest check check-mem-lite check-mem-full test test-dev test-ci test-full test-full-dev test-scripts start start-full stop status logs clean reset lint mem target-start target-stop target-ssh
+.PHONY: help setup pytest check check-mem-lite check-mem-full test test-dev test-ci test-full test-full-dev test-scripts start start-full stop status logs clean reset lint mem target-start target-stop target-ssh victron-setup victron-check victron-scan
 
 help:
 	@echo "Edge Server - Local Testing"
@@ -41,6 +41,11 @@ help:
 	@echo "  make target-start   - Start Ubuntu container with SSH (port 2222)"
 	@echo "  make target-stop    - Stop test target container"
 	@echo "  make target-ssh     - SSH into test target"
+	@echo ""
+	@echo "Victron Smart Shunt (BLE battery monitor):"
+	@echo "  make victron-setup  - Install victron-shunt CLI tool"
+	@echo "  make victron-check  - Check if Bluetooth is available"
+	@echo "  make victron-scan   - Scan for Victron BLE devices"
 	@echo ""
 	@echo "Memory Requirements:"
 	@echo "  Lite test:  ~1.3 GB (1 camera)"
@@ -248,3 +253,21 @@ target-stop: check
 
 target-ssh:
 	@ssh -i $(TARGET_DIR)/ssh_keys/id_ed25519 -p 2222 testuser@localhost
+
+# Victron Smart Shunt BLE tools
+VICTRON_DIR := plugins/victron-shunt
+VICTRON_SHUNT := $(VENV_DIR)/bin/victron-shunt
+
+victron-setup: $(VENV_DIR)
+	@echo "Installing victron-shunt CLI..."
+	@$(PIP) install -e $(VICTRON_DIR)
+	@echo "Done. Run: make victron-check"
+
+victron-check: $(VICTRON_SHUNT)
+	@$(VICTRON_SHUNT) check
+
+victron-scan: $(VICTRON_SHUNT)
+	@$(VICTRON_SHUNT) scan
+
+$(VICTRON_SHUNT):
+	@$(MAKE) victron-setup
