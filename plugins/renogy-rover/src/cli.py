@@ -388,11 +388,9 @@ def service(ctx, no_mqtt: bool):
             f"Bat={r.battery_voltage:.1f}V/{r.battery_soc}%",
             f"Chg={r.battery_current:.1f}A",
             f"PV={r.pv_voltage:.1f}V/{r.pv_power:.0f}W",
+            f"[{r.charge_state}]",
+            f"(#{readings_count}, {uptime})",
         ]
-        if r.load_power > 0:
-            parts.append(f"Load={r.load_power:.0f}W")
-        parts.append(f"[{r.charge_state}]")
-        parts.append(f"(#{readings_count}, {uptime})")
         log.info(" | ".join(parts))
         last_log = now
 

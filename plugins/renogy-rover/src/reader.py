@@ -219,10 +219,10 @@ class RenogyReader:
         controller_temp = parse_temp(3)
         battery_temp = parse_temp(4)
 
-        # Load (offset 5-7)
-        load_voltage = reg(5) / 10.0
-        load_current = reg(6) / 100.0
-        load_power = reg(7)
+        # Load (offset 5-7) - register mapping varies by model, disabled for now
+        load_voltage = 0.0
+        load_current = 0.0
+        load_power = 0
 
         # Daily stats (offset 11+)
         daily_ah = reg(13) if len(data) >= 28 else 0
