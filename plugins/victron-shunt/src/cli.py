@@ -301,8 +301,7 @@ def service(ctx, no_mqtt: bool):
 
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+        format="%(levelname)s %(message)s",
     )
     log = logging.getLogger("victron-shunt")
 
