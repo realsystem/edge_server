@@ -15,7 +15,7 @@ LITE_COMPOSE := $(TESTS_DIR)/docker-compose.lite.yml
 FULL_COMPOSE := $(TESTS_DIR)/docker-compose.mac.yml
 HARNESS_COMPOSE := $(TESTS_DIR)/docker-compose.test-harness.yml
 
-.PHONY: help setup pytest check check-mem-lite check-mem-full test test-dev test-ci test-full test-full-dev test-scripts start start-full stop status logs clean reset lint mem target-start target-stop target-ssh victron-setup victron-check victron-scan victron-install
+.PHONY: help setup pytest check check-mem-lite check-mem-full test test-dev test-ci test-full test-full-dev test-scripts start start-full stop status logs clean reset lint mem target-start target-stop target-ssh victron-setup victron-check victron-scan victron-install victron-test
 
 help:
 	@echo "Edge Server - Local Testing"
@@ -46,6 +46,7 @@ help:
 	@echo "  make victron-setup   - Install victron-shunt CLI tool"
 	@echo "  make victron-check   - Check if Bluetooth is available"
 	@echo "  make victron-scan    - Scan for Victron BLE devices"
+	@echo "  make victron-test    - Run victron-shunt unit tests"
 	@echo "  make victron-install - Install systemd service (requires sudo)"
 	@echo ""
 	@echo "Memory Requirements:"
@@ -278,6 +279,10 @@ victron-install: $(VICTRON_SHUNT)
 	sudo systemctl enable victron-shunt
 	sudo systemctl start victron-shunt
 	@echo "Done. View logs: journalctl -u victron-shunt -f"
+
+victron-test: $(VICTRON_SHUNT)
+	@$(PIP) install pytest pytest-cov -q
+	@cd $(VICTRON_DIR) && ../../$(VENV_DIR)/bin/python3 -m pytest tests/ -v
 
 $(VICTRON_SHUNT):
 	@$(MAKE) victron-setup
