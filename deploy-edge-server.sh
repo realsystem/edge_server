@@ -55,6 +55,11 @@ NUT_POWER_INSTALL="${NUT_POWER_INSTALL:-}"
 NUT_SHUTDOWN_DELAY="${NUT_SHUTDOWN_DELAY:-600}"  # Seconds on battery before shutdown
 NUT_LOW_BATTERY="${NUT_LOW_BATTERY:-20}"          # Shutdown below this battery %
 
+# Renogy Rover MPPT (optional BLE solar charger monitor)
+# Set to "true" to install, or leave empty to be prompted
+RENOGY_INSTALL="${RENOGY_INSTALL:-}"
+RENOGY_ADDRESS="${RENOGY_ADDRESS:-}"
+
 #-------------------------------------------------------------------------------
 # LOGGING & UTILITIES
 #-------------------------------------------------------------------------------
@@ -442,6 +447,50 @@ install_nut_power() {
         success "NUT power monitor installed (shutdown after $((NUT_SHUTDOWN_DELAY / 60)) min on battery)"
     else
         warn "NUT installation failed - check logs"
+    fi
+}
+
+install_renogy() {
+    # Check if we should install
+    if [[ "$RENOGY_INSTALL" != "true" ]]; then
+        if [[ "$BATCH_MODE" == "true" ]]; then
+            info "RENOGY_INSTALL not set in batch mode - skipping Renogy monitor"
+            return 0
+        fi
+
+        echo ""
+        echo "=== Renogy Rover MPPT Monitor ==="
+        echo "Monitor solar charger data via BLE (requires BT-2 module)"
+        echo ""
+        if ! confirm "Install Renogy Rover monitor?"; then
+            info "Skipping Renogy monitor installation"
+            return 0
+        fi
+    fi
+
+    info "Installing Renogy Rover monitor..."
+
+    # Find the plugin directory
+    local plugin_dir=""
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    if [[ -d "${script_dir}/plugins/renogy-rover" ]]; then
+        plugin_dir="${script_dir}/plugins/renogy-rover"
+    else
+        warn "Renogy Rover plugin not found, skipping installation"
+        return 0
+    fi
+
+    # Pass configuration via environment
+    export RENOGY_ADDRESS
+    export MQTT_USER
+    export MQTT_PASS
+
+    if bash "${plugin_dir}/install.sh"; then
+        success "Renogy Rover monitor installed"
+    else
+        warn "Renogy installation failed - check logs"
     fi
 }
 
@@ -1005,6 +1054,7 @@ main() {
     start_services
     install_victron
     install_nut_power
+    install_renogy
     show_summary
 
     info "Deployment completed successfully at $(date)"

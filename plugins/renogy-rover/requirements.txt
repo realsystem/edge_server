@@ -1,0 +1,5 @@
+click>=8.0
+pyyaml>=6.0
+renogybt>=1.0
+bleak>=0.21
+paho-mqtt>=2.0

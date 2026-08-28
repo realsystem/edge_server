@@ -1,0 +1,21 @@
+[Unit]
+Description=Renogy Rover MPPT BLE Monitor
+After=network.target bluetooth.target
+Wants=bluetooth.target
+
+[Service]
+Type=simple
+ExecStart=/opt/renogy-rover/venv/bin/renogy-rover service
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+# Config can be set via:
+# - /etc/renogy-rover/config.yaml
+# - Environment variables below
+# Environment=RENOGY_ADDRESS=XX:XX:XX:XX:XX:XX
+# Environment=MQTT_HOST=localhost
+# Environment=MQTT_PORT=1883
+
+[Install]
+WantedBy=multi-user.target

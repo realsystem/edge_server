@@ -1,0 +1,26 @@
+[project]
+name = "renogy-rover"
+version = "0.1.0"
+description = "Read data from Renogy Rover MPPT via BLE (BT-2 module)"
+requires-python = ">=3.9"
+dependencies = [
+    "click>=8.0",
+    "pyyaml>=6.0",
+    "renogybt>=1.0",
+    "bleak>=0.21",
+]
+
+[project.optional-dependencies]
+mqtt = ["paho-mqtt>=2.0"]
+dev = ["pytest", "pytest-asyncio"]
+
+[project.scripts]
+renogy-rover = "src.cli:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]

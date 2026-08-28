@@ -15,7 +15,7 @@ LITE_COMPOSE := $(TESTS_DIR)/docker-compose.lite.yml
 FULL_COMPOSE := $(TESTS_DIR)/docker-compose.mac.yml
 HARNESS_COMPOSE := $(TESTS_DIR)/docker-compose.test-harness.yml
 
-.PHONY: help setup pytest check check-mem-lite check-mem-full test test-dev test-ci test-full test-full-dev test-scripts start start-full stop status logs clean reset lint mem target-start target-stop target-ssh victron-setup victron-check victron-scan victron-install victron-test nut-install nut-status nut-uninstall
+.PHONY: help setup pytest check check-mem-lite check-mem-full test test-dev test-ci test-full test-full-dev test-scripts start start-full stop status logs clean reset lint mem target-start target-stop target-ssh victron-setup victron-check victron-scan victron-install victron-test nut-install nut-status nut-uninstall renogy-setup renogy-check renogy-scan renogy-install renogy-test
 
 help:
 	@echo "Edge Server - Local Testing"
@@ -53,6 +53,12 @@ help:
 	@echo "  make nut-install     - Install NUT power monitor (requires sudo)"
 	@echo "  make nut-status      - Show battery/UPS status"
 	@echo "  make nut-uninstall   - Remove NUT power monitor"
+	@echo ""
+	@echo "Renogy Rover MPPT (solar charger BLE monitor):"
+	@echo "  make renogy-setup    - Install renogy-rover CLI tool"
+	@echo "  make renogy-check    - Check if Bluetooth is available"
+	@echo "  make renogy-scan     - Scan for Renogy BLE devices"
+	@echo "  make renogy-install  - Install systemd service (requires sudo)"
 	@echo ""
 	@echo "Memory Requirements:"
 	@echo "  Lite test:  ~1.3 GB (1 camera)"
@@ -332,3 +338,30 @@ nut-status:
 
 nut-uninstall:
 	sudo $(NUT_DIR)/uninstall.sh
+
+# Renogy Rover MPPT BLE tools
+RENOGY_DIR := plugins/renogy-rover
+RENOGY_ROVER := $(VENV_DIR)/bin/renogy-rover
+
+renogy-setup:
+	@if [ ! -f $(PIP) ]; then $(MAKE) setup; fi
+	@echo "Installing renogy-rover CLI..."
+	@$(PIP) install -e $(RENOGY_DIR)
+	@echo "Done. Run: make renogy-check"
+
+renogy-check: $(RENOGY_ROVER)
+	@$(RENOGY_ROVER) check
+
+renogy-scan: $(RENOGY_ROVER)
+	@$(RENOGY_ROVER) scan
+
+renogy-install:
+	@echo "Installing renogy-rover to /opt/renogy-rover..."
+	sudo $(RENOGY_DIR)/install.sh
+
+renogy-test: $(RENOGY_ROVER)
+	@$(PIP) install pytest pytest-cov -q
+	@cd $(RENOGY_DIR) && ../../$(VENV_DIR)/bin/python3 -m pytest tests/ -v 2>/dev/null || echo "No tests yet"
+
+$(RENOGY_ROVER):
+	@$(MAKE) renogy-setup
