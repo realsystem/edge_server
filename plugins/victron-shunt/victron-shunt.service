@@ -16,11 +16,10 @@ Environment=XDG_CONFIG_HOME=/etc
 # Can also use EnvironmentFile for secrets:
 # EnvironmentFile=/etc/victron-shunt/env
 
-# Security hardening
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
+# Security (relaxed for now - BLE needs access)
+# NoNewPrivileges=true
+# ProtectSystem=strict
+# ProtectHome=true
 
 # Bluetooth requires some capabilities
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW

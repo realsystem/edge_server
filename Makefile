@@ -272,13 +272,30 @@ victron-check: $(VICTRON_SHUNT)
 victron-scan: $(VICTRON_SHUNT)
 	@$(VICTRON_SHUNT) scan
 
-victron-install: $(VICTRON_SHUNT)
-	@echo "Installing victron-shunt systemd service..."
+victron-install:
+	@echo "Installing victron-shunt to /opt/victron-shunt..."
+	sudo mkdir -p /opt/victron-shunt
+	sudo cp -r $(VICTRON_DIR)/src /opt/victron-shunt/
+	sudo cp $(VICTRON_DIR)/pyproject.toml /opt/victron-shunt/
+	sudo cp $(VICTRON_DIR)/requirements.txt /opt/victron-shunt/
+	@echo "Creating virtual environment..."
+	sudo python3 -m venv /opt/victron-shunt/venv
+	sudo /opt/victron-shunt/venv/bin/pip install --upgrade pip -q
+	sudo /opt/victron-shunt/venv/bin/pip install /opt/victron-shunt -q
+	@echo "Installing systemd service..."
 	sudo cp $(VICTRON_DIR)/victron-shunt.service /etc/systemd/system/
+	sudo mkdir -p /etc/victron-shunt
+	@if [ ! -f /etc/victron-shunt/config.yaml ]; then \
+		echo "Creating default config (edit /etc/victron-shunt/config.yaml)..."; \
+		sudo tee /etc/victron-shunt/config.yaml > /dev/null <<< "address: \"XX:XX:XX:XX:XX:XX\""; \
+		sudo tee -a /etc/victron-shunt/config.yaml > /dev/null <<< "key: \"your-32-char-encryption-key\""; \
+		sudo tee -a /etc/victron-shunt/config.yaml > /dev/null <<< "mqtt:"; \
+		sudo tee -a /etc/victron-shunt/config.yaml > /dev/null <<< "  host: localhost"; \
+		sudo tee -a /etc/victron-shunt/config.yaml > /dev/null <<< "  port: 1883"; \
+	fi
 	sudo systemctl daemon-reload
 	sudo systemctl enable victron-shunt
-	sudo systemctl start victron-shunt
-	@echo "Done. View logs: journalctl -u victron-shunt -f"
+	@echo "Done. Edit /etc/victron-shunt/config.yaml then: sudo systemctl start victron-shunt"
 
 victron-test: $(VICTRON_SHUNT)
 	@$(PIP) install pytest pytest-cov -q
