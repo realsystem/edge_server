@@ -5,18 +5,23 @@ CLI tool to read battery data from Victron Smart Shunt via Bluetooth Low Energy.
 ## Quick Start
 
 ```bash
-# Install
-cd victron-shunt
-pip install -e .
-
-# Check Bluetooth
-victron-shunt check
-
-# Scan for devices
-victron-shunt scan
+# From project root - use Makefile (recommended)
+make victron-setup   # Install into project venv
+make victron-check   # Check Bluetooth
+make victron-scan    # Scan for devices
 
 # Read data (get key from Victron Connect app)
-victron-shunt read --address AA:BB:CC:DD:EE:FF --key 0df4d0395b7d1a876c0c33ecb9e70dcd
+.venv/bin/victron-shunt read --address AA:BB:CC:DD:EE:FF --key <YOUR_KEY>
+```
+
+### Manual install (standalone venv)
+
+```bash
+cd plugins/victron-shunt
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+victron-shunt check
 ```
 
 ## Commands

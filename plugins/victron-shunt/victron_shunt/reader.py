@@ -64,13 +64,12 @@ class VictronReader:
                 if raw_bytes is None:
                     return
 
-                device_obj = detect_device_type(raw_bytes)
-                if device_obj is None:
+                device_class = detect_device_type(raw_bytes)
+                if device_class is None:
                     return
 
-                parsed = device_obj.parse(
-                    bytes.fromhex(self.encryption_key), raw_bytes
-                )
+                device_instance = device_class(self.encryption_key)
+                parsed = device_instance.parse(raw_bytes)
 
                 result = ShuntReading(
                     voltage=getattr(parsed, "voltage", 0.0) or 0.0,
@@ -121,13 +120,12 @@ class VictronReader:
                 if raw_bytes is None:
                     return
 
-                device_obj = detect_device_type(raw_bytes)
-                if device_obj is None:
+                device_class = detect_device_type(raw_bytes)
+                if device_class is None:
                     return
 
-                parsed = device_obj.parse(
-                    bytes.fromhex(self.encryption_key), raw_bytes
-                )
+                device_instance = device_class(self.encryption_key)
+                parsed = device_instance.parse(raw_bytes)
 
                 reading = ShuntReading(
                     voltage=getattr(parsed, "voltage", 0.0) or 0.0,

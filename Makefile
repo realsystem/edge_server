@@ -258,7 +258,8 @@ target-ssh:
 VICTRON_DIR := plugins/victron-shunt
 VICTRON_SHUNT := $(VENV_DIR)/bin/victron-shunt
 
-victron-setup: $(VENV_DIR)
+victron-setup:
+	@if [ ! -f $(PIP) ]; then $(MAKE) setup; fi
 	@echo "Installing victron-shunt CLI..."
 	@$(PIP) install -e $(VICTRON_DIR)
 	@echo "Done. Run: make victron-check"
