@@ -347,7 +347,6 @@ renogy-setup:
 	@if [ ! -f $(PIP) ]; then $(MAKE) setup; fi
 	@echo "Installing renogy-rover CLI..."
 	@$(PIP) install -r $(RENOGY_DIR)/requirements.txt
-	@$(PIP) install git+https://github.com/cyrils/renogy-bt.git
 	@$(PIP) install -e $(RENOGY_DIR)
 	@echo "Done. Run: make renogy-check"
 

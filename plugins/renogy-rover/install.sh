@@ -39,7 +39,6 @@ fi
 echo "Installing Python dependencies..."
 "${INSTALL_DIR}/venv/bin/pip" install --quiet --upgrade pip
 "${INSTALL_DIR}/venv/bin/pip" install --quiet -r "${INSTALL_DIR}/requirements.txt"
-"${INSTALL_DIR}/venv/bin/pip" install --quiet git+https://github.com/cyrils/renogy-bt.git
 "${INSTALL_DIR}/venv/bin/pip" install --quiet -e "${INSTALL_DIR}"
 
 # Install systemd service
