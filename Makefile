@@ -287,11 +287,11 @@ victron-install:
 	sudo mkdir -p /etc/victron-shunt
 	@if [ ! -f /etc/victron-shunt/config.yaml ]; then \
 		echo "Creating default config (edit /etc/victron-shunt/config.yaml)..."; \
-		sudo tee /etc/victron-shunt/config.yaml > /dev/null <<< "address: \"XX:XX:XX:XX:XX:XX\""; \
-		sudo tee -a /etc/victron-shunt/config.yaml > /dev/null <<< "key: \"your-32-char-encryption-key\""; \
-		sudo tee -a /etc/victron-shunt/config.yaml > /dev/null <<< "mqtt:"; \
-		sudo tee -a /etc/victron-shunt/config.yaml > /dev/null <<< "  host: localhost"; \
-		sudo tee -a /etc/victron-shunt/config.yaml > /dev/null <<< "  port: 1883"; \
+		echo 'address: "XX:XX:XX:XX:XX:XX"' | sudo tee /etc/victron-shunt/config.yaml > /dev/null; \
+		echo 'key: "your-32-char-encryption-key"' | sudo tee -a /etc/victron-shunt/config.yaml > /dev/null; \
+		echo 'mqtt:' | sudo tee -a /etc/victron-shunt/config.yaml > /dev/null; \
+		echo '  host: localhost' | sudo tee -a /etc/victron-shunt/config.yaml > /dev/null; \
+		echo '  port: 1883' | sudo tee -a /etc/victron-shunt/config.yaml > /dev/null; \
 	fi
 	sudo systemctl daemon-reload
 	sudo systemctl enable victron-shunt
