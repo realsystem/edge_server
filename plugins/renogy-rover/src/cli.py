@@ -384,12 +384,17 @@ def service(ctx, no_mqtt: bool):
 
         now = time_module.time()
         uptime = format_uptime(now - start_time)
-        log.info(
-            f"Bat={r.battery_voltage:.1f}V/{r.battery_soc}% "
-            f"PV={r.pv_voltage:.1f}V/{r.pv_power:.0f}W "
-            f"State={r.charge_state} "
-            f"(#{readings_count}, uptime: {uptime})"
-        )
+        # Build log line with available data
+        parts = [
+            f"Bat={r.battery_voltage:.1f}V/{r.battery_soc}%",
+            f"Chg={r.battery_current:.1f}A",
+            f"PV={r.pv_voltage:.1f}V/{r.pv_power:.0f}W",
+        ]
+        if r.load_power > 0:
+            parts.append(f"Load={r.load_power:.0f}W")
+        parts.append(f"[{r.charge_state}]")
+        parts.append(f"(#{readings_count}, {uptime})")
+        log.info(" | ".join(parts))
         last_log = now
 
     try:
