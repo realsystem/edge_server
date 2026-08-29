@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "minor_version": 1,
+  "key": "core.restore_state",
+  "data": [
+    {
+      "state": {"entity_id":"conversation.home_assistant","state":"unknown","attributes":{"friendly_name":"Home Assistant","supported_features":1},"last_changed":"2026-08-29T00:16:11.514136+00:00","last_reported":"2026-08-29T00:16:11.514136+00:00","last_updated":"2026-08-29T00:16:11.514136+00:00","context":{"id":"01M15DZEQTCY0JQ42J9A6N1G3M","parent_id":null,"user_id":null}},
+      "extra_data": null,
+      "last_seen": "2026-08-29T00:20:30.195572+00:00"
+    },
+    {
+      "state": {"entity_id":"event.backup_automatic_backup","state":"unknown","attributes":{"event_types":["completed","failed","in_progress"],"event_type":null,"friendly_name":"Backup Automatic backup"},"last_changed":"2026-08-29T00:16:15.769502+00:00","last_reported":"2026-08-29T00:16:15.769660+00:00","last_updated":"2026-08-29T00:16:15.769502+00:00","context":{"id":"01M15DZJWS7FADPA21S8TA5G5Z","parent_id":null,"user_id":null}},
+      "extra_data": {
+        "last_event_type": null,
+        "last_event_attributes": null
+      },
+      "last_seen": "2026-08-29T00:20:30.195572+00:00"
+    },
+    {
+      "state": {"entity_id":"person.rs","state":"unknown","attributes":{"editable":true,"id":"rs","device_trackers":[],"in_zones":[],"user_id":"6fdd3789412a435e87691e50061cbe42","friendly_name":"rs"},"last_changed":"2026-08-29T00:17:06.029978+00:00","last_reported":"2026-08-29T00:17:06.031073+00:00","last_updated":"2026-08-29T00:17:06.029978+00:00","context":{"id":"01M15E13ZDCB4GXTNHVWRS3C7F","parent_id":null,"user_id":null}},
+      "extra_data": null,
+      "last_seen": "2026-08-29T00:20:30.195572+00:00"
+    },
+    {
+      "state": {"entity_id":"tts.google_translate_en_com","state":"unknown","attributes":{"friendly_name":"Google Translate en com"},"last_changed":"2026-08-29T00:17:11.843597+00:00","last_reported":"2026-08-29T00:17:11.843723+00:00","last_updated":"2026-08-29T00:17:11.843597+00:00","context":{"id":"01M15E19N3QZ4VRGGPTBNY71RM","parent_id":null,"user_id":null}},
+      "extra_data": null,
+      "last_seen": "2026-08-29T00:20:30.195572+00:00"
+    },
+    {
+      "state": {"entity_id":"sensor.victron_smart_shunt_voltage","state":"12.57","attributes":{"state_class":"measurement","unit_of_measurement":"V","device_class":"voltage","icon":"mdi:flash","friendly_name":"Victron Smart Shunt Voltage"},"last_changed":"2026-08-29T00:20:27.131091+00:00","last_reported":"2026-08-29T00:20:27.131091+00:00","last_updated":"2026-08-29T00:20:27.131091+00:00","context":{"id":"01M15E78BV202C9KZN4FVRCR7E","parent_id":null,"user_id":null}},
+      "extra_data": {
+        "native_value": "12.57",
+        "native_unit_of_measurement": "V"
+      },
+      "last_seen": "2026-08-29T00:20:30.195572+00:00"
+    },
+    {
+      "state": {"entity_id":"sensor.victron_smart_shunt_current","state":"9.78","attributes":{"state_class":"measurement","unit_of_measurement":"A","device_class":"current","icon":"mdi:current-dc","friendly_name":"Victron Smart Shunt Current"},"last_changed":"2026-08-29T00:20:27.132166+00:00","last_reported":"2026-08-29T00:20:27.132166+00:00","last_updated":"2026-08-29T00:20:27.132166+00:00","context":{"id":"01M15E78BWN1JF7Q494NK5TVND","parent_id":null,"user_id":null}},
+      "extra_data": {
+        "native_value": "9.78",
+        "native_unit_of_measurement": "A"
+      },
+      "last_seen": "2026-08-29T00:20:30.195572+00:00"
+    },
+    {
+      "state": {"entity_id":"sensor.victron_smart_shunt_power","state":"122.9","attributes":{"state_class":"measurement","unit_of_measurement":"W","device_class":"power","icon":"mdi:lightning-bolt","friendly_name":"Victron Smart Shunt Power"},"last_changed":"2026-08-29T00:20:27.132652+00:00","last_reported":"2026-08-29T00:20:27.132652+00:00","last_updated":"2026-08-29T00:20:27.132652+00:00","context":{"id":"01M15E78BWXB4MECQ1N2BY2D5E","parent_id":null,"user_id":null}},
+      "extra_data": {
+        "native_value": "122.9",
+        "native_unit_of_measurement": "W"
+      },
+      "last_seen": "2026-08-29T00:20:30.195572+00:00"
+    },
+    {
+      "state": {"entity_id":"sensor.victron_smart_shunt_soc","state":"74.8","attributes":{"state_class":"measurement","unit_of_measurement":"%","device_class":"battery","icon":"mdi:battery","friendly_name":"Victron Smart Shunt Soc"},"last_changed":"2026-08-29T00:20:27.133010+00:00","last_reported":"2026-08-29T00:20:27.133010+00:00","last_updated":"2026-08-29T00:20:27.133010+00:00","context":{"id":"01M15E78BXMNA8Y8RCYSE5MEKT","parent_id":null,"user_id":null}},
+      "extra_data": {
+        "native_value": "74.8",
+        "native_unit_of_measurement": "%"
+      },
+      "last_seen": "2026-08-29T00:20:30.195572+00:00"
+    },
+    {
+      "state": {"entity_id":"sensor.renogy_rover_mppt_battery_voltage","state":"13.01","attributes":{"state_class":"measurement","unit_of_measurement":"V","device_class":"voltage","icon":"mdi:flash","friendly_name":"Renogy Rover MPPT Battery Voltage"},"last_changed":"2026-08-29T00:20:27.133257+00:00","last_reported":"2026-08-29T00:20:27.133257+00:00","last_updated":"2026-08-29T00:20:27.133257+00:00","context":{"id":"01M15E78BXCQSZ7G0DS2EMBA00","parent_id":null,"user_id":null}},
+      "extra_data": {
+        "native_value": "13.01",
+        "native_unit_of_measurement": "V"
+      },
+      "last_seen": "2026-08-29T00:20:30.195572+00:00"
+    },
+    {
+      "state": {"entity_id":"sensor.renogy_rover_mppt_battery_soc","state":"79","attributes":{"state_class":"measurement","unit_of_measurement":"%","device_class":"battery","icon":"mdi:battery","friendly_name":"Renogy Rover MPPT Battery Soc"},"last_changed":"2026-08-29T00:20:27.133439+00:00","last_reported":"2026-08-29T00:20:27.133439+00:00","last_updated":"2026-08-29T00:20:27.133439+00:00","context":{"id":"01M15E78BXAX8H79VXB8N3A9YD","parent_id":null,"user_id":null}},
+      "extra_data": {
+        "native_value": "79",
+        "native_unit_of_measurement": "%"
+      },
+      "last_seen": "2026-08-29T00:20:30.195572+00:00"
+    },
+    {
+      "state": {"entity_id":"sensor.renogy_rover_mppt_pv_voltage","state":"18.41","attributes":{"state_class":"measurement","unit_of_measurement":"V","device_class":"voltage","icon":"mdi:solar-panel","friendly_name":"Renogy Rover MPPT Pv Voltage"},"last_changed":"2026-08-29T00:20:27.133645+00:00","last_reported":"2026-08-29T00:20:27.133645+00:00","last_updated":"2026-08-29T00:20:27.133645+00:00","context":{"id":"01M15E78BX4CS964NSE41B2SVM","parent_id":null,"user_id":null}},
+      "extra_data": {
+        "native_value": "18.41",
+        "native_unit_of_measurement": "V"
+      },
+      "last_seen": "2026-08-29T00:20:30.195572+00:00"
+    },
+    {
+      "state": {"entity_id":"sensor.renogy_rover_mppt_pv_power","state":"96.0","attributes":{"state_class":"measurement","unit_of_measurement":"W","device_class":"power","icon":"mdi:solar-power","friendly_name":"Renogy Rover MPPT Pv Power"},"last_changed":"2026-08-29T00:20:27.133832+00:00","last_reported":"2026-08-29T00:20:27.133832+00:00","last_updated":"2026-08-29T00:20:27.133832+00:00","context":{"id":"01M15E78BXC6NXFRF0KE0FF8HS","parent_id":null,"user_id":null}},
+      "extra_data": {
+        "native_value": "96.0",
+        "native_unit_of_measurement": "W"
+      },
+      "last_seen": "2026-08-29T00:20:30.195572+00:00"
+    },
+    {
+      "state": {"entity_id":"sensor.renogy_rover_mppt_charging_current","state":"7.38","attributes":{"state_class":"measurement","unit_of_measurement":"A","device_class":"current","icon":"mdi:current-dc","friendly_name":"Renogy Rover MPPT Charging Current"},"last_changed":"2026-08-29T00:20:27.133982+00:00","last_reported":"2026-08-29T00:20:27.133982+00:00","last_updated":"2026-08-29T00:20:27.133982+00:00","context":{"id":"01M15E78BXNSQE608F4S8SRWSQ","parent_id":null,"user_id":null}},
+      "extra_data": {
+        "native_value": "7.38",
+        "native_unit_of_measurement": "A"
+      },
+      "last_seen": "2026-08-29T00:20:30.195572+00:00"
+    }
+  ]
+}

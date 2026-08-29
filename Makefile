@@ -15,7 +15,7 @@ LITE_COMPOSE := $(TESTS_DIR)/docker-compose.lite.yml
 FULL_COMPOSE := $(TESTS_DIR)/docker-compose.mac.yml
 HARNESS_COMPOSE := $(TESTS_DIR)/docker-compose.test-harness.yml
 
-.PHONY: help setup pytest check check-mem-lite check-mem-full test test-dev test-ci test-full test-full-dev test-scripts start start-full stop status logs clean reset lint mem target-start target-stop target-ssh victron-setup victron-check victron-scan victron-install victron-test nut-install nut-status nut-uninstall renogy-setup renogy-check renogy-scan renogy-install renogy-test
+.PHONY: help setup pytest check check-mem-lite check-mem-full test test-dev test-ci test-full test-full-dev test-scripts start start-full stop status logs clean reset lint mem target-start target-stop target-ssh victron-setup victron-check victron-scan victron-install victron-test nut-install nut-status nut-uninstall renogy-setup renogy-check renogy-scan renogy-install renogy-test ha-test ha-test-stop
 
 help:
 	@echo "Edge Server - Local Testing"
@@ -59,6 +59,10 @@ help:
 	@echo "  make renogy-check    - Check if Bluetooth is available"
 	@echo "  make renogy-scan     - Scan for Renogy BLE devices"
 	@echo "  make renogy-install  - Install systemd service (requires sudo)"
+	@echo ""
+	@echo "Home Assistant Integration Test:"
+	@echo "  make ha-test         - Start HA + MQTT + simulator locally"
+	@echo "  make ha-test-stop    - Stop HA test environment"
 	@echo ""
 	@echo "Memory Requirements:"
 	@echo "  Lite test:  ~1.3 GB (1 camera)"
@@ -366,3 +370,13 @@ renogy-test: $(RENOGY_ROVER)
 
 $(RENOGY_ROVER):
 	@$(MAKE) renogy-setup
+
+# Home Assistant Integration Test
+HA_TEST_DIR := $(TESTS_DIR)/ha-integration
+
+ha-test: check
+	@cd $(HA_TEST_DIR) && ./setup.sh
+
+ha-test-stop: check
+	@cd $(HA_TEST_DIR) && docker compose down
+	@echo "HA test environment stopped"

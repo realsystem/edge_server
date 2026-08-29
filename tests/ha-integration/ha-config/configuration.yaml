@@ -1,0 +1,13 @@
+homeassistant:
+  name: Test Home
+  unit_system: metric
+  time_zone: America/Los_Angeles
+
+# Enable default integrations
+default_config:
+
+# Logger for debugging
+logger:
+  default: info
+  logs:
+    homeassistant.components.mqtt: debug
