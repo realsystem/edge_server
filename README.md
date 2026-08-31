@@ -13,6 +13,16 @@ Headless Ubuntu edge server for Frigate NVR, Home Assistant, Mosquitto MQTT, and
 | **Mosquitto MQTT** | Lightweight message broker implementing MQTT protocol. The glue between Frigate, Home Assistant, and IoT sensors via publish/subscribe topics. | EMQX, HiveMQ, RabbitMQ, AWS IoT Core | Free | Low |
 | **Tailscale** | Zero-config mesh VPN built on WireGuard. Secure remote access without exposing ports to the internet. | WireGuard (manual), ZeroTier, OpenVPN, Cloudflare Tunnel | Free (personal use) | Very low |
 
+## Plugins
+
+Optional monitoring plugins that integrate with Home Assistant via MQTT.
+
+| Plugin | Purpose | Requirements |
+|--------|---------|--------------|
+| **Victron Smart Shunt** | Battery monitor via BLE. Reads voltage, current, SoC from Victron SmartShunt. | Victron SmartShunt with Bluetooth, encryption key from Victron Connect app |
+| **Renogy Rover MPPT** | Solar charger monitor via BLE. Reads PV voltage/power, battery status, charge state. | Renogy MPPT controller with BT-2 module |
+| **NUT Power Monitor** | Auto-shutdown on power loss. Monitors laptop battery and triggers shutdown after configurable time on battery. | Laptop with battery (Linux) |
+
 ## Quick Start (from laptop)
 
 ```bash
@@ -133,9 +143,52 @@ docker compose pull && docker compose up -d
 - `deploy-security.sh` — Deploy security stack (Frigate, cameras)
 - `secrets.sh` — Encrypted secrets management on target
 
+**Plugins:**
+- `plugins/victron-shunt/` — Victron Smart Shunt BLE monitor
+- `plugins/renogy-rover/` — Renogy Rover MPPT BLE monitor
+- `plugins/nut-power/` — NUT-based power loss monitor
+
 **Configuration:**
 - `bootstrap.cfg.example` — Configuration template
 - `DEPLOYMENT.md` — Detailed deployment reference
+
+## Plugin Installation
+
+### Victron Smart Shunt
+
+```bash
+# Local CLI testing
+make victron-setup
+make victron-scan        # Find devices
+victron-shunt read --address XX:XX:XX:XX:XX:XX --key YOUR_KEY
+
+# Install as systemd service
+make victron-install
+sudo nano /etc/victron-shunt/config.yaml  # Add address and key
+sudo systemctl restart victron-shunt
+```
+
+### Renogy Rover MPPT
+
+```bash
+# Local CLI testing
+make renogy-setup
+make renogy-scan         # Find BT-2 modules
+renogy-rover read --address XX:XX:XX:XX:XX:XX
+
+# Install as systemd service
+make renogy-install
+sudo nano /etc/renogy-rover/config.yaml  # Add address
+sudo systemctl restart renogy-rover
+```
+
+### NUT Power Monitor
+
+```bash
+# Install on laptop (auto-shutdown on power loss)
+make nut-install
+make nut-status          # Check battery status
+```
 
 ## Development
 
@@ -150,6 +203,10 @@ make pytest
 make test-scripts   # Shell script tests
 make pytest         # Python unit tests
 make test           # Docker integration tests
+
+# HA Integration test (local Docker)
+make ha-test         # Start HA + MQTT + simulator
+make ha-test-stop    # Stop test environment
 ```
 
 ## Secrets
