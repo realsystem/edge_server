@@ -7,7 +7,6 @@ import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
@@ -39,12 +38,12 @@ class SecretsManager:
         "EXTERNAL_DRIVE_UUID",
     ]
 
-    def __init__(self, secrets_dir: Optional[Path] = None, password: Optional[str] = None):
+    def __init__(self, secrets_dir: Path | None = None, password: str | None = None):
         self.secrets_dir = secrets_dir or Path.home() / ".edge-server-secrets"
         self.secrets_file = self.secrets_dir / "secrets.enc"
         self.salt_file = self.secrets_dir / ".salt"
         self._password = password
-        self._fernet: Optional[Fernet] = None
+        self._fernet: Fernet | None = None
         self._cache: dict[str, str] = {}
 
     def _get_password(self) -> str:
@@ -130,7 +129,7 @@ class SecretsManager:
         self.secrets_file.write_bytes(encrypted)
         self.secrets_file.chmod(0o600)
 
-    def get(self, key: str) -> Optional[str]:
+    def get(self, key: str) -> str | None:
         """Get a secret value."""
         if not self._cache:
             self._load()
@@ -191,11 +190,11 @@ class SecretsManager:
 class SecretsShellWrapper:
     """Wrapper around existing secrets.sh script."""
 
-    def __init__(self, script_path: Path, home_dir: Optional[Path] = None):
+    def __init__(self, script_path: Path, home_dir: Path | None = None):
         self.script_path = script_path
         self.home_dir = home_dir
 
-    def _run(self, *args: str, password: Optional[str] = None) -> tuple[bool, str, str]:
+    def _run(self, *args: str, password: str | None = None) -> tuple[bool, str, str]:
         """Run secrets.sh with arguments."""
         env = os.environ.copy()
         if self.home_dir:
@@ -228,24 +227,24 @@ class SecretsShellWrapper:
         )
         return result.returncode == 0
 
-    def get(self, key: str, password: Optional[str] = None) -> Optional[str]:
+    def get(self, key: str, password: str | None = None) -> str | None:
         """Get a secret value."""
         success, stdout, _ = self._run("get", key, password=password)
         return stdout if success else None
 
-    def set(self, key: str, value: str, password: Optional[str] = None) -> bool:
+    def set(self, key: str, value: str, password: str | None = None) -> bool:
         """Set a secret value."""
         success, _, _ = self._run("set", key, value, password=password)
         return success
 
-    def list_keys(self, password: Optional[str] = None) -> list:
+    def list_keys(self, password: str | None = None) -> list:
         """List all secret keys."""
         success, stdout, _ = self._run("list", password=password)
         if success:
             return [line.strip() for line in stdout.split("\n") if line.strip()]
         return []
 
-    def export(self, password: Optional[str] = None) -> str:
+    def export(self, password: str | None = None) -> str:
         """Export secrets as shell export statements."""
         success, stdout, _ = self._run("export", password=password)
         return stdout if success else ""

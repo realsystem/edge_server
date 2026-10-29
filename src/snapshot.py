@@ -7,7 +7,6 @@ import tarfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from ssh import SSHClient
 
@@ -30,7 +29,7 @@ class SnapshotManager:
 
     SNAPSHOT_DIR = "/var/lib/edge-server-snapshots"
 
-    def __init__(self, ssh: SSHClient, snapshot_dir: Optional[str] = None):
+    def __init__(self, ssh: SSHClient, snapshot_dir: str | None = None):
         self.ssh = ssh
         self.snapshot_dir = (snapshot_dir or self.SNAPSHOT_DIR).rstrip("/")
 
@@ -52,9 +51,9 @@ class SnapshotManager:
         self,
         phase: str,
         description: str,
-        paths: Optional[list[str]] = None,
+        paths: list[str] | None = None,
         include_docker: bool = False,
-    ) -> Optional[str]:
+    ) -> str | None:
         """Create a snapshot. Returns snapshot ID on success."""
         snapshot_id = self._generate_id(phase)
         snapshot_path = f"{self.snapshot_dir}/{snapshot_id}"
@@ -135,7 +134,7 @@ class SnapshotManager:
 
         return sorted(snapshots, key=lambda s: s.created_at, reverse=True)
 
-    def get_manifest(self, snapshot_id: str) -> Optional[SnapshotManifest]:
+    def get_manifest(self, snapshot_id: str) -> SnapshotManifest | None:
         """Get manifest for a snapshot."""
         if snapshot_id == "latest":
             # Resolve latest symlink
@@ -215,15 +214,15 @@ class SnapshotManager:
 class LocalSnapshotManager:
     """Manage local snapshots (for testing or local deployments)."""
 
-    def __init__(self, snapshot_dir: Optional[Path] = None):
+    def __init__(self, snapshot_dir: Path | None = None):
         self.snapshot_dir = snapshot_dir or Path("/var/lib/edge-server-snapshots")
 
     def create(
         self,
         phase: str,
         description: str,
-        paths: Optional[list[Path]] = None,
-    ) -> Optional[str]:
+        paths: list[Path] | None = None,
+    ) -> str | None:
         """Create a local snapshot."""
         timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
         snapshot_id = f"{timestamp}_{phase}"

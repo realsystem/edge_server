@@ -3,9 +3,9 @@
 import shlex
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
 
 
 @dataclass
@@ -31,7 +31,7 @@ class SSHClient:
         port: int = 22,
         timeout: int = 10,
         retries: int = 3,
-        key_file: Optional[str] = None,
+        key_file: str | None = None,
         strict_host_key_checking: str = "accept-new",
     ):
         self.host = host
@@ -80,9 +80,9 @@ class SSHClient:
     def run(
         self,
         command: str,
-        timeout: Optional[int] = None,
+        timeout: int | None = None,
         sudo: bool = False,
-        input: Optional[str] = None,
+        input: str | None = None,
     ) -> SSHResult:
         """Execute a remote command.
 
@@ -114,9 +114,9 @@ class SSHClient:
     def run_with_progress(
         self,
         command: str,
-        timeout: Optional[int] = None,
+        timeout: int | None = None,
         sudo: bool = False,
-        on_progress: Optional[Callable[[float], None]] = None,
+        on_progress: Callable[[float], None] | None = None,
     ) -> SSHResult:
         """Execute a remote command with progress callback (elapsed time)."""
         if sudo:
@@ -174,7 +174,7 @@ class SSHClient:
         result = self.run("sudo -n true")
         return result.success
 
-    def get_os_info(self) -> Optional[str]:
+    def get_os_info(self) -> str | None:
         """Get OS information."""
         result = self.run("cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2 | tr -d '\"'")
         return result.stdout if result.success else None
@@ -232,10 +232,10 @@ class SSHClient:
     def run_script(
         self,
         script_path: str,
-        env: Optional[dict[str, str]] = None,
+        env: dict[str, str] | None = None,
         sudo: bool = True,
         timeout: int = 600,
-        on_progress: Optional[Callable[[float], None]] = None,
+        on_progress: Callable[[float], None] | None = None,
     ) -> SSHResult:
         """Run a script on remote host."""
         env_str = " ".join(f"{k}={shlex.quote(str(v))}" for k, v in (env or {}).items())
@@ -247,7 +247,7 @@ class SSHClient:
             return self.run_with_progress(command, timeout=timeout, on_progress=on_progress)
         return self.run(command, timeout=timeout)
 
-    def get_docker_containers(self, filter_name: Optional[str] = None) -> list[dict]:
+    def get_docker_containers(self, filter_name: str | None = None) -> list[dict]:
         """Get list of running docker containers."""
         cmd = "docker ps --format '{{.Names}}|{{.Status}}|{{.Ports}}'"
         if filter_name:

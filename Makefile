@@ -73,13 +73,13 @@ help:
 	@echo "  Frigate:  http://localhost:5000"
 	@echo "  MQTT:     localhost:1883"
 
-# Python setup - finds Python 3.8+
-PYTHON3 := $(shell for cmd in python3.12 python3.11 python3.10 python3.9 python3.8 python3; do \
+# Python setup - finds Python 3.10+
+PYTHON3 := $(shell for cmd in python3.13 python3.12 python3.11 python3.10 python3; do \
 	if command -v $$cmd >/dev/null 2>&1; then \
 		ver=$$($$cmd -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null); \
 		major=$$(echo $$ver | cut -d. -f1); \
 		minor=$$(echo $$ver | cut -d. -f2); \
-		if [ "$$major" -ge 3 ] && [ "$$minor" -ge 8 ]; then \
+		if [ "$$major" -ge 3 ] && [ "$$minor" -ge 10 ]; then \
 			echo $$cmd; \
 			break; \
 		fi; \
@@ -88,7 +88,7 @@ done)
 
 setup:
 	@if [ -z "$(PYTHON3)" ]; then \
-		echo "ERROR: Python 3.8+ required"; \
+		echo "ERROR: Python 3.10+ required"; \
 		exit 1; \
 	fi
 	@echo "Using $(PYTHON3)..."

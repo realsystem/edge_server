@@ -39,7 +39,7 @@ Optional monitoring plugins that integrate with Home Assistant via MQTT.
 ./bootstrap.sh --config myserver.cfg 192.168.1.100
 ```
 
-Requires Python 3.9+. The wrapper script creates a venv automatically.
+Requires Python 3.10+. The wrapper script creates a venv automatically.
 
 ## Manual Setup Flow
 
@@ -223,7 +223,7 @@ GitHub-hosted runners and GitHub's own actions (no external services):
 
 | Job | What it checks |
 |-----|----------------|
-| Python tests | `pytest` on 3.9–3.13 with branch coverage (fails under 85%); the suite also exercises `secrets.sh`, the deploy scripts' generated configs and the NUT poller |
+| Python tests | `pytest` on 3.10–3.13 with branch coverage (fails under 85%); the suite also exercises `secrets.sh`, the deploy scripts' generated configs and the NUT poller |
 | Python lint & types | black, ruff, mypy |
 | Plugin tests | victron-shunt and renogy-rover tests + ruff (fails under 75% coverage) |
 | Shell lint & tests | `bash -n`, ShellCheck on every script, `tests/test-scripts.sh` |

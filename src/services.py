@@ -9,7 +9,6 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
 
 from ssh import SSHClient, SSHResult
 
@@ -30,14 +29,14 @@ class ServiceHealth:
     name: str
     status: HealthStatus
     message: str
-    details: Optional[dict] = None
-    response_time: Optional[float] = None
+    details: dict | None = None
+    response_time: float | None = None
 
 
 class ServiceChecker:
     """Check health of various services."""
 
-    def __init__(self, ssh: Optional[SSHClient] = None):
+    def __init__(self, ssh: SSHClient | None = None):
         self.ssh = ssh
 
     @staticmethod
@@ -61,7 +60,7 @@ class ServiceChecker:
                 status=HealthStatus.HEALTHY,
                 message=f"Port {port} is open",
             )
-        except (socket.timeout, TimeoutError):
+        except TimeoutError:
             return ServiceHealth(
                 name=f"tcp:{port}",
                 status=HealthStatus.UNHEALTHY,
@@ -83,7 +82,7 @@ class ServiceChecker:
     def check_http(
         self,
         url: str,
-        expected_codes: Optional[list] = None,
+        expected_codes: list | None = None,
         timeout: int = 10,
     ) -> ServiceHealth:
         """Check HTTP endpoint."""
@@ -137,7 +136,7 @@ class ServiceChecker:
     def check_http_json(
         self,
         url: str,
-        jq_path: Optional[str] = None,
+        jq_path: str | None = None,
         timeout: int = 10,
     ) -> ServiceHealth:
         """Check HTTP endpoint and optionally extract JSON field."""
@@ -228,8 +227,8 @@ class ServiceChecker:
         host: str = "localhost",
         port: int = 1883,
         timeout: int = 5,
-        user: Optional[str] = None,
-        password: Optional[str] = None,
+        user: str | None = None,
+        password: str | None = None,
     ) -> ServiceHealth:
         """Check MQTT broker via a $SYS subscribe test.
 

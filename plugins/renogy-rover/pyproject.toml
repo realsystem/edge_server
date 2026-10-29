@@ -2,7 +2,7 @@
 name = "renogy-rover"
 version = "0.1.0"
 description = "Read data from Renogy Rover MPPT via BLE (BT-2 module)"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "click>=8.0",
     "pyyaml>=6.0",

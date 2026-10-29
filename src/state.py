@@ -2,11 +2,12 @@
 
 import json
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 
 class PhaseStatus(Enum):
@@ -45,7 +46,7 @@ class PhaseResult:
     started_at: float
     completed_at: float
     details: dict[str, Any] = field(default_factory=dict)
-    error: Optional[str] = None
+    error: str | None = None
 
     @property
     def elapsed(self) -> float:
@@ -68,7 +69,7 @@ class PhaseDefinition:
     phase: Phase
     pre_validations: list[ValidationRule] = field(default_factory=list)
     post_validations: list[ValidationRule] = field(default_factory=list)
-    rollback: Optional[Callable[[], bool]] = None
+    rollback: Callable[[], bool] | None = None
     timeout: int = 60
 
 
@@ -88,7 +89,7 @@ class StateMachine:
         Phase.DONE,
     ]
 
-    def __init__(self, state_file: Optional[Path] = None):
+    def __init__(self, state_file: Path | None = None):
         self.state_file = state_file
         self.current_phase = Phase.INIT
         self.results: dict[Phase, PhaseResult] = {}
@@ -200,8 +201,8 @@ class StateMachine:
         status: PhaseStatus,
         message: str,
         started_at: float,
-        details: Optional[dict[str, Any]] = None,
-        error: Optional[str] = None,
+        details: dict[str, Any] | None = None,
+        error: str | None = None,
     ) -> PhaseResult:
         """Mark a phase as completed."""
         result = PhaseResult(
@@ -233,7 +234,7 @@ class StateMachine:
 
         return True
 
-    def next_phase(self) -> Optional[Phase]:
+    def next_phase(self) -> Phase | None:
         """Get the next phase to execute."""
         current_idx = self.PHASE_ORDER.index(self.current_phase)
         if current_idx + 1 < len(self.PHASE_ORDER):
