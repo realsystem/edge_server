@@ -2,10 +2,11 @@
 
 import sys
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
-from typing import Iterator, Optional
+from typing import Optional
 
 
 class Color:

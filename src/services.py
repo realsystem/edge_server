@@ -1,15 +1,17 @@
 """Service health checks and monitoring."""
 
 import json
+import shlex
 import socket
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
-from ssh import SSHClient
+from ssh import SSHClient, SSHResult
 
 
 class HealthStatus(Enum):
@@ -38,29 +40,38 @@ class ServiceChecker:
     def __init__(self, ssh: Optional[SSHClient] = None):
         self.ssh = ssh
 
+    @staticmethod
+    def _run_local(args: list[str], timeout: int) -> SSHResult:
+        """Run a local command and return it in the same shape as an SSH result."""
+        try:
+            proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+            return SSHResult(proc.returncode, proc.stdout.strip(), proc.stderr.strip())
+        except subprocess.TimeoutExpired:
+            return SSHResult(-1, "", "Command timed out")
+        except Exception as e:
+            return SSHResult(-1, "", str(e))
+
     def check_tcp_port(self, host: str, port: int, timeout: int = 5) -> ServiceHealth:
         """Check if a TCP port is open."""
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(timeout)
-            result = sock.connect_ex((host, port))
-            sock.close()
-            if result == 0:
-                return ServiceHealth(
-                    name=f"tcp:{port}",
-                    status=HealthStatus.HEALTHY,
-                    message=f"Port {port} is open",
-                )
+            with socket.create_connection((host, port), timeout=timeout):
+                pass
             return ServiceHealth(
                 name=f"tcp:{port}",
-                status=HealthStatus.UNHEALTHY,
-                message=f"Port {port} is closed",
+                status=HealthStatus.HEALTHY,
+                message=f"Port {port} is open",
             )
-        except TimeoutError:
+        except (socket.timeout, TimeoutError):
             return ServiceHealth(
                 name=f"tcp:{port}",
                 status=HealthStatus.UNHEALTHY,
                 message=f"Connection to port {port} timed out",
+            )
+        except ConnectionRefusedError:
+            return ServiceHealth(
+                name=f"tcp:{port}",
+                status=HealthStatus.UNHEALTHY,
+                message=f"Port {port} is closed",
             )
         except Exception as e:
             return ServiceHealth(
@@ -81,8 +92,6 @@ class ServiceChecker:
 
         try:
             req = urllib.request.Request(url, method="GET")
-            import time
-
             start = time.monotonic()
             with urllib.request.urlopen(req, timeout=timeout) as response:
                 elapsed = time.monotonic() - start
@@ -134,8 +143,6 @@ class ServiceChecker:
         """Check HTTP endpoint and optionally extract JSON field."""
         try:
             req = urllib.request.Request(url, method="GET")
-            import time
-
             start = time.monotonic()
             with urllib.request.urlopen(req, timeout=timeout) as response:
                 elapsed = time.monotonic() - start
@@ -181,27 +188,22 @@ class ServiceChecker:
                 )
             output = result.stdout
         else:
-            try:
-                proc = subprocess.run(cmd.split(), capture_output=True, text=True, timeout=10)
-                if proc.returncode != 0:
-                    return ServiceHealth(
-                        name="tailscale",
-                        status=HealthStatus.UNHEALTHY,
-                        message=proc.stderr or "Failed to get status",
-                    )
-                output = proc.stdout
-            except Exception as e:
+            local = self._run_local(cmd.split(), timeout=10)
+            if not local.success:
                 return ServiceHealth(
                     name="tailscale",
-                    status=HealthStatus.UNKNOWN,
-                    message=str(e),
+                    status=(
+                        HealthStatus.UNKNOWN if local.returncode == -1 else HealthStatus.UNHEALTHY
+                    ),
+                    message=local.stderr or "Failed to get status",
                 )
+            output = local.stdout
 
         try:
             data = json.loads(output)
             backend_state = data.get("BackendState", "Unknown")
             if backend_state == "Running":
-                dns_name = data.get("Self", {}).get("DNSName", "").rstrip(".")
+                dns_name = (data.get("Self") or {}).get("DNSName", "").rstrip(".")
                 return ServiceHealth(
                     name="tailscale",
                     status=HealthStatus.HEALTHY,
@@ -214,7 +216,7 @@ class ServiceChecker:
                 message=f"State: {backend_state}",
                 details={"backend_state": backend_state},
             )
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, AttributeError):
             return ServiceHealth(
                 name="tailscale",
                 status=HealthStatus.UNKNOWN,
@@ -222,31 +224,37 @@ class ServiceChecker:
             )
 
     def check_mqtt(
-        self, host: str = "localhost", port: int = 1883, timeout: int = 5
+        self,
+        host: str = "localhost",
+        port: int = 1883,
+        timeout: int = 5,
+        user: Optional[str] = None,
+        password: Optional[str] = None,
     ) -> ServiceHealth:
-        """Check MQTT broker via subscribe test."""
-        cmd = f"timeout {timeout} mosquitto_sub -h {host} -p {port} -t '$SYS/#' -C 1 -W {timeout}"
+        """Check MQTT broker via a $SYS subscribe test.
+
+        Remotely this runs ``mosquitto_sub`` inside the ``mosquitto`` container.
+        If the broker answers but rejects the credentials it is still up, so that
+        is reported as healthy (with a note) rather than as an outage.
+        """
+        sub_args = ["mosquitto_sub", "-t", "$SYS/#", "-C", "1", "-W", str(timeout)]
+        if user:
+            sub_args += ["-u", user]
+            if password:
+                sub_args += ["-P", password]
+
         if self.ssh:
-            # Run via docker exec on remote
-            cmd = f"docker exec mosquitto mosquitto_sub -t '$SYS/#' -C 1 -W {timeout}"
-            result = self.ssh.run(cmd, timeout=timeout + 5)
+            sub_cmd = " ".join(shlex.quote(a) for a in sub_args)
+            # Fall back to sudo when the SSH user is not in the docker group yet
+            # (group membership added during deploy only applies to new logins).
+            cmd = (
+                f"docker exec mosquitto {sub_cmd} 2>&1 || "
+                f"sudo -n docker exec mosquitto {sub_cmd} 2>&1"
+            )
+            result = self.ssh.run(cmd, timeout=timeout + 10)
         else:
-            try:
-                result_proc = subprocess.run(
-                    cmd, shell=True, capture_output=True, text=True, timeout=timeout + 5
-                )
-
-                class Result:
-                    success = result_proc.returncode == 0
-                    stderr = result_proc.stderr
-
-                result = Result()
-            except Exception as e:
-                return ServiceHealth(
-                    name="mqtt",
-                    status=HealthStatus.UNKNOWN,
-                    message=str(e),
-                )
+            local_args = ["timeout", str(timeout + 2)] + sub_args + ["-h", host, "-p", str(port)]
+            result = self._run_local(local_args, timeout=timeout + 5)
 
         if result.success:
             return ServiceHealth(
@@ -254,33 +262,30 @@ class ServiceChecker:
                 status=HealthStatus.HEALTHY,
                 message=f"Broker responding on port {port}",
             )
+        output = f"{result.stdout}\n{result.stderr}".lower()
+        if "not authori" in output:
+            return ServiceHealth(
+                name="mqtt",
+                status=HealthStatus.HEALTHY,
+                message=f"Broker responding on port {port} (authentication required)",
+            )
         return ServiceHealth(
             name="mqtt",
             status=HealthStatus.UNHEALTHY,
-            message=result.stderr if hasattr(result, "stderr") else "No response",
+            message=(result.stderr or result.stdout or "No response").strip(),
         )
 
     def check_docker_container(self, container_name: str) -> ServiceHealth:
         """Check Docker container health status."""
-        cmd = f"docker inspect --format='{{{{.State.Status}}}}:{{{{.State.Health.Status}}}}' {container_name}"
+        fmt = "{{.State.Status}}:{{if .State.Health}}{{.State.Health.Status}}{{end}}"
         if self.ssh:
-            result = self.ssh.run(cmd)
+            result = self.ssh.run(
+                f"docker inspect --format={shlex.quote(fmt)} {shlex.quote(container_name)}"
+            )
         else:
-            try:
-                proc = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
-
-                class Result:
-                    success = proc.returncode == 0
-                    stdout = proc.stdout.strip()
-                    stderr = proc.stderr
-
-                result = Result()
-            except Exception as e:
-                return ServiceHealth(
-                    name=container_name,
-                    status=HealthStatus.UNKNOWN,
-                    message=str(e),
-                )
+            result = self._run_local(
+                ["docker", "inspect", f"--format={fmt}", container_name], timeout=10
+            )
 
         if not result.success:
             return ServiceHealth(

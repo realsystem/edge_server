@@ -1,10 +1,11 @@
 """SSH connection and remote command execution."""
 
+import shlex
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, Optional
 
 
 @dataclass
@@ -41,7 +42,7 @@ class SSHClient:
         self.key_file = key_file
         self.strict_host_key_checking = strict_host_key_checking
 
-    def _ssh_args(self) -> List[str]:
+    def _ssh_args(self) -> list[str]:
         """Build SSH command arguments."""
         args = [
             "ssh",
@@ -59,7 +60,7 @@ class SSHClient:
         args.append(f"{self.user}@{self.host}")
         return args
 
-    def _scp_args(self) -> List[str]:
+    def _scp_args(self) -> list[str]:
         """Build SCP command arguments."""
         args = [
             "scp",
@@ -76,8 +77,19 @@ class SSHClient:
             args.extend(["-i", self.key_file])
         return args
 
-    def run(self, command: str, timeout: Optional[int] = None, sudo: bool = False) -> SSHResult:
-        """Execute a remote command."""
+    def run(
+        self,
+        command: str,
+        timeout: Optional[int] = None,
+        sudo: bool = False,
+        input: Optional[str] = None,
+    ) -> SSHResult:
+        """Execute a remote command.
+
+        ``input`` is written to the remote command's stdin. When it is not given,
+        stdin is /dev/null so the remote side can never block on (or steal) the
+        local terminal.
+        """
         if sudo:
             command = f"sudo {command}"
 
@@ -87,6 +99,8 @@ class SSHClient:
         try:
             result = subprocess.run(
                 args,
+                input=input,
+                stdin=None if input is not None else subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=cmd_timeout,
@@ -114,32 +128,46 @@ class SSHClient:
         try:
             process = subprocess.Popen(
                 args,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
             )
-
-            start_time = time.monotonic()
-            while process.poll() is None:
-                elapsed = time.monotonic() - start_time
-                if cmd_timeout and elapsed > cmd_timeout:
-                    process.kill()
-                    stdout, stderr = process.communicate()
-                    return SSHResult(-1, stdout.strip(), "Command timed out")
-
-                if on_progress:
-                    on_progress(elapsed)
-                time.sleep(1)
-
-            stdout, stderr = process.communicate()
-            return SSHResult(process.returncode, stdout.strip(), stderr.strip())
         except Exception as e:
             return SSHResult(-1, "", str(e))
 
+        # communicate() keeps draining stdout/stderr while we wait. Polling with
+        # process.poll() alone deadlocks once the remote output fills the pipe
+        # buffer (~64 KiB), which apt-heavy setup scripts easily exceed.
+        start_time = time.monotonic()
+        while True:
+            elapsed = time.monotonic() - start_time
+            if cmd_timeout and elapsed > cmd_timeout:
+                process.kill()
+                stdout, _ = process.communicate()
+                return SSHResult(-1, (stdout or "").strip(), "Command timed out")
+            if on_progress:
+                on_progress(elapsed)
+            try:
+                stdout, stderr = process.communicate(timeout=1)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+            except Exception as e:
+                process.kill()
+                return SSHResult(-1, "", str(e))
+
+        return SSHResult(process.returncode, (stdout or "").strip(), (stderr or "").strip())
+
     def test_connection(self) -> bool:
-        """Test if SSH connection works."""
-        result = self.run("true")
-        return result.success
+        """Test if SSH connection works, retrying up to ``retries`` times."""
+        attempts = max(1, self.retries)
+        for attempt in range(attempts):
+            if self.run("true").success:
+                return True
+            if attempt < attempts - 1:
+                time.sleep(1)
+        return False
 
     def test_sudo(self) -> bool:
         """Test if sudo works without password."""
@@ -153,15 +181,15 @@ class SSHClient:
 
     def path_exists(self, path: str) -> bool:
         """Check if a path exists on remote."""
-        result = self.run(f"[ -e {path} ]")
+        result = self.run(f"[ -e {shlex.quote(path)} ]")
         return result.success
 
     def mkdir(self, path: str, sudo: bool = False) -> bool:
         """Create directory on remote."""
-        result = self.run(f"mkdir -p {path}", sudo=sudo)
+        result = self.run(f"mkdir -p {shlex.quote(path)}", sudo=sudo)
         return result.success
 
-    def copy_files(self, local_paths: List[Path], remote_dir: str) -> bool:
+    def copy_files(self, local_paths: list[Path], remote_dir: str) -> bool:
         """Copy files to remote host."""
         args = self._scp_args() + ["-r"]
         args.extend(str(p) for p in local_paths)
@@ -193,36 +221,37 @@ class SSHClient:
     def wait_for_host(self, timeout: int = 120, interval: int = 5) -> tuple[bool, float]:
         """Wait for host to come back online after reboot."""
         start = time.monotonic()
-        while (elapsed := time.monotonic() - start) < timeout:
-            if self.test_connection():
+        elapsed = 0.0
+        while elapsed < timeout:
+            if self.run("true").success:
                 return True, elapsed
             time.sleep(interval)
+            elapsed = time.monotonic() - start
         return False, elapsed
 
     def run_script(
         self,
         script_path: str,
-        env: Optional[dict] = None,
+        env: Optional[dict[str, str]] = None,
         sudo: bool = True,
         timeout: int = 600,
         on_progress: Optional[Callable[[float], None]] = None,
     ) -> SSHResult:
         """Run a script on remote host."""
-        env_str = " ".join(f"{k}='{v}'" for k, v in (env or {}).items())
-        sudo_prefix = "sudo -E" if sudo else ""
-        if env_str:
-            command = f"cd $(dirname {script_path}) && {env_str} {sudo_prefix} {script_path} 2>&1"
-        else:
-            command = f"cd $(dirname {script_path}) && {sudo_prefix} {script_path} 2>&1"
+        env_str = " ".join(f"{k}={shlex.quote(str(v))}" for k, v in (env or {}).items())
+        sudo_prefix = "sudo -E " if sudo else ""
+        script = shlex.quote(script_path)
+        prefix = f"{env_str} " if env_str else ""
+        command = f'cd "$(dirname {script})" && {prefix}{sudo_prefix}{script} 2>&1'
         if on_progress:
             return self.run_with_progress(command, timeout=timeout, on_progress=on_progress)
         return self.run(command, timeout=timeout)
 
-    def get_docker_containers(self, filter_name: Optional[str] = None) -> List[dict]:
+    def get_docker_containers(self, filter_name: Optional[str] = None) -> list[dict]:
         """Get list of running docker containers."""
         cmd = "docker ps --format '{{.Names}}|{{.Status}}|{{.Ports}}'"
         if filter_name:
-            cmd += f" | grep {filter_name}"
+            cmd += f" | grep -F -- {shlex.quote(filter_name)}"
         result = self.run(cmd)
         if not result.success:
             return []

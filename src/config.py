@@ -112,7 +112,8 @@ class Config:
         if not config_path.exists():
             return config
 
-        parser = configparser.ConfigParser()
+        # Interpolation is disabled so values containing "%" are read literally.
+        parser = configparser.ConfigParser(interpolation=None)
         parser.read(config_path)
 
         # Timeouts
@@ -208,7 +209,7 @@ class Config:
 
     def save(self, config_path: Path) -> None:
         """Save configuration to file."""
-        parser = configparser.ConfigParser()
+        parser = configparser.ConfigParser(interpolation=None)
 
         # Timeouts
         parser["timeouts"] = {
@@ -257,6 +258,13 @@ class Config:
             "SSH_KEY_FILE": self.ssh.key_file,
             "SSH_STRICT_HOST_KEY_CHECKING": self.ssh.strict_host_key_checking,
             "SSH_USER": self.ssh.user,
+        }
+
+        parser["logging"] = {"LOG_DIR": self.logging.log_dir}
+        parser["secrets"] = {"SECRETS_DIR": self.secrets.secrets_dir}
+        parser["deploy"] = {
+            "EDGE_SERVER_DIR": self.deploy.edge_server_dir,
+            "EDGE_STORAGE_DIR": self.deploy.edge_storage_dir,
         }
 
         with open(config_path, "w") as f:

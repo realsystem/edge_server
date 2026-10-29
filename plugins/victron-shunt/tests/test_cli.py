@@ -1,7 +1,5 @@
 """Tests for CLI module."""
 
-from pathlib import Path
-from unittest.mock import patch
 
 from click.testing import CliRunner
 
@@ -81,7 +79,7 @@ class TestConfigCommand:
 
     def test_config_save(self, runner, tmp_path):
         config_file = tmp_path / "test-config.yaml"
-        result = runner.invoke(cli, [
+        runner.invoke(cli, [
             "--config", str(config_file),
             "config",
             "--address", "AA:BB:CC:DD:EE:FF",

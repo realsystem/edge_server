@@ -3,7 +3,19 @@
 # Called from deploy-edge-server.sh with:
 #   VICTRON_ADDRESS=XX:XX:XX:XX:XX:XX VICTRON_KEY=... ./install.sh
 
-set -e
+set -euo pipefail
+
+VICTRON_ADDRESS="${VICTRON_ADDRESS:-}"
+VICTRON_KEY="${VICTRON_KEY:-}"
+MQTT_USER="${MQTT_USER:-admin}"
+MQTT_PASS="${MQTT_PASS:-}"
+
+# YAML double-quoted scalar
+yaml_quote() {
+    local v="${1//\\/\\\\}"
+    v="${v//\"/\\\"}"
+    printf '"%s"' "$v"
+}
 
 INSTALL_DIR="/opt/victron-shunt"
 CONFIG_DIR="/etc/victron-shunt"
@@ -41,16 +53,17 @@ python3 -m venv "$INSTALL_DIR/venv"
 # Create config file (only if not exists, to preserve user changes)
 if [[ ! -f "$CONFIG_DIR/config.yaml" ]]; then
     echo "Creating config file..."
-    cat > "$CONFIG_DIR/config.yaml" << EOF
-address: "${VICTRON_ADDRESS}"
-key: "${VICTRON_KEY}"
+    (umask 077 && cat > "$CONFIG_DIR/config.yaml" << EOF
+address: $(yaml_quote "$VICTRON_ADDRESS")
+key: $(yaml_quote "$VICTRON_KEY")
 mqtt:
   host: localhost
   port: 1883
-  user: ${MQTT_USER:-admin}
-  password: ${MQTT_PASS:-}
+  user: $(yaml_quote "$MQTT_USER")
+  password: $(yaml_quote "$MQTT_PASS")
   topic_prefix: victron/smartshunt
 EOF
+    )
     chmod 600 "$CONFIG_DIR/config.yaml"
 else
     echo "Config file exists, preserving..."

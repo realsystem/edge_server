@@ -39,7 +39,7 @@ Optional monitoring plugins that integrate with Home Assistant via MQTT.
 ./bootstrap.sh --config myserver.cfg 192.168.1.100
 ```
 
-Requires Python 3.8+. The wrapper script creates a venv automatically.
+Requires Python 3.9+. The wrapper script creates a venv automatically.
 
 ## Manual Setup Flow
 
@@ -98,12 +98,12 @@ ssh user@<laptop-ip>
 sudo ./deploy-edge-server.sh
 
 # Option B: With secrets loaded
-eval $(./secrets.sh export)
+eval "$(./secrets.sh export)"
 sudo -E ./deploy-edge-server.sh
 
 # Option C: Batch mode (no prompts, fails if secrets missing)
 export BATCH_MODE=true
-eval $(./secrets.sh export)
+eval "$(./secrets.sh export)"
 sudo -E ./deploy-security.sh
 ```
 
@@ -204,10 +204,34 @@ make test-scripts   # Shell script tests
 make pytest         # Python unit tests
 make test           # Docker integration tests
 
+# Same lint/type/coverage checks as CI
+make ci-local
+
+# Plugin tests
+make victron-test
+make renogy-test
+
 # HA Integration test (local Docker)
 make ha-test         # Start HA + MQTT + simulator
 make ha-test-stop    # Stop test environment
 ```
+
+### CI
+
+`.github/workflows/test.yml` runs on every push/PR to `main` using only
+GitHub-hosted runners and GitHub's own actions (no external services):
+
+| Job | What it checks |
+|-----|----------------|
+| Python tests | `pytest` on 3.9–3.13 with branch coverage (fails under 85%); the suite also exercises `secrets.sh`, the deploy scripts' generated configs and the NUT poller |
+| Python lint & types | black, ruff, mypy |
+| Plugin tests | victron-shunt and renogy-rover tests + ruff (fails under 75% coverage) |
+| Shell lint & tests | `bash -n`, ShellCheck on every script, `tests/test-scripts.sh` |
+| Docker Compose | `docker compose config` for every compose file |
+| Integration | starts the lite stack and checks Mosquitto + Frigate |
+
+Coverage is shown in each run's job summary and the HTML report is attached
+as the `coverage-core` artifact.
 
 ## Secrets
 

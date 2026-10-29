@@ -1,13 +1,12 @@
 """Read data from Victron Smart Shunt via BLE."""
 
 import asyncio
+import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Callable, Dict, Optional
 
 try:
     from bleak import BleakScanner
-    from bleak.backends.device import BLEDevice
-    from bleak.backends.scanner import AdvertisementData
 except ImportError:
     BleakScanner = None
 
@@ -15,6 +14,8 @@ try:
     from victron_ble.devices import detect_device_type
 except ImportError:
     detect_device_type = None
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -30,6 +31,49 @@ class ShuntReading:
     raw_data: Optional[dict] = None
 
 
+VICTRON_MANUFACTURER_ID = 0x02E1
+
+
+def _call(parsed: Any, method: str) -> Any:
+    fn = getattr(parsed, method, None)
+    return fn() if callable(fn) else None
+
+
+def parse_advertisement(manufacturer_data: Dict[int, bytes], encryption_key: str) -> Optional[ShuntReading]:
+    """Decode a Victron "instant readout" advertisement into a ShuntReading.
+
+    Returns None when the advertisement is not from a Victron device or is of a
+    type victron-ble does not understand.
+    """
+    if detect_device_type is None:
+        raise RuntimeError("victron-ble not installed")
+
+    raw_bytes = (manufacturer_data or {}).get(VICTRON_MANUFACTURER_ID)
+    if raw_bytes is None:
+        return None
+
+    device_class = detect_device_type(raw_bytes)
+    if device_class is None:
+        return None
+
+    parsed = device_class(encryption_key).parse(raw_bytes)
+
+    voltage = _call(parsed, "get_voltage") or 0.0
+    current = _call(parsed, "get_current") or 0.0
+    soc = _call(parsed, "get_soc") or 0.0
+    model = _call(parsed, "get_model_name")
+
+    return ShuntReading(
+        voltage=voltage,
+        current=current,
+        soc=soc,
+        power=voltage * current,
+        consumed_ah=_call(parsed, "get_consumed_ah"),
+        time_remaining=_call(parsed, "get_remaining_mins"),
+        raw_data={"model": model} if model else None,
+    )
+
+
 class VictronReader:
     """Read encrypted BLE advertisements from Victron devices."""
 
@@ -38,58 +82,34 @@ class VictronReader:
         self.encryption_key = encryption_key
         self._last_reading: Optional[ShuntReading] = None
 
-    async def read_once(self, timeout: float = 30.0) -> Optional[ShuntReading]:
-        """Read a single advertisement from the device."""
+    def _check_deps(self) -> None:
         if BleakScanner is None:
             raise RuntimeError("bleak not installed")
         if detect_device_type is None:
             raise RuntimeError("victron-ble not installed")
 
+    def _parse(self, device: Any, adv_data: Any) -> Optional[ShuntReading]:
+        if device.address.upper() != self.address:
+            return None
+        try:
+            return parse_advertisement(adv_data.manufacturer_data, self.encryption_key)
+        except Exception as e:
+            log.debug("Failed to parse advertisement: %s", e)
+            return None
+
+    async def read_once(self, timeout: float = 30.0) -> Optional[ShuntReading]:
+        """Read a single advertisement from the device."""
+        self._check_deps()
+
         result: Optional[ShuntReading] = None
         event = asyncio.Event()
 
-        def callback(device: BLEDevice, adv_data: AdvertisementData):
+        def callback(device: Any, adv_data: Any) -> None:
             nonlocal result
-            if device.address.upper() != self.address:
-                return
-
-            try:
-                raw_bytes = None
-                if adv_data.manufacturer_data:
-                    for mfr_id, data in adv_data.manufacturer_data.items():
-                        if mfr_id == 0x02E1:  # Victron manufacturer ID
-                            raw_bytes = data
-                            break
-
-                if raw_bytes is None:
-                    return
-
-                device_class = detect_device_type(raw_bytes)
-                if device_class is None:
-                    return
-
-                device_instance = device_class(self.encryption_key)
-                parsed = device_instance.parse(raw_bytes)
-
-                voltage = parsed.get_voltage() if hasattr(parsed, 'get_voltage') else 0.0
-                current = parsed.get_current() if hasattr(parsed, 'get_current') else 0.0
-                soc = parsed.get_soc() if hasattr(parsed, 'get_soc') else 0.0
-                consumed = parsed.get_consumed_ah() if hasattr(parsed, 'get_consumed_ah') else None
-                remaining = parsed.get_remaining_mins() if hasattr(parsed, 'get_remaining_mins') else None
-
-                result = ShuntReading(
-                    voltage=voltage or 0.0,
-                    current=current or 0.0,
-                    soc=soc or 0.0,
-                    power=(voltage or 0.0) * (current or 0.0),
-                    consumed_ah=consumed,
-                    time_remaining=remaining,
-                    raw_data={"model": parsed.get_model_name()} if hasattr(parsed, 'get_model_name') else None,
-                )
+            reading = self._parse(device, adv_data)
+            if reading is not None:
+                result = reading
                 event.set()
-
-            except Exception as e:
-                print(f"Parse error: {e}")
 
         scanner = BleakScanner(detection_callback=callback)
         await scanner.start()
@@ -103,60 +123,29 @@ class VictronReader:
 
         return result
 
-    async def read_continuous(self, callback, interval: float = 1.0, stop_event: asyncio.Event = None):
+    def _is_new(self, reading: ShuntReading) -> bool:
+        last = self._last_reading
+        return (
+            last is None
+            or reading.voltage != last.voltage
+            or reading.current != last.current
+            or reading.soc != last.soc
+        )
+
+    async def read_continuous(
+        self,
+        callback: Callable[[ShuntReading], None],
+        interval: float = 1.0,
+        stop_event: Optional[asyncio.Event] = None,
+    ) -> None:
         """Continuously read and call callback with new readings."""
-        if BleakScanner is None:
-            raise RuntimeError("bleak not installed")
-        if detect_device_type is None:
-            raise RuntimeError("victron-ble not installed")
+        self._check_deps()
 
-        def ble_callback(device: BLEDevice, adv_data: AdvertisementData):
-            if device.address.upper() != self.address:
-                return
-
-            try:
-                raw_bytes = None
-                if adv_data.manufacturer_data:
-                    for mfr_id, data in adv_data.manufacturer_data.items():
-                        if mfr_id == 0x02E1:
-                            raw_bytes = data
-                            break
-
-                if raw_bytes is None:
-                    return
-
-                device_class = detect_device_type(raw_bytes)
-                if device_class is None:
-                    return
-
-                device_instance = device_class(self.encryption_key)
-                parsed = device_instance.parse(raw_bytes)
-
-                voltage = parsed.get_voltage() if hasattr(parsed, 'get_voltage') else 0.0
-                current = parsed.get_current() if hasattr(parsed, 'get_current') else 0.0
-                soc = parsed.get_soc() if hasattr(parsed, 'get_soc') else 0.0
-                consumed = parsed.get_consumed_ah() if hasattr(parsed, 'get_consumed_ah') else None
-                remaining = parsed.get_remaining_mins() if hasattr(parsed, 'get_remaining_mins') else None
-
-                reading = ShuntReading(
-                    voltage=voltage or 0.0,
-                    current=current or 0.0,
-                    soc=soc or 0.0,
-                    power=(voltage or 0.0) * (current or 0.0),
-                    consumed_ah=consumed,
-                    time_remaining=remaining,
-                )
-
-                if (
-                    self._last_reading is None
-                    or reading.voltage != self._last_reading.voltage
-                    or reading.current != self._last_reading.current
-                ):
-                    self._last_reading = reading
-                    callback(reading)
-
-            except Exception:
-                pass
+        def ble_callback(device: Any, adv_data: Any) -> None:
+            reading = self._parse(device, adv_data)
+            if reading is not None and self._is_new(reading):
+                self._last_reading = reading
+                callback(reading)
 
         scanner = BleakScanner(detection_callback=ble_callback)
         await scanner.start()

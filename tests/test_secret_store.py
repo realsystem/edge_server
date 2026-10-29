@@ -99,7 +99,7 @@ class TestSecretsManager:
             manager.set("MY_KEY", "my_value")
 
             shell_export = manager.export_shell()
-            assert "export MY_KEY='my_value'" in shell_export
+            assert "export MY_KEY=my_value" in shell_export
 
     def test_validate_missing(self):
         """Test validation with missing required secrets."""

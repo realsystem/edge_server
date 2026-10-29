@@ -11,15 +11,21 @@ dependencies = [
 
 [project.optional-dependencies]
 mqtt = ["paho-mqtt>=2.0"]
-dev = ["pytest", "pytest-asyncio"]
+dev = ["pytest", "pytest-cov", "paho-mqtt>=2.0"]
 
 [project.scripts]
-renogy-rover = "src.cli:main"
+renogy-rover = "renogy_rover.cli:main"
 
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["src*"]
+[tool.setuptools]
+# Installed as "renogy_rover" (previously a top-level package literally named
+# "src", which collides with anything else installed the same way).
+packages = ["renogy_rover"]
+package-dir = {"renogy_rover" = "src"}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

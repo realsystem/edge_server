@@ -73,7 +73,7 @@ done
 section "ShellCheck Linting"
 
 if command -v shellcheck >/dev/null 2>&1; then
-    for script in secrets.sh tests/test-runner.sh tests/test-runner-full.sh; do
+    for script in *.sh tests/*.sh plugins/*/*.sh; do
         if [ -f "$script" ]; then
             # SC1090: Can't follow non-constant source
             # SC1091: Not following sourced file
@@ -98,8 +98,18 @@ fi
 section "bootstrap (Python)"
 
 # Test: --help works
-if [ -x "./bootstrap" ]; then
-    output=$(./bootstrap --help 2>&1 || true)
+# bootstrap.sh creates a venv and pip-installs on first use; call the Python
+# entry point directly when the module is importable, to keep this offline.
+if python3 -c "import sys; sys.path.insert(0, 'src'); import bootstrap" 2>/dev/null; then
+    BOOTSTRAP=(env PYTHONPATH=src python3 -m bootstrap)
+elif [ -x "./bootstrap.sh" ]; then
+    BOOTSTRAP=(./bootstrap.sh)
+else
+    BOOTSTRAP=()
+fi
+
+if [ ${#BOOTSTRAP[@]} -gt 0 ]; then
+    output=$("${BOOTSTRAP[@]}" --help 2>&1 || true)
     if echo "$output" | grep -q "usage:\|positional arguments"; then
         pass "bootstrap --help displays usage"
     else
@@ -107,14 +117,14 @@ if [ -x "./bootstrap" ]; then
     fi
 
     # Test: --dry-run mode
-    output=$(timeout 10 ./bootstrap --dry-run --auto --skip-init 192.0.2.1 2>&1 || true)
+    output=$(HOME="$(mktemp -d)" timeout 30 "${BOOTSTRAP[@]}" --dry-run --auto --skip-init 192.0.2.1 2>&1 || true)
     if echo "$output" | grep -q "DRY RUN"; then
         pass "bootstrap --dry-run mode works"
     else
         fail "bootstrap --dry-run mode not working" "Got: $output"
     fi
 else
-    skip "bootstrap wrapper not executable"
+    skip "bootstrap not runnable"
 fi
 
 #-----------------------------------------------------------------------------
@@ -181,11 +191,16 @@ unset SECRETS_PASSWORD
 
 section "initial-setup.sh"
 
-# Test: Script requires root
-if ./initial-setup.sh 2>&1 | grep -qi "root\|sudo\|permission"; then
+# Test: Script requires root. Only run it as a non-root user: as root it
+# would really start provisioning this machine. The output is captured first:
+# piping into grep under `pipefail` would report the script's (expected)
+# non-zero exit as a failed match.
+if [ "$(id -u)" -eq 0 ]; then
+    skip "Running as root - not executing initial-setup.sh"
+elif ! out=$(./initial-setup.sh < /dev/null 2>&1) && grep -qi "root\|sudo" <<< "$out"; then
     pass "Checks for root/sudo"
 else
-    skip "Cannot verify root check without running as non-root"
+    fail "initial-setup.sh does not refuse to run without root"
 fi
 
 # Test: Has expected configuration sections
@@ -201,11 +216,16 @@ fi
 
 section "deploy-edge-server.sh"
 
-# Test: Script requires root
-if ./deploy-edge-server.sh 2>&1 | grep -qi "root\|sudo\|permission"; then
+# Test: Script requires root. Only run it as a non-root user: as root it
+# would really start provisioning this machine. The output is captured first:
+# piping into grep under `pipefail` would report the script's (expected)
+# non-zero exit as a failed match.
+if [ "$(id -u)" -eq 0 ]; then
+    skip "Running as root - not executing deploy-edge-server.sh"
+elif ! out=$(./deploy-edge-server.sh < /dev/null 2>&1) && grep -qi "root\|sudo" <<< "$out"; then
     pass "Checks for root/sudo"
 else
-    skip "Cannot verify root check without running as non-root"
+    fail "deploy-edge-server.sh does not refuse to run without root"
 fi
 
 # Test: Has docker-compose generation
@@ -221,11 +241,16 @@ fi
 
 section "deploy-security.sh"
 
-# Test: Script requires root
-if ./deploy-security.sh 2>&1 | grep -qi "root\|sudo\|permission"; then
+# Test: Script requires root. Only run it as a non-root user: as root it
+# would really start provisioning this machine. The output is captured first:
+# piping into grep under `pipefail` would report the script's (expected)
+# non-zero exit as a failed match.
+if [ "$(id -u)" -eq 0 ]; then
+    skip "Running as root - not executing deploy-security.sh"
+elif ! out=$(./deploy-security.sh < /dev/null 2>&1) && grep -qi "root\|sudo" <<< "$out"; then
     pass "Checks for root/sudo"
 else
-    skip "Cannot verify root check without running as non-root"
+    fail "deploy-security.sh does not refuse to run without root"
 fi
 
 # Test: Has Frigate config

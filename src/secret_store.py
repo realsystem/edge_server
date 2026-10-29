@@ -2,14 +2,18 @@
 
 import base64
 import os
+import re
+import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass
@@ -41,7 +45,7 @@ class SecretsManager:
         self.salt_file = self.secrets_dir / ".salt"
         self._password = password
         self._fernet: Optional[Fernet] = None
-        self._cache: Dict[str, str] = {}
+        self._cache: dict[str, str] = {}
 
     def _get_password(self) -> str:
         """Get password from environment or prompt."""
@@ -62,6 +66,10 @@ class SecretsManager:
 
         if self.salt_file.exists():
             salt = self.salt_file.read_bytes()
+        elif self.secrets_file.exists():
+            # A fresh salt would derive a different key and silently make the
+            # existing secrets unreadable (and overwrite them on next save).
+            raise ValueError(f"Salt file missing for existing secrets: {self.salt_file}")
         else:
             salt = os.urandom(16)
             self.secrets_dir.mkdir(parents=True, exist_ok=True)
@@ -130,6 +138,10 @@ class SecretsManager:
 
     def set(self, key: str, value: str) -> None:
         """Set a secret value."""
+        if not _KEY_RE.match(key):
+            raise ValueError(f"Invalid secret key: {key!r} (use letters, digits, underscore)")
+        if "\n" in value or "\r" in value:
+            raise ValueError("Secret values cannot contain newlines")
         if not self._cache and self.secrets_file.exists():
             self._load()
         self._cache[key] = value
@@ -151,7 +163,7 @@ class SecretsManager:
             self._load()
         return list(self._cache.keys())
 
-    def export(self) -> Dict[str, str]:
+    def export(self) -> dict[str, str]:
         """Export all secrets as a dictionary."""
         if not self._cache:
             self._load()
@@ -160,7 +172,7 @@ class SecretsManager:
     def export_shell(self) -> str:
         """Export secrets as shell export statements."""
         secrets = self.export()
-        return "\n".join(f"export {k}='{v}'" for k, v in secrets.items())
+        return "\n".join(f"export {k}={shlex.quote(v)}" for k, v in secrets.items())
 
     def validate(self) -> tuple:
         """Validate that required secrets are set. Returns (valid, missing)."""
@@ -183,7 +195,7 @@ class SecretsShellWrapper:
         self.script_path = script_path
         self.home_dir = home_dir
 
-    def _run(self, *args, password: Optional[str] = None) -> tuple:
+    def _run(self, *args: str, password: Optional[str] = None) -> tuple[bool, str, str]:
         """Run secrets.sh with arguments."""
         env = os.environ.copy()
         if self.home_dir:

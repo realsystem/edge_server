@@ -3,7 +3,7 @@
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 try:
     import yaml
@@ -112,9 +112,13 @@ class Config:
             yaml.dump(data, f, default_flow_style=False)
         os.chmod(path, 0o600)
 
-    def validate(self) -> list[str]:
+    def validate(self) -> List[str]:
         """Return list of validation errors, empty if valid."""
         errors = []
         if not self.address:
             errors.append("address: required (device MAC address)")
+        if not 0 <= int(self.device_id) <= 255:
+            errors.append("device_id: must be between 0 and 255")
+        if int(self.poll_interval) <= 0:
+            errors.append("poll_interval: must be positive")
         return errors

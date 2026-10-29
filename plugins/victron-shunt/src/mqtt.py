@@ -78,7 +78,9 @@ class MQTTPublisher:
             ("current", "A", "current", "measurement", "mdi:current-dc"),
             ("power", "W", "power", "measurement", "mdi:lightning-bolt"),
             ("soc", "%", "battery", "measurement", "mdi:battery"),
-            ("consumed_ah", "Ah", None, "total_increasing", "mdi:battery-minus"),
+            # Consumed Ah goes up and down (and is reset on full charge), so it
+            # is a measurement, not a monotonically increasing total.
+            ("consumed_ah", "Ah", None, "measurement", "mdi:battery-minus"),
         ]
 
         for name, unit, device_class, state_class, icon in sensors:

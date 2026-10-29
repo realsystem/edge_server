@@ -6,14 +6,30 @@ from pathlib import Path
 
 import click
 
+from . import __version__
 from .config import CONFIG_PATHS, Config
 from .reader import RenogyReader
 from .scanner import check_bluetooth, scan_all_devices, scan_renogy_devices
 
+_LOOP = None
+
+
+def get_loop() -> asyncio.AbstractEventLoop:
+    """Return this process's event loop, creating it once.
+
+    asyncio.get_event_loop() without a running loop is deprecated (3.12) and an
+    error on newer Pythons, so the CLI owns an explicit loop instead.
+    """
+    global _LOOP
+    if _LOOP is None or _LOOP.is_closed():
+        _LOOP = asyncio.new_event_loop()
+        asyncio.set_event_loop(_LOOP)
+    return _LOOP
+
 
 def run_async(coro):
     """Run async coroutine."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return get_loop().run_until_complete(coro)
 
 
 pass_config = click.make_pass_decorator(Config, ensure=True)
@@ -22,7 +38,7 @@ pass_config = click.make_pass_decorator(Config, ensure=True)
 @click.group()
 @click.option("--config", "-c", "config_path", type=click.Path(exists=True, path_type=Path),
               help="Config file path (default: ~/.config/renogy-rover.yaml)")
-@click.version_option()
+@click.version_option(version=__version__)
 @click.pass_context
 def cli(ctx, config_path):
     """Renogy Rover MPPT BLE reader.
@@ -146,6 +162,7 @@ def read(ctx, address: str, timeout: float, continuous: bool, interval: float, m
     if continuous:
         click.echo(f"Reading from {address} every {interval}s (Ctrl+C to stop)...\n")
 
+        get_loop()
         stop_event = asyncio.Event()
 
         def on_reading(r):
@@ -167,7 +184,7 @@ def read(ctx, address: str, timeout: float, continuous: bool, interval: float, m
     else:
         click.echo(f"Reading from {address} (timeout {timeout}s)...")
 
-        reading = reader.read_once_sync(timeout)
+        reading = run_async(reader.read_once(timeout))
 
         if reading is None:
             click.secho("No data received", fg="red")
@@ -350,7 +367,8 @@ def service(ctx, no_mqtt: bool):
     reader = RenogyReader(config.address, device_id=config.device_id)
     log.info(f"Monitoring Renogy device {config.address} (poll interval: {config.poll_interval}s)")
 
-    # Stop event for graceful shutdown
+    # Stop event for graceful shutdown (bound to the loop that will run it)
+    get_loop()
     stop_event = asyncio.Event()
 
     def handle_signal(signum, frame):

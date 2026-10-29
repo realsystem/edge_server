@@ -75,7 +75,7 @@ log() {
     timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     printf '%s [%s] %s\n' "$timestamp" "$level" "$message" | stdbuf -oL tee -a "$LOG_FILE"
     # Update status file for progress monitoring
-    printf '%s' "$message" > "$STATUS_FILE"
+    printf '%s' "$message" 2>/dev/null > "$STATUS_FILE" || true
 }
 
 info()    { log "INFO" "$*"; }
@@ -150,7 +150,9 @@ preflight_checks() {
             echo
             if [[ -z "$MQTT_PASS" ]]; then
                 MQTT_PASS=$(openssl rand -base64 16)
-                warn "Generated random MQTT password: $MQTT_PASS"
+                # Not logged: the deploy log is world-readable. Shown once in
+                # the summary at the end of the run instead.
+                warn "Generated random MQTT password (shown in the summary)"
             fi
         fi
     fi
@@ -441,7 +443,8 @@ install_nut_power() {
 
     # Set configuration from environment
     export NUT_SHUTDOWN_DELAY="${NUT_SHUTDOWN_DELAY:-600}"
-    export NUT_LOW_BATTERY="${NUT_LOW_BATTERY:-10}"
+    export NUT_LOW_BATTERY="${NUT_LOW_BATTERY:-20}"
+    export BATCH_MODE
 
     if bash "${plugin_dir}/install.sh"; then
         success "NUT power monitor installed (shutdown after $((NUT_SHUTDOWN_DELAY / 60)) min on battery)"
@@ -579,7 +582,10 @@ create_app_stack() {
     info "Creating application stack at $APP_DIR..."
 
     mkdir -p "$APP_DIR"/{mosquitto/{config,data,log},ha-config,frigate}
-    chmod -R 755 "$APP_DIR"
+    # Only the directories themselves: a recursive chmod on re-deploy would make
+    # Home Assistant's .storage (auth tokens) and other secrets world-readable.
+    chmod 755 "$APP_DIR" "$APP_DIR"/mosquitto "$APP_DIR"/frigate
+    chmod 700 "$APP_DIR"/ha-config
 
     #---------------------------------------------------------------------------
     # Docker Compose
@@ -644,7 +650,7 @@ services:
         tmpfs:
           size: 1000000000
     devices:
-      - /dev/dri/renderD128:/dev/dri/renderD128  # Intel QuickSync
+      - /dev/dri/renderD128:/dev/dri/renderD128  # Intel QuickSync (__HWACCEL__)
     depends_on:
       - mosquitto
 
@@ -656,6 +662,17 @@ EOF
 
     # Substitute storage mount path
     sed -i "s|__STORAGE_MOUNT__|${STORAGE_MOUNT}|g" "$APP_DIR/docker-compose.yml"
+
+    # Without an Intel GPU the device mapping makes `docker compose up` fail
+    # outright, so drop it (and VA-API below) on machines that lack it.
+    local hwaccel_line="  hwaccel_args: preset-vaapi"
+    if [[ -e /dev/dri/renderD128 ]]; then
+        sed -i "s| (__HWACCEL__)||" "$APP_DIR/docker-compose.yml"
+    else
+        warn "No /dev/dri/renderD128 - Frigate will run without hardware acceleration"
+        sed -i '/__HWACCEL__/d; /^    devices:$/d' "$APP_DIR/docker-compose.yml"
+        hwaccel_line="  # hwaccel_args: preset-vaapi  # no Intel GPU detected"
+    fi
 
     #---------------------------------------------------------------------------
     # Mosquitto Configuration
@@ -708,7 +725,7 @@ detectors:
     num_threads: 2
 
 ffmpeg:
-  hwaccel_args: preset-vaapi
+${hwaccel_line}
 
 record:
   enabled: true
@@ -762,6 +779,9 @@ cameras:
   #       - cow
 EOF
 
+    # Contains the MQTT password
+    chmod 600 "$APP_DIR/frigate/config.yml"
+
     #---------------------------------------------------------------------------
     # Home Assistant Initial Configuration
     #---------------------------------------------------------------------------
@@ -792,36 +812,14 @@ recorder:
   purge_keep_days: 14
   commit_interval: 30
 
-mqtt:
-  broker: 127.0.0.1
-  port: 1883
-  discovery: true
-  discovery_prefix: homeassistant
+# MQTT and NUT can no longer be configured in YAML (Home Assistant rejects
+# `mqtt: broker:` and `sensor: - platform: nut`). Add them in the UI:
+#   Settings -> Devices & Services -> Add Integration -> MQTT
+#     broker: mosquitto, port: 1883, MQTT user/password from the deploy summary
+#   Settings -> Devices & Services -> Add Integration -> Network UPS Tools
+#     host: 172.17.0.1 (Docker host), port: 3493
 EOF
         info "Created initial Home Assistant configuration"
-    fi
-
-    # Add NUT integration if installed
-    if systemctl is-enabled nut-monitor &>/dev/null; then
-        if ! grep -q "platform: nut" "$APP_DIR/ha-config/configuration.yaml" 2>/dev/null; then
-            info "Adding NUT integration to Home Assistant..."
-            cat >> "$APP_DIR/ha-config/configuration.yaml" << 'EOF'
-
-# NUT UPS/Battery Monitor
-sensor:
-  - platform: nut
-    host: 127.0.0.1
-    port: 3493
-    username: admin
-    password: edgeserver
-    resources:
-      - battery.charge
-      - battery.charge.low
-      - ups.status
-      - input.transfer.reason
-EOF
-            info "NUT integration added to HA config"
-        fi
     fi
 
     # Set correct ownership for mosquitto
@@ -862,14 +860,14 @@ WantedBy=multi-user.target
 EOF
 
     # Create timer for periodic health checks
-    cat > /etc/systemd/system/edge-server-health.service << 'EOF'
+    cat > /etc/systemd/system/edge-server-health.service << EOF
 [Unit]
 Description=Edge Server Health Check
 After=edge-server.service
 
 [Service]
 Type=oneshot
-ExecStart=/opt/edge-server/health-check.sh
+ExecStart=${APP_DIR}/health-check.sh
 EOF
 
     cat > /etc/systemd/system/edge-server-health.timer << 'EOF'
@@ -892,7 +890,8 @@ EOF
 
 set -euo pipefail
 
-COMPOSE_DIR="/opt/edge-server"
+COMPOSE_DIR="__APP_DIR__"
+STORAGE_MOUNT="__STORAGE_MOUNT__"
 LOG_FILE="/var/log/edge-server-health.log"
 
 log() {
@@ -918,8 +917,8 @@ if [[ "$restart_count" -gt 0 ]]; then
 fi
 
 # Check disk space on storage
-if [[ -d "/mnt/storage" ]]; then
-    used_percent=$(df /mnt/storage 2>/dev/null | awk 'NR==2 {print $5}' | tr -d '%')
+if [[ -d "$STORAGE_MOUNT" ]]; then
+    used_percent=$(df "$STORAGE_MOUNT" 2>/dev/null | awk 'NR==2 {print $5}' | tr -d '%')
     if [[ -n "$used_percent" ]] && [[ "$used_percent" -gt 90 ]]; then
         log "WARNING: Storage at ${used_percent}% capacity"
     fi
@@ -928,6 +927,8 @@ fi
 log "Health check passed - all containers running"
 EOF
 
+    sed -i -e "s|__APP_DIR__|${APP_DIR}|" -e "s|__STORAGE_MOUNT__|${STORAGE_MOUNT}|" \
+        "$APP_DIR/health-check.sh"
     chmod +x "$APP_DIR/health-check.sh"
 
     # Reload and enable services
@@ -1034,6 +1035,12 @@ main() {
     echo "=============================================================================="
     echo
 
+    # Root check before anything touches /var/log
+    if [[ $EUID -ne 0 ]]; then
+        echo "This script must be run as root (use sudo)" >&2
+        exit 1
+    fi
+
     # Initialize log
     mkdir -p "$(dirname "$LOG_FILE")"
     touch "$LOG_FILE"
@@ -1060,4 +1067,7 @@ main() {
     info "Deployment completed successfully at $(date)"
 }
 
-main "$@"
+# Only run when executed, so tests can `source` this file and call functions.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

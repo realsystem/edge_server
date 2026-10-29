@@ -7,7 +7,7 @@ name = "edge-server"
 version = "0.1.0"
 description = "Edge server deployment and management toolkit"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 license = {text = "MIT"}
 authors = [
     {name = "realsystem", email = "realsystem@gmail.com"}
@@ -20,11 +20,11 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: System :: Systems Administration",
 ]
 dependencies = [
@@ -49,6 +49,9 @@ py-modules = ["bootstrap", "config", "progress", "secret_store", "services", "sn
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Tests import the flat modules in src/ directly; this makes them work without
+# an editable install (e.g. plain `pytest` from a fresh checkout).
+pythonpath = ["src"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
@@ -58,6 +61,7 @@ source = ["src"]
 branch = true
 
 [tool.coverage.report]
+show_missing = true
 exclude_lines = [
     "pragma: no cover",
     "def __repr__",
@@ -68,11 +72,11 @@ exclude_lines = [
 
 [tool.black]
 line-length = 100
-target-version = ["py38"]
+target-version = ["py39"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py38"
+target-version = "py39"
 
 [tool.ruff.lint]
 select = [
@@ -89,7 +93,7 @@ ignore = [
 ]
 
 [tool.mypy]
-python_version = "3.8"
+mypy_path = "src"
 warn_return_any = true
 warn_unused_ignores = true
 disallow_untyped_defs = true

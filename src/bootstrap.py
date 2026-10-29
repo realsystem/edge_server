@@ -1,10 +1,14 @@
 """Main bootstrap orchestration."""
 
 import argparse
+import getpass
 import logging
 import os
+import shlex
+import shutil
 import sys
 import time
+from dataclasses import fields
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -20,6 +24,17 @@ DEFAULT_LOG_DIR = Path.home() / ".edge-server" / "logs"
 DEFAULT_SECRETS_DIR = "$HOME/.edge-server-secrets"
 
 
+def remote_path(path: str) -> str:
+    """Quote a path for a remote shell, still expanding a leading $HOME or ~."""
+    for prefix in ("$HOME/", "~/"):
+        if path.startswith(prefix):
+            rest = path[len(prefix) :]
+            return '"$HOME"/' + shlex.quote(rest) if rest else '"$HOME"'
+    if path in ("$HOME", "~"):
+        return '"$HOME"'
+    return shlex.quote(path)
+
+
 class Bootstrap:
     """Main bootstrap orchestrator."""
 
@@ -28,10 +43,12 @@ class Bootstrap:
         "deploy-edge-server.sh",
         "deploy-security.sh",
         "secrets.sh",
-        "env.example",
+        "plugins",  # deploy-edge-server.sh looks for plugins/ next to itself
     ]
 
-    REMOTE_DIR = "/tmp/edge-server-setup"
+    # /var/tmp survives the reboot at the end of initial setup; /tmp does not,
+    # which used to leave the secrets/deploy phases without their scripts.
+    REMOTE_DIR = "/var/tmp/edge-server-setup"
 
     def __init__(
         self,
@@ -61,7 +78,9 @@ class Bootstrap:
         self.checker: Optional[ServiceChecker] = None
         self.snapshots: Optional[SnapshotManager] = None
 
-        self._secrets: dict = {}
+        self._secrets: dict[str, str] = {}
+        self._secrets_pass = ""
+        self._snapshot_taken = False
         self._setup_logging()
 
     def _setup_logging(self) -> None:
@@ -71,21 +90,35 @@ class Bootstrap:
         )
         log_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_file = log_dir / f"bootstrap_{self.target}_{timestamp}.log"
+        safe_target = "".join(c if c.isalnum() or c in ".-_" else "_" for c in self.target)
+        log_file = log_dir / f"bootstrap_{safe_target}_{timestamp}.log"
 
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format="%(asctime)s [%(levelname)s] %(message)s",
-            handlers=[
-                logging.FileHandler(log_file),
-            ],
-        )
-        self.logger = logging.getLogger("bootstrap")
+        # Logs can contain deploy output (e.g. generated credentials): owner-only.
+        log_file.touch(mode=0o600, exist_ok=True)
+        handler = logging.FileHandler(log_file)
+        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        self.logger = logging.getLogger(f"bootstrap.{id(self)}")
+        self.logger.setLevel(logging.DEBUG)
+        self.logger.propagate = False
+        self.logger.addHandler(handler)
         self.log_file = log_file
         self.secrets_dir = self.config.secrets.secrets_dir or DEFAULT_SECRETS_DIR
         self.logger.info(f"Bootstrap started for target: {self.target}")
         self.logger.info(f"Mode: {self.mode}, Deploy type: {self.deploy_type}")
         self.logger.info(f"Secrets dir: {self.secrets_dir}")
+
+    @property
+    def _remote(self) -> SSHClient:
+        """SSH client for phases that run after discovery connected it."""
+        if self.ssh is None:
+            raise RuntimeError("Not connected to target (discovery phase not run)")
+        return self.ssh
+
+    @property
+    def _checker(self) -> ServiceChecker:
+        if self.checker is None:
+            raise RuntimeError("Service checker not initialised (discovery phase not run)")
+        return self.checker
 
     def _log(self, message: str, level: str = "info") -> None:
         """Log a message."""
@@ -151,11 +184,10 @@ class Bootstrap:
             self.progress.info(f"Log saved to: {self.log_file}")
             return False
         except Exception as e:
-            self._log(f"Unexpected error: {e}", "error")
+            self.logger.exception("Unexpected error")
             self.progress.fail(f"Unexpected error: {e}")
             self.progress.info(f"Log saved to: {self.log_file}")
-            if not self.no_rollback and self.config.rollback.restore_on_failure:
-                self._rollback()
+            self._maybe_rollback()
             return False
 
     def _phase_discovery(self) -> bool:
@@ -216,7 +248,7 @@ class Bootstrap:
                 return False
 
         self.checker = ServiceChecker(self.ssh)
-        self.snapshots = SnapshotManager(self.ssh)
+        self.snapshots = SnapshotManager(self.ssh, self.config.rollback.snapshot_dir)
 
         self.state.complete_phase(Phase.DISCOVERY, PhaseStatus.SUCCESS, "OK", start)
         self.progress.phase_summary()
@@ -229,10 +261,15 @@ class Bootstrap:
 
         # Check local tools
         for tool in ["ssh", "scp"]:
-            if os.system(f"which {tool} > /dev/null 2>&1") == 0:
+            if shutil.which(tool):
                 self.progress.ok(f"Local tool: {tool}")
+            elif self.dry_run:
+                self.progress.warn(f"Missing local tool: {tool} (required for a real run)")
             else:
                 self.progress.fail(f"Missing local tool: {tool}")
+                self.state.complete_phase(
+                    Phase.PREREQUISITES, PhaseStatus.FAILED, f"Missing {tool}", start
+                )
                 return False
 
         if self.dry_run:
@@ -242,13 +279,14 @@ class Bootstrap:
 
         # Copy scripts
         self.progress.info(f"Copying scripts to {self.target}:{self.REMOTE_DIR}...")
-        self.ssh.mkdir(self.REMOTE_DIR)
+        self._remote.mkdir(self.REMOTE_DIR)
         scripts = [self.script_dir / s for s in self.SCRIPTS if (self.script_dir / s).exists()]
         self.progress.info(f"  Scripts: {', '.join(s.name for s in scripts)}")
-        if not self.ssh.copy_files(scripts, self.REMOTE_DIR):
+        if not self._remote.copy_files(scripts, self.REMOTE_DIR):
             self.progress.fail("Failed to copy scripts")
+            self.state.complete_phase(Phase.PREREQUISITES, PhaseStatus.FAILED, "Copy failed", start)
             return False
-        self.ssh.run(f"chmod +x {self.REMOTE_DIR}/*.sh")
+        self._remote.run(f"chmod +x {self.REMOTE_DIR}/*.sh")
         self.progress.ok(f"Copied {len(scripts)} scripts")
 
         self.state.complete_phase(Phase.PREREQUISITES, PhaseStatus.SUCCESS, "OK", start)
@@ -275,28 +313,28 @@ class Bootstrap:
 
         # Get configuration (all optional - press Enter to skip)
         self.progress.info("Configure static IP (press Enter to skip if already configured):")
-        static_ip = self._prompt("Static IP (e.g., 192.168.1.100/24)", "")
+        static_ip = self._prompt(
+            "Static IP (e.g., 192.168.1.100/24)",
+            self.config.network.static_ip,
+            env_key="STATIC_IP",
+        )
 
         if static_ip:
-            gateway = self._prompt("Gateway", self.config.network.default_gateway)
-            dns = self._prompt("DNS server", self.config.network.default_dns)
+            gateway = self._prompt(
+                "Gateway", self.config.network.default_gateway, env_key="GATEWAY"
+            )
+            dns = self._prompt("DNS server", self.config.network.default_dns, env_key="DNS")
         else:
             gateway = ""
             dns = ""
             self.progress.info("  Skipping network configuration")
 
         # Create snapshot before changes
-        if self.config.rollback.snapshot_before_deploy:
-            self.progress.info("Creating pre-setup snapshot...")
-            self.snapshots.create(
-                "initial_setup",
-                "Before initial setup",
-                paths=["/etc/netplan"],
-            )
-            self.progress.ok("Snapshot created")
+        self._create_snapshot("initial_setup", "Before initial setup", paths=["/etc/netplan"])
 
-        # Run initial setup
-        env = {}
+        # Run initial setup. The script runs over a non-interactive SSH session,
+        # so it must never prompt: everything it needs was collected above.
+        env = {"BATCH_MODE": "true"}
         if static_ip:
             env["STATIC_IP"] = static_ip
         if gateway:
@@ -304,8 +342,6 @@ class Bootstrap:
         if dns:
             env["DNS"] = dns
 
-        if self.mode == "auto":
-            env["BATCH_MODE"] = "true"
         self._log(f"Running initial-setup.sh with env: {env}")
         timeout = self.config.timeouts.initial_setup
         self.progress.info(f"Running initial-setup.sh (timeout: {timeout}s)...")
@@ -313,7 +349,7 @@ class Bootstrap:
         def on_setup_progress(elapsed: float) -> None:
             self.progress.waiting("initial-setup.sh", elapsed, timeout)
 
-        result = self.ssh.run_script(
+        result = self._remote.run_script(
             f"{self.REMOTE_DIR}/initial-setup.sh",
             env=env,
             timeout=timeout,
@@ -324,6 +360,9 @@ class Bootstrap:
         if not result.success:
             self._log("Initial setup failed", "error")
             self.progress.fail("Initial setup failed")
+            self.state.complete_phase(
+                Phase.INITIAL_SETUP, PhaseStatus.FAILED, "Script failed", start
+            )
             if result.stderr:
                 self.progress.info(f"  {result.stderr[:500]}")
             if result.stdout:
@@ -343,7 +382,7 @@ class Bootstrap:
                 return True
 
         with self.progress.task("Rebooting"):
-            self.ssh.reboot()
+            self._remote.reboot()
 
         # Wait for host
         self.progress.info("Waiting for target to come back online...")
@@ -352,7 +391,7 @@ class Bootstrap:
         while time.monotonic() - start_wait < timeout:
             elapsed = time.monotonic() - start_wait
             self.progress.waiting("Waiting for host", elapsed, timeout)
-            if self.ssh.test_connection():
+            if self._remote.test_connection():
                 self.progress.clear_line()
                 self.progress.ok(f"Target back online ({elapsed:.0f}s)")
                 break
@@ -360,6 +399,9 @@ class Bootstrap:
         else:
             self.progress.clear_line()
             self.progress.fail("Target did not come back online")
+            self.state.complete_phase(
+                Phase.INITIAL_SETUP, PhaseStatus.FAILED, "Host offline after reboot", start
+            )
             return False
 
         self.state.complete_phase(Phase.INITIAL_SETUP, PhaseStatus.SUCCESS, "OK", start)
@@ -388,9 +430,10 @@ class Bootstrap:
             self.state.complete_phase(Phase.SECRETS, PhaseStatus.SUCCESS, "Dry run", start)
             return True
 
-        # Configure secrets on target
+        secrets_dir = remote_path(self.secrets_dir)
+
         # Check if secrets already initialized
-        check_result = self.ssh.run(f"[ -f {self.secrets_dir}/secrets.enc ]")
+        check_result = self._remote.run(f"[ -f {secrets_dir}/secrets.enc ]")
         secrets_exist = check_result.success
 
         # Get password - either from env, or prompt user
@@ -412,13 +455,22 @@ class Bootstrap:
                 self.state.complete_phase(Phase.SECRETS, PhaseStatus.FAILED, "No password", start)
                 return False
 
+        if "\n" in secrets_pass:
+            self.progress.fail("Secrets password cannot contain newlines")
+            self.state.complete_phase(Phase.SECRETS, PhaseStatus.FAILED, "Bad password", start)
+            return False
+
+        # Kept in memory only; passwords and secret values travel over the SSH
+        # channel's stdin, never on a (world-readable) remote command line.
+        self._secrets_pass = secrets_pass
+        secrets_cmd = f"cd {self.REMOTE_DIR} && SECRETS_DIR={secrets_dir} ./secrets.sh"
+
         if secrets_exist:
             self.progress.ok("Secrets storage already initialized")
         else:
             self.progress.info("Initializing secrets storage...")
-            result = self.ssh.run(
-                f"cd {self.REMOTE_DIR} && SECRETS_DIR=\"{self.secrets_dir}\" SECRETS_PASSWORD='{secrets_pass}' "
-                f"./secrets.sh init <<< $'{secrets_pass}\\n{secrets_pass}' 2>&1"
+            result = self._remote.run(
+                f"{secrets_cmd} init 2>&1", input=f"{secrets_pass}\n{secrets_pass}\n"
             )
             self._log_result("secrets.sh init", result)
             if not result.success:
@@ -432,28 +484,28 @@ class Bootstrap:
                 return False
             self.progress.ok("Secrets storage initialized")
 
-        # Store password for subsequent set commands
-        os.environ["SECRETS_PASSWORD"] = secrets_pass
-
         secrets_set = 0
         secrets_failed = 0
-        secrets_pass = os.environ.get("SECRETS_PASSWORD", "")
         self.progress.info("Setting secrets...")
         for key, value in self._secrets.items():
-            if value:
-                self.progress.info(f"  Setting {key}...")
-                env_prefix = f'SECRETS_DIR="{self.secrets_dir}"'
-                if secrets_pass:
-                    env_prefix += f" SECRETS_PASSWORD='{secrets_pass}'"
-                cmd = f"cd {self.REMOTE_DIR} && {env_prefix} ./secrets.sh set {key} '{value}' 2>&1"
-                result = self.ssh.run(cmd)
-                self._log_result(f"secrets.sh set {key}", result)
-                if result.success:
-                    secrets_set += 1
-                    self.progress.ok(f"    {key} set")
-                else:
-                    secrets_failed += 1
-                    self.progress.fail(f"    Failed: {result.stderr or result.stdout}")
+            if not value:
+                continue
+            self.progress.info(f"  Setting {key}...")
+            if "\n" in value:
+                secrets_failed += 1
+                self.progress.fail(f"    {key}: value cannot contain newlines")
+                continue
+            result = self._remote.run(
+                f"{secrets_cmd} set {shlex.quote(key)} - 2>&1",
+                input=f"{secrets_pass}\n{value}\n",
+            )
+            self._log_result(f"secrets.sh set {key}", result)
+            if result.success:
+                secrets_set += 1
+                self.progress.ok(f"    {key} set")
+            else:
+                secrets_failed += 1
+                self.progress.fail(f"    Failed: {result.stderr or result.stdout}")
 
         if secrets_failed > 0:
             self.progress.fail(f"Set {secrets_set} secrets, {secrets_failed} failed")
@@ -476,96 +528,94 @@ class Bootstrap:
         if self.dry_run:
             if self.deploy_type in ["base", "full"]:
                 self.progress.dry_run("Would run deploy-edge-server.sh")
-            if self.deploy_type in ["security", "full"]:
+            if self.deploy_type == "security":
                 self.progress.dry_run("Would run deploy-security.sh")
             self.state.complete_phase(Phase.DEPLOY_BASE, PhaseStatus.SUCCESS, "Dry run", start)
             return True
 
-        # Create snapshot before deployment
-        if self.config.rollback.snapshot_before_deploy:
-            self.progress.info("Creating pre-deployment snapshot...")
-            self.snapshots.create(
-                "deploy",
-                "Before deployment",
-                paths=["/opt/edge-server"],
-                include_docker=True,
-            )
-            self.progress.ok("Snapshot created")
+        self._create_snapshot(
+            "deploy", "Before deployment", paths=["/opt/edge-server"], include_docker=True
+        )
 
-        # Deploy base stack
+        deploy_env = "export BATCH_MODE=true"
+        if self.config.deploy.edge_server_dir:
+            deploy_env += f" EDGE_SERVER_DIR={shlex.quote(self.config.deploy.edge_server_dir)}"
+        if self.config.deploy.edge_storage_dir:
+            deploy_env += f" EDGE_STORAGE_DIR={shlex.quote(self.config.deploy.edge_storage_dir)}"
+
+        # Deploy base stack ("full" = base stack, which already includes Frigate)
         if self.deploy_type in ["base", "full"]:
-            self._log("Starting base stack deployment")
-            self.progress.info("Deploying base stack (Tailscale, MQTT, Home Assistant)...")
-            self.progress.info(
-                f"  Tail log: {self._ssh_command()} tail -f /var/log/edge-server-deploy.log"
-            )
-            timeout = self.config.timeouts.deployment_base
-
-            deploy_env = "export BATCH_MODE=true"
-            if self.config.deploy.edge_server_dir:
-                deploy_env += f" EDGE_SERVER_DIR={self.config.deploy.edge_server_dir}"
-            if self.config.deploy.edge_storage_dir:
-                deploy_env += f" EDGE_STORAGE_DIR={self.config.deploy.edge_storage_dir}"
-
-            secrets_pass = os.environ.get("SECRETS_PASSWORD", "")
-            result = self.ssh.run(
-                f"cd {self.REMOTE_DIR} && "
-                f"export SECRETS_PASSWORD='{secrets_pass}' && "
-                f"eval $(./secrets.sh export 2>/dev/null) && "
-                f"{deploy_env} && sudo -E ./deploy-edge-server.sh",
-                timeout=timeout,
-            )
-
-            self._log_result("deploy-edge-server.sh", result)
-            if not result.success:
-                self._log("Base stack deployment failed", "error")
-                self.progress.fail("Base stack deployment failed")
-                # Show last output lines on failure
-                if result.stdout:
-                    self.progress.info("  Output:")
-                    for line in result.stdout.split("\n")[-20:]:
-                        if line.strip():
-                            self.progress.info(f"    {line}")
-                self.progress.info(f"  Full log: {self.log_file}")
+            if not self._run_deploy_script(
+                "deploy-edge-server.sh",
+                "base stack",
+                "Deploying base stack (Tailscale, MQTT, Home Assistant, Frigate)...",
+                deploy_env,
+                self.config.timeouts.deployment_base,
+            ):
+                self.state.complete_phase(Phase.DEPLOY_BASE, PhaseStatus.FAILED, "Failed", start)
+                self._maybe_rollback()
                 return False
-            self._log("Base stack deployed successfully")
-            self.progress.ok("Base stack deployed")
 
-        # Deploy security stack (only if base stack wasn't deployed - they overlap)
+        # Security-only stack (alternative layout; overlaps with the base stack)
         if self.deploy_type == "security":
-            self.state.start_phase(Phase.DEPLOY_SECURITY)
-            self._log("Starting security stack deployment")
-            self.progress.info("Deploying security stack (Frigate NVR)...")
-            self.progress.info(
-                f"  Tail log: {self._ssh_command()} tail -f /var/log/edge-server-deploy.log"
-            )
-            timeout = self.config.timeouts.deployment_security
-
-            result = self.ssh.run(
-                f"cd {self.REMOTE_DIR} && "
-                f"export SECRETS_PASSWORD='{secrets_pass}' && "
-                f"eval $(./secrets.sh export 2>/dev/null) && "
-                f"{deploy_env} && sudo -E ./deploy-security.sh",
-                timeout=timeout,
-            )
-
-            self._log_result("deploy-security.sh", result)
-            if not result.success:
-                self._log("Security stack deployment failed", "error")
-                # Show last output lines on failure
-                if result.stdout:
-                    self.progress.info("  Output:")
-                    for line in result.stdout.split("\n")[-20:]:
-                        if line.strip():
-                            self.progress.info(f"    {line}")
-                self.progress.fail("Security stack deployment failed")
-                self.progress.info(f"  Full log: {self.log_file}")
+            sec_start = self.state.start_phase(Phase.DEPLOY_SECURITY)
+            if not self._run_deploy_script(
+                "deploy-security.sh",
+                "security stack",
+                "Deploying security stack (Frigate NVR)...",
+                deploy_env,
+                self.config.timeouts.deployment_security,
+            ):
+                self.state.complete_phase(
+                    Phase.DEPLOY_SECURITY, PhaseStatus.FAILED, "Failed", sec_start
+                )
+                self._maybe_rollback()
                 return False
-            self._log("Security stack deployed successfully")
-            self.progress.ok("Security stack deployed")
+            self.state.complete_phase(Phase.DEPLOY_SECURITY, PhaseStatus.SUCCESS, "OK", sec_start)
 
         self.state.complete_phase(Phase.DEPLOY_BASE, PhaseStatus.SUCCESS, "OK", start)
         self.progress.phase_summary()
+        return True
+
+    def _run_deploy_script(
+        self, script: str, label: str, banner: str, deploy_env: str, timeout: int
+    ) -> bool:
+        """Run a deploy script remotely with secrets loaded into its environment."""
+        self._log(f"Starting {label} deployment")
+        self.progress.info(banner)
+        self.progress.info(
+            f"  Tail log: {self._ssh_command()} tail -f /var/log/edge-server-deploy.log"
+        )
+
+        secrets_pass = self._secrets_pass or os.environ.get("SECRETS_PASSWORD", "")
+        secrets_dir = remote_path(self.secrets_dir)
+        # The password is read from stdin, used to decrypt, then dropped before
+        # the deploy script runs, so it never shows up in a process listing.
+        command = (
+            f"cd {self.REMOTE_DIR} && "
+            f"IFS= read -r SECRETS_PASSWORD && export SECRETS_PASSWORD && "
+            f'eval "$(SECRETS_DIR={secrets_dir} ./secrets.sh export 2>/dev/null)" && '
+            f"unset SECRETS_PASSWORD && "
+            f"{deploy_env} && sudo -E ./{script}"
+        )
+        result = self._remote.run(command, timeout=timeout, input=f"{secrets_pass}\n")
+
+        self._log_result(script, result)
+        if not result.success:
+            self._log(f"{label.capitalize()} deployment failed", "error")
+            self.progress.fail(f"{label.capitalize()} deployment failed")
+            # Show last output lines on failure
+            if result.stdout:
+                self.progress.info("  Output:")
+                for line in result.stdout.split("\n")[-20:]:
+                    if line.strip():
+                        self.progress.info(f"    {line}")
+            if result.stderr:
+                self.progress.info(f"  {result.stderr[:500]}")
+            self.progress.info(f"  Full log: {self.log_file}")
+            return False
+        self._log(f"{label.capitalize()} deployed successfully")
+        self.progress.ok(f"{label.capitalize()} deployed")
         return True
 
     def _phase_verification(self) -> bool:
@@ -586,7 +636,7 @@ class Bootstrap:
 
         # Check Tailscale
         if self.config.services.verify_tailscale:
-            health = self.checker.check_tailscale()
+            health = self._checker.check_tailscale()
             if health.status == HealthStatus.HEALTHY:
                 self.progress.ok(f"Tailscale: {health.message}")
                 passed += 1
@@ -596,7 +646,7 @@ class Bootstrap:
 
         # Check Home Assistant
         if self.config.services.verify_homeassistant:
-            health = self.checker.check_homeassistant(
+            health = self._checker.check_homeassistant(
                 self.target,
                 self.config.services.ha_port,
             )
@@ -611,7 +661,11 @@ class Bootstrap:
 
         # Check MQTT
         if self.config.services.verify_mqtt:
-            health = self.checker.check_mqtt()
+            health = self._checker.check_mqtt(
+                port=self.config.services.mqtt_port,
+                user=self._secrets.get("MQTT_USER") or None,
+                password=self._secrets.get("MQTT_PASS") or None,
+            )
             if health.status == HealthStatus.HEALTHY:
                 self.progress.ok(f"MQTT: {self.target}:{self.config.services.mqtt_port}")
                 passed += 1
@@ -621,7 +675,7 @@ class Bootstrap:
 
         # Check Frigate (if security deployed)
         if self.config.services.verify_frigate and self.deploy_type in ["security", "full"]:
-            health = self.checker.check_frigate(
+            health = self._checker.check_frigate(
                 self.target,
                 self.config.services.frigate_port,
             )
@@ -652,6 +706,27 @@ class Bootstrap:
 
         self.progress.footer(True, urls)
 
+    def _create_snapshot(self, phase: str, description: str, **kwargs: object) -> None:
+        """Create a pre-change snapshot if rollback is configured."""
+        rollback = self.config.rollback
+        if not (rollback.enabled and rollback.snapshot_before_deploy and self.snapshots):
+            return
+        self.progress.info(f"Creating {phase.replace('_', ' ')} snapshot...")
+        if self.snapshots.create(phase, description, **kwargs):  # type: ignore[arg-type,unused-ignore]
+            self._snapshot_taken = True
+            self.progress.ok("Snapshot created")
+        else:
+            self.progress.warn("Snapshot failed - rollback will not be available")
+
+    def _maybe_rollback(self) -> None:
+        """Roll back to the latest snapshot if enabled and one was taken this run."""
+        rollback = self.config.rollback
+        if self.no_rollback or not rollback.enabled or not rollback.restore_on_failure:
+            return
+        if not self._snapshot_taken:
+            return
+        self._rollback()
+
     def _rollback(self) -> None:
         """Perform rollback on failure."""
         self.progress.warn("Attempting rollback...")
@@ -668,17 +743,21 @@ class Bootstrap:
         response = input(f"  {prompt} [Y/n] ").strip().lower()
         return response in ["", "y", "yes"]
 
-    def _prompt(self, prompt: str, default: str = "", secret: bool = False) -> str:
-        """Prompt for input in manual mode."""
+    def _prompt(
+        self,
+        prompt: str,
+        default: str = "",
+        secret: bool = False,
+        env_key: Optional[str] = None,
+    ) -> str:
+        """Prompt for input in manual mode; read env/secrets file in auto mode."""
         if self.mode == "auto":
-            key = prompt.upper().replace(" ", "_")
+            key = env_key or prompt.upper().replace(" ", "_")
             # Check env vars first, then stored secrets, then default
             return os.environ.get(key, self._secrets.get(key, default))
 
         display_default = f" [{default}]" if default and not secret else ""
         if secret:
-            import getpass
-
             value = getpass.getpass(f"  {prompt}{display_default}: ")
         else:
             value = input(f"  {prompt}{display_default}: ")
@@ -690,9 +769,15 @@ class Bootstrap:
             return
         for line in self.secrets_file.read_text().split("\n"):
             line = line.strip()
+            if line.startswith("export "):
+                line = line[len("export ") :].lstrip()
             if line and not line.startswith("#") and "=" in line:
                 key, _, value = line.partition("=")
-                self._secrets[key.strip()] = value.strip()
+                value = value.strip()
+                # Accept KEY="value" / KEY='value' as written by most .env tools
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                    value = value[1:-1]
+                self._secrets[key.strip()] = value
 
 
 def main() -> int:
@@ -746,15 +831,22 @@ Examples:
         config.ssh.strict_host_key_checking = "no"
 
     # Apply timeout overrides
-    if args.timeout:
-        for override in args.timeout:
-            if "=" in override:
-                phase, _, seconds = override.partition("=")
-                phase = phase.lower()
-                try:
-                    setattr(config.timeouts, phase, int(seconds))
-                except (AttributeError, ValueError):
-                    pass
+    valid_phases = {f.name for f in fields(config.timeouts)}
+    for override in args.timeout or []:
+        phase, sep, seconds = override.partition("=")
+        phase = phase.strip().lower()
+        if not sep or phase not in valid_phases:
+            parser.error(
+                f"invalid --timeout {override!r}; expected PHASE=SECONDS with PHASE one of: "
+                + ", ".join(sorted(valid_phases))
+            )
+        try:
+            value = int(seconds)
+        except ValueError:
+            parser.error(f"invalid --timeout {override!r}; SECONDS must be an integer")
+        if value <= 0:
+            parser.error(f"invalid --timeout {override!r}; SECONDS must be positive")
+        setattr(config.timeouts, phase, value)
 
     # Create and run bootstrap
     bootstrap = Bootstrap(

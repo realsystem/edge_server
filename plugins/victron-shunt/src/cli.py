@@ -6,14 +6,30 @@ from pathlib import Path
 
 import click
 
+from . import __version__
 from .config import CONFIG_PATHS, Config
 from .reader import VictronReader
 from .scanner import check_bluetooth, scan_all_devices, scan_victron_devices
 
+_LOOP = None
+
+
+def get_loop() -> asyncio.AbstractEventLoop:
+    """Return this process's event loop, creating it once.
+
+    asyncio.get_event_loop() without a running loop is deprecated (3.12) and an
+    error on newer Pythons, so the CLI owns an explicit loop instead.
+    """
+    global _LOOP
+    if _LOOP is None or _LOOP.is_closed():
+        _LOOP = asyncio.new_event_loop()
+        asyncio.set_event_loop(_LOOP)
+    return _LOOP
+
 
 def run_async(coro):
     """Run async coroutine."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return get_loop().run_until_complete(coro)
 
 
 pass_config = click.make_pass_decorator(Config, ensure=True)
@@ -22,7 +38,7 @@ pass_config = click.make_pass_decorator(Config, ensure=True)
 @click.group()
 @click.option("--config", "-c", "config_path", type=click.Path(exists=True, path_type=Path),
               help="Config file path (default: ~/.config/victron-shunt.yaml)")
-@click.version_option()
+@click.version_option(version=__version__)
 @click.pass_context
 def cli(ctx, config_path):
     """Victron Smart Shunt BLE reader.
@@ -337,6 +353,7 @@ def service(ctx, no_mqtt: bool):
     log.info(f"Monitoring Victron device {config.address}")
 
     # Stop event for graceful shutdown
+    get_loop()  # bind the Event to the loop that will run it
     stop_event = asyncio.Event()
 
     def handle_signal(signum, frame):

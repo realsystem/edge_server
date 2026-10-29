@@ -8,6 +8,13 @@ Read data from Renogy Rover MPPT solar charge controllers via Bluetooth (BT-2 mo
 - Renogy MPPT controller with BT-2 module installed
 - Python 3.9+
 
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
 ## Installation
 
 ### Quick Start (CLI only)

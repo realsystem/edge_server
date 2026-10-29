@@ -1,5 +1,6 @@
 """Tests for SSH module."""
 
+import subprocess
 from unittest.mock import MagicMock, patch
 
 from ssh import SSHClient, SSHResult
@@ -73,53 +74,47 @@ class TestSSHRunWithProgress:
 
     @patch("subprocess.Popen")
     def test_calls_progress_callback(self, mock_popen):
-        """Test that progress callback is called during execution."""
+        """Test that progress callback is called while the process runs."""
         client = SSHClient(host="example.com", user="testuser")
 
-        # Mock process that finishes after 2 polls
+        # communicate() times out twice (still running), then finishes
         mock_process = MagicMock()
-        poll_count = [0]
-
-        def mock_poll():
-            poll_count[0] += 1
-            return None if poll_count[0] < 3 else 0
-
-        mock_process.poll = mock_poll
-        mock_process.communicate.return_value = ("output", "")
+        mock_process.communicate.side_effect = [
+            subprocess.TimeoutExpired("ssh", 1),
+            subprocess.TimeoutExpired("ssh", 1),
+            ("output", ""),
+        ]
         mock_process.returncode = 0
         mock_popen.return_value = mock_process
 
         progress_calls = []
-
-        def on_progress(elapsed):
-            progress_calls.append(elapsed)
-
-        with patch("time.sleep"):  # Skip actual sleeping
-            result = client.run_with_progress("echo test", timeout=60, on_progress=on_progress)
+        result = client.run_with_progress(
+            "echo test", timeout=60, on_progress=progress_calls.append
+        )
 
         assert result.success is True
-        assert len(progress_calls) >= 2  # Progress was called multiple times
+        assert result.stdout == "output"
+        assert len(progress_calls) == 3
 
     @patch("subprocess.Popen")
     def test_timeout_kills_process(self, mock_popen):
         """Test that process is killed on timeout."""
         client = SSHClient(host="example.com", user="testuser")
 
-        # Mock process that never finishes
         mock_process = MagicMock()
-        mock_process.poll.return_value = None  # Never done
-        mock_process.communicate.return_value = ("partial output", "")
+        mock_process.communicate.side_effect = [
+            subprocess.TimeoutExpired("ssh", 1),
+            ("partial output", ""),
+        ]
         mock_popen.return_value = mock_process
 
-        with patch("time.sleep"):
-            with patch("time.monotonic") as mock_time:
-                # Simulate time passing beyond timeout
-                mock_time.side_effect = [0, 0, 100, 100]  # Start, check, elapsed > timeout
-                result = client.run_with_progress("sleep 1000", timeout=5)
+        with patch("ssh.time.monotonic", side_effect=[0, 0, 100]):
+            result = client.run_with_progress("sleep 1000", timeout=5)
 
         mock_process.kill.assert_called_once()
         assert result.success is False
         assert "timed out" in result.stderr
+        assert result.stdout == "partial output"
 
     @patch("subprocess.Popen")
     def test_returns_stdout_stderr(self, mock_popen):
@@ -127,7 +122,6 @@ class TestSSHRunWithProgress:
         client = SSHClient(host="example.com", user="testuser")
 
         mock_process = MagicMock()
-        mock_process.poll.return_value = 0  # Done immediately
         mock_process.communicate.return_value = ("stdout content", "stderr content")
         mock_process.returncode = 0
         mock_popen.return_value = mock_process
