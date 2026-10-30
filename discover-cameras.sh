@@ -8,7 +8,9 @@
 #   sudo ./discover-cameras.sh --host 192.168.1.50 [--host ...]
 #   sudo ./discover-cameras.sh --verbose       # trace every step (debugging)
 #
-# Camera logins are read from .cam (one user:pass per line), looked up in:
+# Camera logins are read from .cam, one per line: "IP user:pass" for one camera,
+# plain "user:pass" as the fallback (first line only). Each camera is tried once.
+# The file is looked up in:
 #   $CAM_CREDENTIALS_FILE, ./.cam next to this script, $EDGE_SERVER_DIR/.cam
 #===============================================================================
 
@@ -29,7 +31,7 @@ for arg in "$@"; do
     case "$arg" in
         --dry-run) apply=() ;;
         -h|--help)
-            sed -n '3,12p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '3,14p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *) args+=("$arg") ;;

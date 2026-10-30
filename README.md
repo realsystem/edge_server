@@ -119,12 +119,24 @@ switched back on later.
 
 ONVIF cameras on the same network are found and added to Frigate
 automatically. Put the camera logins in a `.cam` file next to the scripts, one
-`user:pass` per line (each camera is tried with each login):
+login per line, **keyed by the camera's IP address**:
 
 ```bash
-printf 'admin:your-camera-password\n' > .cam
+cat > .cam << 'EOF'
+192.168.1.20 admin:password-of-this-camera
+192.168.1.21 admin:password-of-another-camera
+# optional fallback for cameras without their own line (only the first is used)
+admin:common-password
+EOF
 chmod 600 .cam
 ```
+
+Each camera is logged in to **once**, with its own line (or the first fallback
+line). A wrong password is never retried with other logins, because many cameras
+lock the account after a few failed attempts. A camera with no login at all is
+listed but never sent one. Reserve the cameras' addresses in your router (DHCP
+reservation) so the IP keys stay valid. `--try-all-logins` restores trying every
+fallback line, at the risk of locking cameras.
 
 The deploy script then adds every new camera it finds, recording from the
 highest-resolution stream and detecting on the lowest. Cameras already in the
@@ -148,9 +160,7 @@ segment; use `--host` for others.
 If a camera is found but rejects the login, `--verbose` prints a timestamped
 trace to stderr (also `CAM_DEBUG=1`): which logins were loaded, who answered
 discovery, each ONVIF call with its HTTP status and the camera's fault text,
-and the camera's clock. Passwords are never printed, only their length. Every
-`.cam` line is tried on every camera, so cameras with different passwords can
-share one file.
+and the camera's clock. Passwords are never printed, only their length.
 
 ### Updating an existing server
 

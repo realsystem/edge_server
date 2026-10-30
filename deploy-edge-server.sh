@@ -968,7 +968,7 @@ EOF
 #-------------------------------------------------------------------------------
 
 # Find ONVIF cameras and add new ones to the Frigate config, using the logins
-# in a .cam file (one user:pass per line). Skipped when there is no .cam file.
+# in a .cam file ("IP user:pass" per camera, see README). Skipped when there is no .cam file.
 discover_cameras() {
     local script_dir cred_file="" candidate
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1198,7 +1198,7 @@ show_summary() {
     fi
     echo
     echo "Next Steps:"
-    echo "  - Cameras: put camera logins in ${APP_DIR}/.cam (user:pass per line) and run"
+    echo "  - Cameras: put camera logins in ${APP_DIR}/.cam ("IP user:pass" per line) and run"
     echo "    sudo ./discover-cameras.sh, or edit ${APP_DIR}/frigate/config.yml"
     if [[ "$INSTALL_HOMEASSISTANT" == "true" ]]; then
         echo "  - Complete Home Assistant onboarding at http://${ip_addr}:8123"

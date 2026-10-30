@@ -343,10 +343,50 @@ class TestCredentials:
     def test_load(self, tmp_path):
         f = tmp_path / ".cam"
         f.write_text("# comment\n\nadmin:pass:with:colons\nviewer:\n")
-        assert cd.load_credentials(f) == [
+        creds = cd.load_credentials(f)
+        assert creds.default == [
             cd.Credential("admin", "pass:with:colons"),
             cd.Credential("viewer", ""),
         ]
+        assert creds.by_host == {}
+
+    def test_per_camera_lines(self, tmp_path):
+        f = tmp_path / ".cam"
+        f.write_text(
+            "192.168.1.20 admin:p w:d\n192.168.1.21   viewer:x\nfallback:y\nfe80::1 six:v6\n"
+        )
+        creds = cd.load_credentials(f)
+        assert creds.by_host == {
+            "192.168.1.20": cd.Credential("admin", "p w:d"),
+            "192.168.1.21": cd.Credential("viewer", "x"),
+            "fe80::1": cd.Credential("six", "v6"),
+        }
+        assert creds.default == [cd.Credential("fallback", "y")]
+
+    def test_password_with_space_is_not_mistaken_for_a_camera_line(self, tmp_path):
+        f = tmp_path / ".cam"
+        f.write_text("admin:two words\n")
+        assert cd.load_credentials(f).default == [cd.Credential("admin", "two words")]
+
+    def test_duplicate_camera_line_rejected(self, tmp_path):
+        f = tmp_path / ".cam"
+        f.write_text("10.0.0.5 a:b\n10.0.0.5 c:d\n")
+        with pytest.raises(ValueError, match="already has a login"):
+            cd.load_credentials(f)
+
+    def test_only_camera_lines_is_valid(self, tmp_path):
+        f = tmp_path / ".cam"
+        f.write_text("10.0.0.5 a:b\n")
+        assert cd.load_credentials(f).default == []
+
+    def test_for_host_picks_one_login(self):
+        mapped, first, second = (cd.Credential(u, "x") for u in ("mapped", "first", "second"))
+        creds = cd.CredentialSet({"10.0.0.5": mapped}, [first, second])
+        assert creds.for_host("10.0.0.5")[0] == [mapped]
+        assert creds.for_host("10.0.0.5", try_all=True)[0] == [mapped]  # own line always wins
+        assert creds.for_host("10.0.0.6")[0] == [first]  # never "every" login
+        assert creds.for_host("10.0.0.6", try_all=True)[0] == [first, second]
+        assert cd.CredentialSet({"10.0.0.5": mapped}).for_host("10.0.0.6")[0] == []
 
     @pytest.mark.parametrize("content", ["no-colon\n", ":pass\n", "# only comments\n"])
     def test_invalid(self, tmp_path, content):
@@ -522,7 +562,7 @@ class TestFrigateConfig:
 @pytest.fixture
 def setup(tmp_path, camera):
     creds = tmp_path / ".cam"
-    creds.write_text(f"admin:wrong\n{USER}:{PASSWORD}\n")
+    creds.write_text(f"127.0.0.1 {USER}:{PASSWORD}\n")
     creds.chmod(0o600)
     cfg = tmp_path / "config.yml"
     cfg.write_text(TEMPLATE)
@@ -681,7 +721,8 @@ class TestDebugTrace:
         _, base = setup
         assert cd.main([*base, flag]) == 0
         captured = capsys.readouterr()
-        assert "credentials: 2 login(s)" in captured.err
+        assert "credentials: 1 camera line(s), 0 fallback login(s)" in captured.err
+        assert "login source: line for this camera" in captured.err
         assert "trying user" in captured.err
         assert "p@ss" not in captured.err and "p@ss" not in captured.out
         assert "Would add 1 camera(s)" in captured.out  # report still on stdout
@@ -700,7 +741,7 @@ class TestDebugTrace:
 
     def test_main_prints_hints_for_rejected_camera(self, tmp_path, camera, capsys):
         creds = tmp_path / ".cam"
-        creds.write_text("admin:nope\n")
+        creds.write_text("127.0.0.1 admin:nope\n")
         creds.chmod(0o600)
         args = [
             "--credentials",
@@ -713,3 +754,70 @@ class TestDebugTrace:
         assert cd.main(args) == 0
         out = capsys.readouterr().out
         assert "login rejected" in out and "Cameras that rejected the login" in out
+
+
+# ------------------------------------------------- lockout-safe login policy
+
+
+def _logins_sent(camera):
+    """Requests that carried credentials - what counts toward a camera lockout."""
+    return [r for r in camera.requests if b"UsernameToken" in r]
+
+
+def _run(tmp_path, camera, cam_lines, *extra):
+    creds = tmp_path / ".cam"
+    creds.write_text(cam_lines)
+    creds.chmod(0o600)
+    return cd.main(
+        [
+            "--credentials",
+            str(creds),
+            "--config",
+            str(tmp_path / "missing.yml"),
+            "--host",
+            f"127.0.0.1:{camera.port}",
+            *extra,
+        ]
+    )
+
+
+class TestLockoutSafeLogins:
+    def test_wrong_password_is_tried_exactly_once(self, tmp_path, camera, capsys):
+        assert _run(tmp_path, camera, "127.0.0.1 admin:nope\nfallback:one\nother:two\n") == 0
+        assert len(_logins_sent(camera)) == 1
+        out = capsys.readouterr().out
+        assert "login rejected" in out and "not retried" in out
+
+    def test_camera_line_beats_fallback(self, tmp_path, camera, capsys):
+        lines = f"fallback:nope\n127.0.0.1 {USER}:{PASSWORD}\n"
+        assert _run(tmp_path, camera, lines) == 0
+        assert "login rejected" not in capsys.readouterr().out
+
+    def test_only_first_fallback_login_is_used(self, tmp_path, camera, capsys):
+        lines = f"admin:wrong\n{USER}:{PASSWORD}\n"
+        assert _run(tmp_path, camera, lines) == 0
+        captured = capsys.readouterr()
+        assert len(_logins_sent(camera)) == 1
+        assert "login rejected" in captured.out  # the 2nd (correct) one was not tried
+        assert "only the first is used" in captured.err
+
+    def test_try_all_logins_opt_in(self, tmp_path, camera, capsys):
+        lines = f"admin:wrong\n{USER}:{PASSWORD}\n"
+        assert _run(tmp_path, camera, lines, "--try-all-logins") == 0
+        captured = capsys.readouterr()
+        assert len(_logins_sent(camera)) >= 2
+        assert "login rejected" not in captured.out
+        assert "only the first is used" not in captured.err
+
+    def test_camera_without_a_login_is_not_contacted_with_one(self, tmp_path, camera, capsys):
+        assert _run(tmp_path, camera, "10.9.9.9 admin:secret\n") == 0
+        assert _logins_sent(camera) == []
+        out = capsys.readouterr().out
+        assert "no login for this camera" in out
+        assert "Cameras with no login in .cam" in out
+        assert "'127.0.0.1 admin:its-password'" in out
+
+    def test_probe_with_no_logins(self, camera):
+        cam = cd.probe_camera(camera.xaddr, [])
+        assert not cam.ok and cam.error.startswith("no login for")
+        assert _logins_sent(camera) == []

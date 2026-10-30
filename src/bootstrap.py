@@ -45,7 +45,7 @@ class Bootstrap:
         "discover-cameras.sh",
         "plugins",  # deploy-edge-server.sh looks for plugins/ next to itself
         "tools",  # camera discovery
-        ".cam",  # camera logins (user:pass per line), if present
+        ".cam",  # camera logins ("IP user:pass" per line), if present
     ]
 
     # /var/tmp survives the reboot at the end of initial setup; /tmp does not,
