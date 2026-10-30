@@ -23,6 +23,12 @@ Usage:
   camera_discovery.py                         # list cameras, change nothing
   camera_discovery.py --apply                 # add new cameras to Frigate
   camera_discovery.py --host 192.168.1.50     # skip discovery, ask this camera
+  camera_discovery.py --verbose               # trace every step (debugging)
+
+--verbose (or CAM_DEBUG=1) prints a timestamped trace to stderr: which logins
+are loaded, who answered discovery, every ONVIF call with its HTTP status and
+fault text, and the camera's clock. Passwords are never printed, only their
+length.
 """
 
 from __future__ import annotations
@@ -32,6 +38,7 @@ import base64
 import datetime as dt
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -48,6 +55,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from xml.sax.saxutils import escape
+
+log = logging.getLogger("camera_discovery")
 
 WS_DISCOVERY_ADDR = ("239.255.255.250", 3702)
 ONVIF_PORTS = (80, 8000, 8080, 2020, 8899)  # common device-service ports
@@ -123,6 +132,23 @@ class OnvifError(Exception):
 
 class AuthError(OnvifError):
     """The camera rejected the login."""
+
+
+def setup_logging(verbose: bool) -> None:
+    """Send the debug trace to stderr (stdout stays the readable report)."""
+    for handler in list(log.handlers):
+        log.removeHandler(handler)
+    handler = logging.StreamHandler(sys.stderr)  # looked up now, not at import
+    handler.setFormatter(logging.Formatter("%(asctime)s.%(msecs)03d %(message)s", "%H:%M:%S"))
+    log.addHandler(handler)
+    log.propagate = False
+    log.setLevel(logging.DEBUG if verbose else logging.WARNING)
+
+
+def _operation(body: str) -> str:
+    """Name of the ONVIF call in a SOAP body, e.g. ``GetDeviceInformation``."""
+    m = re.match(r"\s*<(?:\w+:)?(\w+)", body)
+    return m.group(1) if m else "request"
 
 
 # ---------------------------------------------------------------------------
@@ -250,21 +276,53 @@ def ws_discover(
                 socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(interface_ip)
             )
         sock.bind(("", 0))
+        log.debug(
+            "discovery: probing %s:%d from %s (interface %s), waiting %.1fs",
+            target[0],
+            target[1],
+            sock.getsockname()[0] or "0.0.0.0",
+            interface_ip or "default route",
+            timeout,
+        )
         for _ in range(2):  # UDP is lossy: send each probe twice
             for types_ns, types in PROBE_TYPES:
                 sock.sendto(probe_message(types_ns, types), target)
 
         found: dict[str, str] = {}
+        replies = 0
         deadline = time.monotonic() + timeout
         while (remaining := deadline - time.monotonic()) > 0:
             sock.settimeout(remaining)
             try:
-                data, _ = sock.recvfrom(65535)
+                data, sender = sock.recvfrom(65535)
             except TimeoutError:
                 break
-            for url in parse_probe_matches(data):
+            replies += 1
+            urls = parse_probe_matches(data)
+            if not urls:
+                log.debug(
+                    "discovery: %s answered (%d bytes) but sent no ONVIF address",
+                    sender[0],
+                    len(data),
+                )
+            for url in urls:
                 host = urllib.parse.urlparse(url).hostname or url
+                new = host not in found
                 found.setdefault(host, url)
+                log.debug(
+                    "discovery: %s answered with %s%s%s",
+                    sender[0],
+                    url,
+                    "" if new else " (already known)",
+                    f" - differs from sender {sender[0]}" if host != sender[0] else "",
+                )
+        log.debug("discovery: %d reply(ies), %d camera(s)", replies, len(found))
+        if not replies:
+            log.debug(
+                "discovery: nothing answered - ONVIF may be off on the cameras, or multicast "
+                "is blocked (different VLAN/subnet, Wi-Fi isolation, firewall); try --host IP "
+                "or --interface-ip"
+            )
         return list(found.values())
     finally:
         sock.close()
@@ -331,8 +389,23 @@ class OnvifClient:
             "</UsernameToken></Security>"
         )
 
+    def _dbg(self, message: str, *args: object) -> None:
+        log.debug("[%s] " + message, self.host, *args)
+
     def call(self, url: str, body: str, auth: bool = True) -> ET.Element:
         header = self._security_header() if auth else ""
+        op = _operation(body)
+        self._dbg(
+            "%s -> %s (%s)",
+            op,
+            url,
+            (
+                f"WS-Security login {self.credential.user!r}"
+                if auth and self.credential
+                else "no login"
+            ),
+        )
+        started = time.monotonic()
         envelope = (
             '<?xml version="1.0" encoding="UTF-8"?>'
             f'<s:Envelope xmlns:s="{NS_SOAP}" xmlns:tds="{NS_TDS}"'
@@ -350,14 +423,35 @@ class OnvifClient:
         except urllib.error.HTTPError as e:
             payload = e.read() or b""
             fault = self._fault(payload)
+            challenge = e.headers.get("WWW-Authenticate") if e.headers else None
+            self._dbg(
+                "%s <- HTTP %s %s in %.0f ms%s%s%s",
+                op,
+                e.code,
+                e.reason,
+                (time.monotonic() - started) * 1000,
+                f", WWW-Authenticate: {challenge}" if challenge else "",
+                f", fault: {fault}" if fault else "",
+                "" if fault or payload else ", empty body",
+            )
             if e.code == 401 or _is_auth_fault(fault):
                 raise AuthError(fault or f"HTTP {e.code}") from None
             raise OnvifError(fault or f"HTTP {e.code}") from None
         except (urllib.error.URLError, OSError) as e:
             reason = getattr(e, "reason", e)
+            self._dbg(
+                "%s failed after %.0f ms: %s", op, (time.monotonic() - started) * 1000, reason
+            )
             raise OnvifError(f"no response from {url}: {reason}") from None
 
         fault = self._fault(payload)
+        self._dbg(
+            "%s <- HTTP 200 in %.0f ms (%d bytes)%s",
+            op,
+            (time.monotonic() - started) * 1000,
+            len(payload),
+            f", fault: {fault}" if fault else "",
+        )
         if fault:
             raise AuthError(fault) if _is_auth_fault(fault) else OnvifError(fault)
         try:
@@ -385,10 +479,12 @@ class OnvifClient:
         """Match the camera's clock: digest logins are rejected on clock skew."""
         try:
             body = self.call(self.xaddr, "<tds:GetSystemDateAndTime/>", auth=False)
-        except OnvifError:
+        except OnvifError as e:
+            self._dbg("clock sync skipped: %s", e)
             return
         utc = _find(body, "UTCDateTime")
         if utc is None:
+            self._dbg("clock sync skipped: camera sent no UTC time")
             return
         try:
             cam = dt.datetime(
@@ -401,8 +497,15 @@ class OnvifClient:
                 tzinfo=dt.timezone.utc,
             )
         except ValueError:
+            self._dbg("clock sync skipped: unreadable camera time")
             return
         self.time_offset = (cam - dt.datetime.now(dt.timezone.utc)).total_seconds()
+        self._dbg(
+            "camera clock %s UTC, %+.0f s from ours%s",
+            cam.strftime("%Y-%m-%d %H:%M:%S"),
+            self.time_offset,
+            " (compensated in the login digest)" if abs(self.time_offset) > 1 else "",
+        )
 
     def device_info(self) -> dict[str, str]:
         body = self.call(self.xaddr, "<tds:GetDeviceInformation/>")
@@ -465,27 +568,50 @@ def _is_auth_fault(fault: str) -> bool:
 def probe_camera(xaddr: str, credentials: list[Credential], timeout: float = 5.0) -> Camera:
     """Log in with the first working credential and read the camera's streams."""
     cam = Camera(host=urllib.parse.urlparse(xaddr).hostname or xaddr, xaddr=xaddr)
-    last_error = "no credentials to try"
+    tried: list[str] = []
+    faults: list[str] = []
+    log.debug("[%s] probing %s with %d login(s)", cam.host, xaddr, len(credentials))
     for cred in credentials:
+        log.debug(
+            "[%s] trying user %r (password: %d characters)", cam.host, cred.user, len(cred.password)
+        )
         client = OnvifClient(xaddr, cred, timeout)
         client.sync_time()
+        step = "GetDeviceInformation"
         try:
             info = client.device_info()
+            step = "GetCapabilities"
             media = client.media_url()
+            step = "GetProfiles"
             streams = client.profiles(media)
+            step = "GetStreamUri"
             for s in streams:
                 try:
                     s.uri = client.stream_uri(media, s.token)
                 except AuthError:
                     raise
-                except OnvifError:
+                except OnvifError as e:
+                    log.debug("[%s] no RTSP address for profile %r: %s", cam.host, s.token, e)
                     s.uri = ""
-        except AuthError:
-            last_error = "login rejected for every user in the credentials file"
+        except AuthError as e:
+            log.debug("[%s] user %r rejected at %s: %s", cam.host, cred.user, step, e)
+            if cred.user not in tried:
+                tried.append(cred.user)
+            if str(e) not in faults:
+                faults.append(str(e))
             continue
         except OnvifError as e:
+            log.debug("[%s] user %r: %s failed: %s", cam.host, cred.user, step, e)
             cam.error = str(e)
             return cam
+        log.debug(
+            "[%s] user %r accepted: %s %s, %d profile(s)",
+            cam.host,
+            cred.user,
+            info["manufacturer"],
+            info["model"],
+            len(streams),
+        )
         cam.credential = cred
         cam.manufacturer = info["manufacturer"]
         cam.model = info["model"]
@@ -494,8 +620,30 @@ def probe_camera(xaddr: str, credentials: list[Credential], timeout: float = 5.0
         if not cam.streams:
             cam.error = "camera reported no RTSP streams"
         return cam
-    cam.error = last_error
+    if tried:
+        cam.error = (
+            "login rejected for every user in the credentials file "
+            f"(tried: {', '.join(tried)}; camera said: {'; '.join(faults)})"
+        )
+    else:
+        cam.error = "no credentials to try"
     return cam
+
+
+def failure_hints(cams: list[Camera]) -> list[str]:
+    """Next steps for cameras that answered but refused every login."""
+    if not any(c.error and c.error.startswith("login rejected") for c in cams):
+        return []
+    return [
+        "",
+        "Cameras that rejected the login:",
+        "  - Each camera needs its own user:pass line in the credentials file; every line",
+        "    is tried on every camera, so cameras with different passwords can share it.",
+        "  - Check the password by logging in to the camera's web page or app with the same user.",
+        "  - Some cameras lock the account for a while after several failed logins:",
+        "    wait a few minutes before retrying.",
+        "  - Run again with --verbose to see each step and the camera's reply.",
+    ]
 
 
 def resolve_host(host: str, timeout: float = 3.0) -> str | None:
@@ -514,7 +662,8 @@ def resolve_host(host: str, timeout: float = 3.0) -> str | None:
             return url
         except AuthError:
             return url  # answered, just wants a login
-        except OnvifError:
+        except OnvifError as e:
+            log.debug("[%s] no ONVIF service at %s: %s", host, url, e)
             continue
     return None
 
@@ -721,7 +870,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--timeout", type=float, default=3.0, help="discovery wait (seconds)")
     parser.add_argument("--interface-ip", help="local IP of the interface to discover on")
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        "--debug",
+        action="store_true",
+        default=os.environ.get("CAM_DEBUG", "") not in ("", "0", "false"),
+        help="trace every step to stderr (also: CAM_DEBUG=1); passwords are never printed",
+    )
     args = parser.parse_args(argv)
+    setup_logging(args.verbose)
+    log.debug("python %s, args: %s", sys.version.split()[0], " ".join(argv or sys.argv[1:]))
 
     cred_path = find_credentials_file(args.credentials)
     if cred_path is None:
@@ -734,6 +893,16 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError) as e:
         print(f"Credentials: {e}", file=sys.stderr)
         return 2
+    log.debug("credentials: %d login(s) from %s", len(credentials), cred_path)
+    for i, cr in enumerate(credentials, start=1):
+        extras = ", non-ASCII characters" if not cr.password.isascii() else ""
+        log.debug(
+            "credentials: #%d user %r, password %d characters%s",
+            i,
+            cr.user,
+            len(cr.password),
+            extras,
+        )
     warning = credentials_file_warning(cred_path)
     if warning:
         print(f"WARNING: {warning}", file=sys.stderr)
@@ -773,6 +942,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             print(f"  {c.host:<16} {label:<32} {c.error}")
+    for hint in failure_hints(cams):
+        print(hint)
 
     config_path = Path(args.config)
     if not config_path.is_file():

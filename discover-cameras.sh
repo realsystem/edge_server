@@ -6,6 +6,7 @@
 #   sudo ./discover-cameras.sh                 # add new cameras, restart Frigate
 #   sudo ./discover-cameras.sh --dry-run       # only show what would be added
 #   sudo ./discover-cameras.sh --host 192.168.1.50 [--host ...]
+#   sudo ./discover-cameras.sh --verbose       # trace every step (debugging)
 #
 # Camera logins are read from .cam (one user:pass per line), looked up in:
 #   $CAM_CREDENTIALS_FILE, ./.cam next to this script, $EDGE_SERVER_DIR/.cam
@@ -28,7 +29,7 @@ for arg in "$@"; do
     case "$arg" in
         --dry-run) apply=() ;;
         -h|--help)
-            sed -n '3,11p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '3,12p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *) args+=("$arg") ;;

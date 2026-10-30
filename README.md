@@ -138,11 +138,19 @@ To look for cameras again later (e.g. after adding one):
 sudo ./discover-cameras.sh --dry-run          # show what would be added
 sudo ./discover-cameras.sh                    # add them and restart Frigate
 sudo ./discover-cameras.sh --host 192.168.1.50   # camera on another subnet
+sudo ./discover-cameras.sh --verbose --dry-run   # trace every step (debugging)
 ```
 
 Cameras need ONVIF turned on (Reolink: *Settings > Network > Advanced > Server
 settings*). Discovery only reaches cameras on the server's own network
 segment; use `--host` for others.
+
+If a camera is found but rejects the login, `--verbose` prints a timestamped
+trace to stderr (also `CAM_DEBUG=1`): which logins were loaded, who answered
+discovery, each ONVIF call with its HTTP status and the camera's fault text,
+and the camera's clock. Passwords are never printed, only their length. Every
+`.cam` line is tried on every camera, so cameras with different passwords can
+share one file.
 
 ### Updating an existing server
 
