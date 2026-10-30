@@ -112,8 +112,48 @@ for cfg in "${configs[@]}"; do
     fi
 done
 
+# The camera password must reach ffmpeg intact: Frigate URL-encodes it
+# itself, so it has to be written unencoded (a pre-encoded '#' -> '%23' ended
+# up as '%2523' and the camera rejected the login). Load the discovered
+# config with Frigate's own code and decode the password from the ffmpeg
+# command Frigate would run.
+cp "$WORK/discovered/frigate/config.yml" "$WORK/check.yml"
+if out=$(docker run --rm -v "$WORK/check.yml:/config/config.yml" \
+    --entrypoint python3 "$IMAGE" -c '
+import sys
+from urllib.parse import unquote_plus
+from frigate.config import FrigateConfig
+
+expected = "p#ss {x}"
+config = FrigateConfig.load(install=True)
+urls = [
+    arg
+    for entry in config.cameras["reolink_20"].ffmpeg_cmds
+    for arg in entry["cmd"]
+    if isinstance(arg, str) and arg.startswith("rtsp://")
+]
+if not urls:
+    sys.exit("no rtsp:// input found in the ffmpeg commands Frigate built")
+for url in urls:
+    login = url[len("rtsp://") : url.rindex("@")]
+    password = unquote_plus(login.split(":", 1)[1])
+    if password != expected:
+        sys.exit(f"password reaches ffmpeg as {password!r}, expected {expected!r} ({url})")
+print(f"camera password reaches ffmpeg intact in {len(urls)} input(s)")
+' 2>&1); then
+    echo "  ok    password encoding ($(echo "$out" | tail -n 1))"
+else
+    echo "  FAIL  password encoding"
+    echo "$out" | tail -n 25 | sed 's/^/        /'
+    if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+        msg=$(echo "$out" | tail -n 15 | sed ':a;N;$!ba;s/%/%25/g;s/\r//g;s/\n/%0A/g')
+        echo "::error title=Camera password mangled by Frigate::${msg}"
+    fi
+    failed=$((failed + 1))
+fi
+
 if [[ "$failed" -gt 0 ]]; then
-    echo "$failed config(s) rejected by Frigate"
+    echo "$failed Frigate check(s) failed"
     exit 1
 fi
 echo "All configs accepted by Frigate"

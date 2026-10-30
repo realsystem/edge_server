@@ -547,15 +547,26 @@ def choose_streams(streams: list[Stream]) -> tuple[Stream, Stream]:
 
 
 def with_credentials(uri: str, cred: Credential | None, mask: bool = False) -> str:
-    """Put the login into an RTSP URL (percent-encoded, as Frigate expects)."""
+    """Put the login into an RTSP URL the way Frigate expects it.
+
+    The password is written as-is: Frigate URL-encodes it itself before
+    handing the URL to ffmpeg, so encoding it here as well would turn
+    ``#`` into ``%2523`` and the camera would reject the login.
+    Braces are doubled because Frigate runs input paths through
+    ``str.format`` to substitute ``{FRIGATE_*}`` variables.
+    """
     if cred is None:
         return uri
     parts = urllib.parse.urlsplit(uri)
     host = parts.hostname or ""
     hostport = host if parts.port is None else f"{host}:{parts.port}"
-    password = "***" if mask else urllib.parse.quote(cred.password, safe="")
-    userinfo = f"{urllib.parse.quote(cred.user, safe='')}:{password}"
-    return urllib.parse.urlunsplit(parts._replace(netloc=f"{userinfo}@{hostport}"))
+    password = "***" if mask else cred.password
+    userinfo = f"{cred.user}:{password}".replace("{", "{{").replace("}", "}}")
+    # Build the string directly: urlunsplit would mangle '#', '?' or '/' in
+    # the password by treating them as URL delimiters.
+    rest = urllib.parse.urlunsplit(parts._replace(netloc=hostport))
+    scheme_prefix = f"{parts.scheme}://"
+    return f"{scheme_prefix}{userinfo}@{rest[len(scheme_prefix):]}"
 
 
 def camera_yaml(name: str, cam: Camera, indent: int = 2, mask: bool = False) -> str:
@@ -591,9 +602,24 @@ def camera_yaml(name: str, cam: Camera, indent: int = 2, mask: bool = False) -> 
     return "\n".join(lines) + "\n"
 
 
+_HOST_AFTER_LOGIN = re.compile(r".*@([A-Za-z0-9.\-]+)(?::\d+)?(?:[/\"'\s]|$)")
+_HOST_NO_LOGIN = re.compile(r"([A-Za-z0-9.\-]+)(?::\d+)?(?:[/\"'\s]|$)")
+
+
 def configured_hosts(config_text: str) -> set[str]:
-    """Hosts already used in any rtsp:// address in the config."""
-    return set(re.findall(r"rtsp://(?:[^@/\s\"']*@)?([^:/\s\"']+)", config_text))
+    """Hosts already used in any rtsp:// address in the config.
+
+    Passwords are stored unencoded and may contain '@', '/', '#' or spaces,
+    so the host is taken after the *last* '@' on the line.
+    """
+    hosts: set[str] = set()
+    for line in config_text.splitlines():
+        for start in (m.end() for m in re.finditer("rtsp://", line)):
+            rest = line[start:]
+            match = _HOST_AFTER_LOGIN.match(rest) if "@" in rest else _HOST_NO_LOGIN.match(rest)
+            if match:
+                hosts.add(match.group(1))
+    return hosts
 
 
 def _cameras_indent(lines: list[str], start: int) -> int:
