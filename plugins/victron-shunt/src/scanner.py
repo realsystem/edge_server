@@ -3,12 +3,10 @@
 import asyncio
 import sys
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional, Set, Tuple
 
 try:
     from bleak import BleakScanner
-    from bleak.backends.device import BLEDevice
-    from bleak.backends.scanner import AdvertisementData
 except ImportError:
     BleakScanner = None
 
@@ -61,15 +59,15 @@ async def check_bluetooth() -> BluetoothStatus:
         return BluetoothStatus(available=False, error=f"BLE error: {error_msg}")
 
 
-async def scan_victron_devices(timeout: float = 10.0) -> list[VictronDevice]:
+async def scan_victron_devices(timeout: float = 10.0) -> List[VictronDevice]:
     """Scan for Victron BLE devices."""
     if BleakScanner is None:
         return []
 
-    devices: list[VictronDevice] = []
-    seen_addresses: set[str] = set()
+    devices: List[VictronDevice] = []
+    seen_addresses: Set[str] = set()
 
-    def callback(device: BLEDevice, adv_data: AdvertisementData):
+    def callback(device, adv_data):
         if device.address in seen_addresses:
             return
         name = device.name or adv_data.local_name or ""
@@ -96,13 +94,15 @@ async def scan_victron_devices(timeout: float = 10.0) -> list[VictronDevice]:
     return sorted(devices, key=lambda d: d.rssi, reverse=True)
 
 
-async def scan_all_devices(timeout: float = 10.0) -> list[tuple[str, str, int]]:
+async def scan_all_devices(timeout: float = 10.0) -> List[Tuple[str, str, int]]:
     """Scan all BLE devices (for debugging). Returns (name, address, rssi)."""
     if BleakScanner is None:
         return []
 
-    devices = await BleakScanner.discover(timeout=timeout)
-    return [
-        (d.name or "(unknown)", d.address, d.rssi or -100)
-        for d in sorted(devices, key=lambda x: x.rssi or -100, reverse=True)
+    # BLEDevice.rssi was removed in bleak 1.0; RSSI lives in AdvertisementData.
+    found = await BleakScanner.discover(timeout=timeout, return_adv=True)
+    results = [
+        (dev.name or adv.local_name or "(unknown)", dev.address, adv.rssi or -100)
+        for dev, adv in found.values()
     ]
+    return sorted(results, key=lambda r: r[2], reverse=True)

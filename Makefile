@@ -15,7 +15,7 @@ LITE_COMPOSE := $(TESTS_DIR)/docker-compose.lite.yml
 FULL_COMPOSE := $(TESTS_DIR)/docker-compose.mac.yml
 HARNESS_COMPOSE := $(TESTS_DIR)/docker-compose.test-harness.yml
 
-.PHONY: help setup pytest check check-mem-lite check-mem-full test test-dev test-ci test-full test-full-dev test-scripts start start-full stop status logs clean reset lint mem target-start target-stop target-ssh victron-setup victron-check victron-scan victron-install victron-test nut-install nut-status nut-uninstall renogy-setup renogy-check renogy-scan renogy-install renogy-test ha-test ha-test-stop
+.PHONY: help setup pytest ci-local check check-mem-lite check-mem-full test test-dev test-ci test-full test-full-dev test-scripts start start-full stop status logs clean reset lint mem target-start target-stop target-ssh victron-setup victron-check victron-scan victron-install victron-test nut-install nut-status nut-uninstall renogy-setup renogy-check renogy-scan renogy-install renogy-test ha-test ha-test-stop
 
 help:
 	@echo "Edge Server - Local Testing"
@@ -23,6 +23,7 @@ help:
 	@echo "Targets:"
 	@echo "  make setup          - Create Python venv and install dependencies"
 	@echo "  make pytest         - Run Python unit tests"
+	@echo "  make ci-local       - Run the CI lint/type/test checks locally"
 	@echo "  make test           - Run lite tests with pass/fail (auto-teardown)"
 	@echo "  make test-dev       - Lite tests, leave stack running"
 	@echo "  make test-full      - Run full tests (4 cameras, HA, auto-teardown)"
@@ -72,13 +73,13 @@ help:
 	@echo "  Frigate:  http://localhost:5000"
 	@echo "  MQTT:     localhost:1883"
 
-# Python setup - finds Python 3.8+
-PYTHON3 := $(shell for cmd in python3.12 python3.11 python3.10 python3.9 python3.8 python3; do \
+# Python setup - finds Python 3.10+
+PYTHON3 := $(shell for cmd in python3.13 python3.12 python3.11 python3.10 python3; do \
 	if command -v $$cmd >/dev/null 2>&1; then \
 		ver=$$($$cmd -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null); \
 		major=$$(echo $$ver | cut -d. -f1); \
 		minor=$$(echo $$ver | cut -d. -f2); \
-		if [ "$$major" -ge 3 ] && [ "$$minor" -ge 8 ]; then \
+		if [ "$$major" -ge 3 ] && [ "$$minor" -ge 10 ]; then \
 			echo $$cmd; \
 			break; \
 		fi; \
@@ -87,7 +88,7 @@ done)
 
 setup:
 	@if [ -z "$(PYTHON3)" ]; then \
-		echo "ERROR: Python 3.8+ required"; \
+		echo "ERROR: Python 3.10+ required"; \
 		exit 1; \
 	fi
 	@echo "Using $(PYTHON3)..."
@@ -100,6 +101,14 @@ setup:
 
 pytest: $(VENV_DIR)
 	@$(PYTHON) -m pytest tests/ -v
+
+# Same checks as CI (.github/workflows/test.yml), without Docker
+ci-local: $(VENV_DIR)
+	@$(PYTHON) -m ruff check src tests
+	@$(PYTHON) -m black --check src tests
+	@$(PYTHON) -m mypy src --ignore-missing-imports
+	@$(PYTHON) -m pytest tests/ --cov=src --cov-report=term-missing
+	@./tests/test-scripts.sh
 
 $(VENV_DIR):
 	@$(MAKE) setup
@@ -229,7 +238,7 @@ test-scripts:
 
 lint:
 	@command -v shellcheck >/dev/null || (echo "Install shellcheck: brew install shellcheck" && exit 1)
-	@shellcheck -e SC1090,SC1091,SC2034 *.sh tests/*.sh
+	@shellcheck -e SC1090,SC1091,SC2034,SC2016,SC2329 *.sh tests/*.sh tests/*/*.sh plugins/*/*.sh
 	@echo "Lint complete"
 
 # Show memory usage of running test containers
@@ -366,7 +375,7 @@ renogy-install:
 
 renogy-test: $(RENOGY_ROVER)
 	@$(PIP) install pytest pytest-cov -q
-	@cd $(RENOGY_DIR) && ../../$(VENV_DIR)/bin/python3 -m pytest tests/ -v 2>/dev/null || echo "No tests yet"
+	@cd $(RENOGY_DIR) && ../../$(VENV_DIR)/bin/python3 -m pytest tests/ -v
 
 $(RENOGY_ROVER):
 	@$(MAKE) renogy-setup

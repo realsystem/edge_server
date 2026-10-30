@@ -4,7 +4,6 @@ import os
 import tempfile
 from pathlib import Path
 
-import pytest
 import yaml
 
 from victron_shunt.config import Config, MQTTConfig

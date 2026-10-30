@@ -14,8 +14,9 @@ IFS=$'\n\t'
 # CONFIGURATION
 #-------------------------------------------------------------------------------
 
-APP_DIR="/opt/edge-server"
-STORAGE_PATH="/mnt/storage/frigate"
+# Same overrides as deploy-edge-server.sh (bootstrap passes these through)
+APP_DIR="${EDGE_SERVER_DIR:-/opt/edge-server}"
+STORAGE_PATH="${EDGE_STORAGE_DIR:-/mnt/storage}/frigate"
 MIN_DISK_GB=50
 LOCAL_SUBNET="${LOCAL_SUBNET:-192.168.0.0/16}"
 BATCH_MODE="${BATCH_MODE:-false}"
@@ -24,6 +25,11 @@ BATCH_MODE="${BATCH_MODE:-false}"
 TZ="${TZ:-America/Los_Angeles}"
 REOLINK_USER="${REOLINK_USER:-}"
 REOLINK_PASS="${REOLINK_PASS:-}"
+
+# MQTT credentials. When set, the broker requires authentication (the same
+# setup deploy-edge-server.sh uses); otherwise it falls back to anonymous.
+MQTT_USER="${MQTT_USER:-}"
+MQTT_PASS="${MQTT_PASS:-}"
 
 # Camera IPs - can be overridden via environment
 CAM1_IP="${CAM1_IP:-192.168.1.201}"
@@ -45,10 +51,10 @@ declare -A CAMERAS=(
 readonly STATUS_FILE="/tmp/edge-server-deploy.status"
 
 header()  { printf '\n===============================================================\n  %s\n===============================================================\n' "$*"; }
-info()    { printf '[OK] %s\n' "$*"; printf '%s' "$*" > "$STATUS_FILE"; }
-warn()    { printf '[WARN] %s\n' "$*"; printf '%s' "$*" > "$STATUS_FILE"; }
-error()   { printf '[ERROR] %s\n' "$*"; printf '%s' "$*" > "$STATUS_FILE"; }
-step()    { printf '[..] %s\n' "$*"; printf '%s' "$*" > "$STATUS_FILE"; }
+info()    { printf '[OK] %s\n' "$*"; printf '%s' "$*" 2>/dev/null > "$STATUS_FILE" || true; }
+warn()    { printf '[WARN] %s\n' "$*"; printf '%s' "$*" 2>/dev/null > "$STATUS_FILE" || true; }
+error()   { printf '[ERROR] %s\n' "$*"; printf '%s' "$*" 2>/dev/null > "$STATUS_FILE" || true; }
+step()    { printf '[..] %s\n' "$*"; printf '%s' "$*" 2>/dev/null > "$STATUS_FILE" || true; }
 
 #-------------------------------------------------------------------------------
 # PRE-FLIGHT CHECKS
@@ -59,13 +65,13 @@ load_secrets() {
     secrets_script="$(dirname "$0")/secrets.sh"
 
     # Try to load from secrets.sh if available
-    if [[ -f "$secrets_script" ]] && [[ -f "$HOME/.edge-server-secrets/secrets.enc" ]]; then
+    if [[ -f "$secrets_script" ]] && [[ -f "${SECRETS_DIR:-$HOME/.edge-server-secrets}/secrets.enc" ]]; then
         step "Loading secrets from encrypted storage..."
         if [[ -n "${SECRETS_PASSWORD:-}" ]]; then
             eval "$("$secrets_script" export 2>/dev/null)" || true
         else
             warn "Set SECRETS_PASSWORD env var to load secrets automatically"
-            warn "Or run: eval \$(./secrets.sh export)"
+            warn "Or run: eval \"\$(./secrets.sh export)\""
         fi
     fi
 
@@ -206,6 +212,12 @@ STORAGE_PATH=${STORAGE_PATH}
 REOLINK_USER=${REOLINK_USER}
 REOLINK_PASS=${REOLINK_PASS}
 
+# MQTT credentials (used by Frigate's {FRIGATE_MQTT_*} substitution)
+FRIGATE_MQTT_USER=${MQTT_USER}
+FRIGATE_MQTT_PASSWORD=${MQTT_PASS}
+MQTT_USER=${MQTT_USER}
+MQTT_PASS=${MQTT_PASS}
+
 # Camera IPs
 CAM1_IP=${CAMERAS[cam1_front]}
 CAM2_IP=${CAMERAS[cam2_rear]}
@@ -219,10 +231,22 @@ EOF
     # Mosquitto configuration
     #---------------------------------------------------------------------------
     step "Creating Mosquitto config..."
-    cat > "$APP_DIR/mosquitto/config/mosquitto.conf" << 'EOF'
+    local mqtt_auth="allow_anonymous true"
+    local frigate_mqtt_auth=""
+    if [[ -n "$MQTT_USER" && -n "$MQTT_PASS" ]]; then
+        mqtt_auth=$'allow_anonymous false\npassword_file /mosquitto/config/passwd'
+        frigate_mqtt_auth=$'  user: "{FRIGATE_MQTT_USER}"\n  password: "{FRIGATE_MQTT_PASSWORD}"'
+        docker run --rm -v "$APP_DIR/mosquitto/config:/mosquitto/config" \
+            eclipse-mosquitto:2 mosquitto_passwd -b -c /mosquitto/config/passwd "$MQTT_USER" "$MQTT_PASS"
+        chmod 600 "$APP_DIR/mosquitto/config/passwd"
+    else
+        warn "MQTT_USER/MQTT_PASS not set - MQTT broker will accept anonymous clients"
+        rm -f "$APP_DIR/mosquitto/config/passwd"
+    fi
+    cat > "$APP_DIR/mosquitto/config/mosquitto.conf" << EOF
 # Mosquitto MQTT Broker - Security Stack
 listener 1883
-allow_anonymous true
+${mqtt_auth}
 
 persistence true
 persistence_location /mosquitto/data/
@@ -243,6 +267,8 @@ EOF
     # Frigate configuration with go2rtc
     #---------------------------------------------------------------------------
     step "Creating Frigate config..."
+    local hwaccel_line="  hwaccel_args: preset-vaapi"
+    [[ -e /dev/dri/renderD128 ]] || hwaccel_line="  # hwaccel_args: preset-vaapi  # no Intel GPU detected"
     cat > "$APP_DIR/frigate/config.yml" << EOF
 # Frigate NVR Configuration - Security Stack
 # Documentation: https://docs.frigate.video
@@ -251,6 +277,7 @@ mqtt:
   enabled: true
   host: 127.0.0.1
   port: 1883
+${frigate_mqtt_auth}
   topic_prefix: frigate
   stats_interval: 60
 
@@ -287,7 +314,7 @@ go2rtc:
 # Hardware Acceleration - Intel VA-API
 #-------------------------------------------------------------------------------
 ffmpeg:
-  hwaccel_args: preset-vaapi
+${hwaccel_line}
 
 detectors:
   cpu1:
@@ -414,6 +441,7 @@ cameras:
     motion:
       mask: []
 EOF
+    chmod 600 "$APP_DIR/frigate/config.yml"  # contains camera credentials
     info "Created frigate/config.yml"
 
     #---------------------------------------------------------------------------
@@ -435,8 +463,11 @@ services:
       - ./mosquitto/config:/mosquitto/config:ro
       - ./mosquitto/data:/mosquitto/data
       - ./mosquitto/log:/mosquitto/log
+    environment:
+      - MQTT_USER=${MQTT_USER:-}
+      - MQTT_PASS=${MQTT_PASS:-}
     healthcheck:
-      test: ["CMD", "mosquitto_sub", "-t", "$$SYS/#", "-C", "1", "-i", "healthcheck", "-W", "3"]
+      test: ["CMD-SHELL", "mosquitto_sub -t '$$SYS/#' -C 1 -i healthcheck -W 3 $${MQTT_USER:+-u \"$$MQTT_USER\" -P \"$$MQTT_PASS\"}"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -461,9 +492,11 @@ services:
         tmpfs:
           size: 1073741824
     devices:
-      - /dev/dri/renderD128:/dev/dri/renderD128
+      - /dev/dri/renderD128:/dev/dri/renderD128 # __HWACCEL__
     environment:
       - FRIGATE_RTSP_PASSWORD=${REOLINK_PASS:-password}
+      - FRIGATE_MQTT_USER=${FRIGATE_MQTT_USER:-}
+      - FRIGATE_MQTT_PASSWORD=${FRIGATE_MQTT_PASSWORD:-}
     depends_on:
       mosquitto:
         condition: service_healthy
@@ -486,6 +519,10 @@ services:
       - mosquitto
       - frigate
 EOF
+    if [[ ! -e /dev/dri/renderD128 ]]; then
+        # The device mapping makes `docker compose up` fail without an Intel GPU
+        sed -i '/__HWACCEL__/d; /^    devices:$/d' "$APP_DIR/docker-compose.yml"
+    fi
     info "Created docker-compose.yml"
 
     #---------------------------------------------------------------------------
@@ -515,11 +552,8 @@ recorder:
   purge_keep_days: 14
   commit_interval: 30
 
-mqtt:
-  broker: 127.0.0.1
-  port: 1883
-  discovery: true
-  discovery_prefix: homeassistant
+# MQTT can no longer be configured in YAML; add it in the UI:
+#   Settings -> Devices & Services -> Add Integration -> MQTT (broker 127.0.0.1)
 EOF
         info "Created ha-config/configuration.yaml"
     else
@@ -761,4 +795,7 @@ main() {
     info "Deployment completed successfully!"
 }
 
-main "$@"
+# Only run when executed, so tests can `source` this file and call functions.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

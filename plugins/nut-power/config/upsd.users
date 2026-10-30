@@ -1,7 +1,6 @@
 # NUT user definitions
 
-[admin]
-    password = edgeserver
-    upsmon master
-    actions = SET
-    instcmds = ALL
+# The password is generated at install time (install.sh).
+[upsmon]
+    password = __NUT_PASSWORD__
+    upsmon primary

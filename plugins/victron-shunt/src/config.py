@@ -3,7 +3,7 @@
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 try:
     import yaml
@@ -120,13 +120,15 @@ class Config:
             yaml.dump(data, f, default_flow_style=False)
         os.chmod(path, 0o600)
 
-    def validate(self) -> list[str]:
+    def validate(self) -> List[str]:
         """Return list of validation errors, empty if valid."""
         errors = []
         if not self.address:
             errors.append("address: required (device MAC address)")
         if not self.key:
             errors.append("key: required (encryption key from Victron Connect)")
-        elif len(self.key.replace(" ", "").replace("-", "").replace(":", "")) != 32:
-            errors.append("key: must be 32 hex characters")
+        else:
+            key = self.key.replace(" ", "").replace("-", "").replace(":", "")
+            if len(key) != 32 or any(c not in "0123456789abcdefABCDEF" for c in key):
+                errors.append("key: must be 32 hex characters")
         return errors

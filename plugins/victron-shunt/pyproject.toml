@@ -7,7 +7,7 @@ name = "victron-shunt"
 version = "0.1.0"
 description = "Victron Smart Shunt BLE reader"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "bleak>=0.21.0",
     "victron-ble>=0.6.0",

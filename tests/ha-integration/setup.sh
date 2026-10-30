@@ -6,6 +6,8 @@ cd "$SCRIPT_DIR"
 
 echo "Setting up HA integration test environment..."
 
+mkdir -p ha-config mosquitto/config mosquitto/data mosquitto/log
+
 # Create mosquitto password file
 echo "Creating MQTT credentials (admin/testpass123)..."
 docker run --rm -v "$SCRIPT_DIR/mosquitto/config:/mosquitto/config" \

@@ -1,11 +1,12 @@
 """Snapshot and rollback management."""
 
 import json
+import shlex
+import shutil
 import tarfile
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
 
 from ssh import SSHClient
 
@@ -18,9 +19,9 @@ class SnapshotManifest:
     created_at: str
     phase: str
     description: str
-    files: List[str] = field(default_factory=list)
-    docker_containers: List[str] = field(default_factory=list)
-    metadata: Dict[str, str] = field(default_factory=dict)
+    files: list[str] = field(default_factory=list)
+    docker_containers: list[str] = field(default_factory=list)
+    metadata: dict[str, str] = field(default_factory=dict)
 
 
 class SnapshotManager:
@@ -28,8 +29,18 @@ class SnapshotManager:
 
     SNAPSHOT_DIR = "/var/lib/edge-server-snapshots"
 
-    def __init__(self, ssh: SSHClient):
+    def __init__(self, ssh: SSHClient, snapshot_dir: str | None = None):
         self.ssh = ssh
+        self.snapshot_dir = (snapshot_dir or self.SNAPSHOT_DIR).rstrip("/")
+
+    def _write_remote_file(self, path: str, content: str) -> bool:
+        """Write content to a root-owned remote file.
+
+        ``sudo cmd > file`` performs the redirect as the unprivileged SSH user,
+        so it fails for /var/lib. Pipe the data into ``sudo tee`` instead.
+        """
+        result = self.ssh.run(f"tee {shlex.quote(path)} > /dev/null", sudo=True, input=content)
+        return result.success
 
     def _generate_id(self, phase: str) -> str:
         """Generate snapshot ID."""
@@ -40,15 +51,16 @@ class SnapshotManager:
         self,
         phase: str,
         description: str,
-        paths: Optional[List[str]] = None,
+        paths: list[str] | None = None,
         include_docker: bool = False,
-    ) -> Optional[str]:
+    ) -> str | None:
         """Create a snapshot. Returns snapshot ID on success."""
         snapshot_id = self._generate_id(phase)
-        snapshot_path = f"{self.SNAPSHOT_DIR}/{snapshot_id}"
+        snapshot_path = f"{self.snapshot_dir}/{snapshot_id}"
+        q_snapshot_path = shlex.quote(snapshot_path)
 
         # Create snapshot directory
-        result = self.ssh.run(f"mkdir -p {snapshot_path}", sudo=True)
+        result = self.ssh.run(f"mkdir -p {q_snapshot_path}", sudo=True)
         if not result.success:
             return None
 
@@ -65,9 +77,11 @@ class SnapshotManager:
                 if self.ssh.path_exists(path):
                     # Create tarball of the path
                     basename = Path(path).name
+                    parent = str(Path(path).parent)
                     tar_path = f"{snapshot_path}/{basename}.tar.gz"
                     result = self.ssh.run(
-                        f"tar -czf {tar_path} -C $(dirname {path}) {basename}",
+                        f"tar -czf {shlex.quote(tar_path)} -C {shlex.quote(parent)} "
+                        f"{shlex.quote(basename)}",
                         sudo=True,
                     )
                     if result.success:
@@ -75,47 +89,38 @@ class SnapshotManager:
 
         # Backup Docker container list
         if include_docker:
-            result = self.ssh.run("docker ps --format '{{.Names}}' 2>/dev/null || true")
+            result = self.ssh.run("docker ps --format '{{.Names}}' 2>/dev/null || true", sudo=True)
             if result.success and result.stdout:
-                containers = result.stdout.strip().split("\n")
+                containers = [c for c in result.stdout.strip().split("\n") if c]
                 manifest.docker_containers = containers
 
                 # Save container inspect data
                 for container in containers:
-                    inspect_result = self.ssh.run(f"docker inspect {container}", sudo=True)
+                    inspect_result = self.ssh.run(
+                        f"docker inspect {shlex.quote(container)}", sudo=True
+                    )
                     if inspect_result.success:
-                        container_file = f"{snapshot_path}/{container}.json"
-                        self.ssh.run(
-                            f"echo '{inspect_result.stdout}' > {container_file}",
-                            sudo=True,
+                        self._write_remote_file(
+                            f"{snapshot_path}/{container}.json", inspect_result.stdout + "\n"
                         )
 
         # Write manifest
-        manifest_json = json.dumps(
-            {
-                "id": manifest.id,
-                "created_at": manifest.created_at,
-                "phase": manifest.phase,
-                "description": manifest.description,
-                "files": manifest.files,
-                "docker_containers": manifest.docker_containers,
-                "metadata": manifest.metadata,
-            },
-            indent=2,
-        )
-
-        self.ssh.run(
-            f"cat > {snapshot_path}/manifest.json << 'EOF'\n{manifest_json}\nEOF", sudo=True
-        )
+        manifest_json = json.dumps(asdict(manifest), indent=2)
+        if not self._write_remote_file(f"{snapshot_path}/manifest.json", manifest_json + "\n"):
+            return None
 
         # Update latest symlink
-        self.ssh.run(f"ln -sfn {snapshot_path} {self.SNAPSHOT_DIR}/latest", sudo=True)
+        self.ssh.run(
+            f"ln -sfn {q_snapshot_path} {shlex.quote(self.snapshot_dir + '/latest')}", sudo=True
+        )
 
         return snapshot_id
 
-    def list_snapshots(self) -> List[SnapshotManifest]:
+    def list_snapshots(self) -> list[SnapshotManifest]:
         """List all snapshots."""
-        result = self.ssh.run(f"ls -1 {self.SNAPSHOT_DIR} 2>/dev/null | grep -v latest || true")
+        result = self.ssh.run(
+            f"ls -1 {shlex.quote(self.snapshot_dir)} 2>/dev/null | grep -vx latest || true"
+        )
         if not result.success or not result.stdout:
             return []
 
@@ -129,16 +134,16 @@ class SnapshotManager:
 
         return sorted(snapshots, key=lambda s: s.created_at, reverse=True)
 
-    def get_manifest(self, snapshot_id: str) -> Optional[SnapshotManifest]:
+    def get_manifest(self, snapshot_id: str) -> SnapshotManifest | None:
         """Get manifest for a snapshot."""
         if snapshot_id == "latest":
             # Resolve latest symlink
-            result = self.ssh.run(f"readlink {self.SNAPSHOT_DIR}/latest")
-            if result.success:
+            result = self.ssh.run(f"readlink {shlex.quote(self.snapshot_dir + '/latest')}")
+            if result.success and result.stdout.strip():
                 snapshot_id = Path(result.stdout.strip()).name
 
-        manifest_path = f"{self.SNAPSHOT_DIR}/{snapshot_id}/manifest.json"
-        result = self.ssh.run(f"cat {manifest_path}")
+        manifest_path = f"{self.snapshot_dir}/{snapshot_id}/manifest.json"
+        result = self.ssh.run(f"cat {shlex.quote(manifest_path)}", sudo=True)
         if not result.success:
             return None
 
@@ -154,12 +159,13 @@ class SnapshotManager:
         if not manifest:
             return False
 
-        snapshot_path = f"{self.SNAPSHOT_DIR}/{manifest.id}"
+        snapshot_path = f"{self.snapshot_dir}/{manifest.id}"
+        ok = True
 
-        # Stop Docker containers if they're in the snapshot
-        if manifest.docker_containers:
-            for container in manifest.docker_containers:
-                self.ssh.run(f"docker stop {container} 2>/dev/null || true", sudo=True)
+        # Stop containers that were running when the snapshot was taken so their
+        # files can be replaced, then bring them back afterwards.
+        for container in manifest.docker_containers:
+            self.ssh.run(f"docker stop {shlex.quote(container)} 2>/dev/null || true", sudo=True)
 
         # Restore files
         for file_path in manifest.files:
@@ -167,16 +173,29 @@ class SnapshotManager:
             tar_path = f"{snapshot_path}/{basename}.tar.gz"
             parent_dir = str(Path(file_path).parent)
 
-            # Remove current and restore from backup
-            self.ssh.run(f"rm -rf {file_path}", sudo=True)
-            self.ssh.run(f"tar -xzf {tar_path} -C {parent_dir}", sudo=True)
+            if not self.ssh.run(f"test -f {shlex.quote(tar_path)}", sudo=True).success:
+                ok = False
+                continue
 
-        return True
+            # Remove current and restore from backup
+            self.ssh.run(f"rm -rf {shlex.quote(file_path)}", sudo=True)
+            result = self.ssh.run(
+                f"tar -xzf {shlex.quote(tar_path)} -C {shlex.quote(parent_dir)}", sudo=True
+            )
+            if not result.success:
+                ok = False
+
+        for container in manifest.docker_containers:
+            self.ssh.run(f"docker start {shlex.quote(container)} 2>/dev/null || true", sudo=True)
+
+        return ok
 
     def delete(self, snapshot_id: str) -> bool:
         """Delete a snapshot."""
-        snapshot_path = f"{self.SNAPSHOT_DIR}/{snapshot_id}"
-        result = self.ssh.run(f"rm -rf {snapshot_path}", sudo=True)
+        if not snapshot_id or "/" in snapshot_id or snapshot_id in (".", "..", "latest"):
+            return False
+        snapshot_path = f"{self.snapshot_dir}/{snapshot_id}"
+        result = self.ssh.run(f"rm -rf {shlex.quote(snapshot_path)}", sudo=True)
         return result.success
 
     def cleanup_old(self, keep: int = 5) -> int:
@@ -195,15 +214,15 @@ class SnapshotManager:
 class LocalSnapshotManager:
     """Manage local snapshots (for testing or local deployments)."""
 
-    def __init__(self, snapshot_dir: Optional[Path] = None):
+    def __init__(self, snapshot_dir: Path | None = None):
         self.snapshot_dir = snapshot_dir or Path("/var/lib/edge-server-snapshots")
 
     def create(
         self,
         phase: str,
         description: str,
-        paths: Optional[List[Path]] = None,
-    ) -> Optional[str]:
+        paths: list[Path] | None = None,
+    ) -> str | None:
         """Create a local snapshot."""
         timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
         snapshot_id = f"{timestamp}_{phase}"
@@ -228,20 +247,7 @@ class LocalSnapshotManager:
 
         # Write manifest
         manifest_file = snapshot_path / "manifest.json"
-        manifest_file.write_text(
-            json.dumps(
-                {
-                    "id": manifest.id,
-                    "created_at": manifest.created_at,
-                    "phase": manifest.phase,
-                    "description": manifest.description,
-                    "files": manifest.files,
-                    "docker_containers": manifest.docker_containers,
-                    "metadata": manifest.metadata,
-                },
-                indent=2,
-            )
-        )
+        manifest_file.write_text(json.dumps(asdict(manifest), indent=2))
 
         # Update latest symlink
         latest = self.snapshot_dir / "latest"
@@ -275,15 +281,30 @@ class LocalSnapshotManager:
             tar_path = snapshot_path / f"{path.name}.tar.gz"
             if tar_path.exists():
                 # Remove current
-                if path.exists():
-                    if path.is_dir():
-                        import shutil
-
+                if path.exists() or path.is_symlink():
+                    if path.is_dir() and not path.is_symlink():
                         shutil.rmtree(path)
                     else:
                         path.unlink()
                 # Extract
                 with tarfile.open(tar_path, "r:gz") as tar:
-                    tar.extractall(path.parent)
+                    _safe_extract(tar, path.parent)
 
         return True
+
+
+def _safe_extract(tar: tarfile.TarFile, dest: Path) -> None:
+    """Extract a tarball without allowing members to escape ``dest``."""
+    if hasattr(tarfile, "tar_filter"):
+        # "tar" blocks absolute paths and members escaping dest but keeps
+        # ownership/permissions, which a system-file restore needs.
+        tar.extractall(dest, filter="tar")
+        return
+    dest_resolved = dest.resolve()
+    for member in tar.getmembers():  # pragma: no cover - only on old Pythons
+        target = (dest / member.name).resolve()
+        if dest_resolved != target and dest_resolved not in target.parents:
+            raise ValueError(f"Unsafe path in snapshot archive: {member.name}")
+        if member.issym() or member.islnk():
+            raise ValueError(f"Links are not allowed in snapshot archive: {member.name}")
+    tar.extractall(dest)  # noqa: S202 - members validated above

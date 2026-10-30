@@ -2,14 +2,17 @@
 
 import base64
 import os
+import re
+import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
 
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass
@@ -35,13 +38,13 @@ class SecretsManager:
         "EXTERNAL_DRIVE_UUID",
     ]
 
-    def __init__(self, secrets_dir: Optional[Path] = None, password: Optional[str] = None):
+    def __init__(self, secrets_dir: Path | None = None, password: str | None = None):
         self.secrets_dir = secrets_dir or Path.home() / ".edge-server-secrets"
         self.secrets_file = self.secrets_dir / "secrets.enc"
         self.salt_file = self.secrets_dir / ".salt"
         self._password = password
-        self._fernet: Optional[Fernet] = None
-        self._cache: Dict[str, str] = {}
+        self._fernet: Fernet | None = None
+        self._cache: dict[str, str] = {}
 
     def _get_password(self) -> str:
         """Get password from environment or prompt."""
@@ -62,6 +65,10 @@ class SecretsManager:
 
         if self.salt_file.exists():
             salt = self.salt_file.read_bytes()
+        elif self.secrets_file.exists():
+            # A fresh salt would derive a different key and silently make the
+            # existing secrets unreadable (and overwrite them on next save).
+            raise ValueError(f"Salt file missing for existing secrets: {self.salt_file}")
         else:
             salt = os.urandom(16)
             self.secrets_dir.mkdir(parents=True, exist_ok=True)
@@ -122,7 +129,7 @@ class SecretsManager:
         self.secrets_file.write_bytes(encrypted)
         self.secrets_file.chmod(0o600)
 
-    def get(self, key: str) -> Optional[str]:
+    def get(self, key: str) -> str | None:
         """Get a secret value."""
         if not self._cache:
             self._load()
@@ -130,6 +137,10 @@ class SecretsManager:
 
     def set(self, key: str, value: str) -> None:
         """Set a secret value."""
+        if not _KEY_RE.match(key):
+            raise ValueError(f"Invalid secret key: {key!r} (use letters, digits, underscore)")
+        if "\n" in value or "\r" in value:
+            raise ValueError("Secret values cannot contain newlines")
         if not self._cache and self.secrets_file.exists():
             self._load()
         self._cache[key] = value
@@ -151,7 +162,7 @@ class SecretsManager:
             self._load()
         return list(self._cache.keys())
 
-    def export(self) -> Dict[str, str]:
+    def export(self) -> dict[str, str]:
         """Export all secrets as a dictionary."""
         if not self._cache:
             self._load()
@@ -160,7 +171,7 @@ class SecretsManager:
     def export_shell(self) -> str:
         """Export secrets as shell export statements."""
         secrets = self.export()
-        return "\n".join(f"export {k}='{v}'" for k, v in secrets.items())
+        return "\n".join(f"export {k}={shlex.quote(v)}" for k, v in secrets.items())
 
     def validate(self) -> tuple:
         """Validate that required secrets are set. Returns (valid, missing)."""
@@ -179,11 +190,11 @@ class SecretsManager:
 class SecretsShellWrapper:
     """Wrapper around existing secrets.sh script."""
 
-    def __init__(self, script_path: Path, home_dir: Optional[Path] = None):
+    def __init__(self, script_path: Path, home_dir: Path | None = None):
         self.script_path = script_path
         self.home_dir = home_dir
 
-    def _run(self, *args, password: Optional[str] = None) -> tuple:
+    def _run(self, *args: str, password: str | None = None) -> tuple[bool, str, str]:
         """Run secrets.sh with arguments."""
         env = os.environ.copy()
         if self.home_dir:
@@ -216,24 +227,24 @@ class SecretsShellWrapper:
         )
         return result.returncode == 0
 
-    def get(self, key: str, password: Optional[str] = None) -> Optional[str]:
+    def get(self, key: str, password: str | None = None) -> str | None:
         """Get a secret value."""
         success, stdout, _ = self._run("get", key, password=password)
         return stdout if success else None
 
-    def set(self, key: str, value: str, password: Optional[str] = None) -> bool:
+    def set(self, key: str, value: str, password: str | None = None) -> bool:
         """Set a secret value."""
         success, _, _ = self._run("set", key, value, password=password)
         return success
 
-    def list_keys(self, password: Optional[str] = None) -> list:
+    def list_keys(self, password: str | None = None) -> list:
         """List all secret keys."""
         success, stdout, _ = self._run("list", password=password)
         if success:
             return [line.strip() for line in stdout.split("\n") if line.strip()]
         return []
 
-    def export(self, password: Optional[str] = None) -> str:
+    def export(self, password: str | None = None) -> str:
         """Export secrets as shell export statements."""
         success, stdout, _ = self._run("export", password=password)
         return stdout if success else ""

@@ -28,17 +28,18 @@ The system will shutdown when EITHER condition is met:
 
 ## Configuration
 
-Edit `/etc/nut/upsmon.conf`:
+Both thresholds live in `/etc/systemd/system/battery-poller.service`
+(set from `NUT_SHUTDOWN_DELAY` / `NUT_LOW_BATTERY` at install time):
 ```ini
-# Seconds on battery before shutdown (default: 600 = 10 min)
-ONBATTERYDELAY 600
+# Seconds on battery before shutdown (0 disables the timed shutdown)
+Environment=NUT_SHUTDOWN_DELAY=600
+# Low battery threshold (%)
+Environment=NUT_LOW_BATTERY=20
 ```
+Then `sudo systemctl daemon-reload && sudo systemctl restart battery-poller`.
 
-Edit `/etc/systemd/system/battery-poller.service`:
-```ini
-# Low battery threshold
-Environment=NUT_LOW_BATTERY=10
-```
+(upsmon itself has no "delay on battery" setting, so the poller raises the
+low-battery flag once the delay has elapsed.)
 
 After changes:
 ```bash
@@ -70,8 +71,12 @@ systemctl status battery-poller
 2. Writes status to `/var/run/nut/laptop.dev` in NUT format
 3. `nut-server` (upsd) reads the dummy device file
 4. `nut-monitor` (upsmon) monitors status and triggers shutdown when:
-   - On battery longer than `ONBATTERYDELAY` seconds
-   - Battery drops below low threshold
+   - the status is `OB LB` (on battery + low battery). The poller sets `LB`
+     when the charge is below the threshold, or after `NUT_SHUTDOWN_DELAY`
+     seconds on battery.
+
+The upsmon password is generated per host at install time
+(`/etc/nut/.edge-server-upsmon-pass`).
 
 ## Uninstall
 

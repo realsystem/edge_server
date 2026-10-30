@@ -1,5 +1,18 @@
 #!/bin/bash
-set -e
+# Install Renogy Rover BLE monitor
+# Called from deploy-edge-server.sh with RENOGY_ADDRESS, MQTT_USER, MQTT_PASS
+set -euo pipefail
+
+RENOGY_ADDRESS="${RENOGY_ADDRESS:-}"
+MQTT_USER="${MQTT_USER:-}"
+MQTT_PASS="${MQTT_PASS:-}"
+
+# YAML double-quoted scalar
+yaml_quote() {
+    local v="${1//\\/\\\\}"
+    v="${v//\"/\\\"}"
+    printf '"%s"' "$v"
+}
 
 INSTALL_DIR="/opt/renogy-rover"
 SERVICE_NAME="renogy-rover"
@@ -39,7 +52,7 @@ fi
 echo "Installing Python dependencies..."
 "${INSTALL_DIR}/venv/bin/pip" install --quiet --upgrade pip
 "${INSTALL_DIR}/venv/bin/pip" install --quiet -r "${INSTALL_DIR}/requirements.txt"
-"${INSTALL_DIR}/venv/bin/pip" install --quiet -e "${INSTALL_DIR}"
+"${INSTALL_DIR}/venv/bin/pip" install --quiet "${INSTALL_DIR}"
 
 # Install systemd service
 echo "Installing systemd service..."
@@ -48,26 +61,35 @@ systemctl daemon-reload
 
 # Create config directory
 mkdir -p /etc/renogy-rover
+chmod 700 /etc/renogy-rover
 
-# Create example config if none exists
+# Create config if none exists (uses values passed in by the deploy script so
+# the service can actually reach the authenticated MQTT broker)
 if [ ! -f /etc/renogy-rover/config.yaml ]; then
-    cat > /etc/renogy-rover/config.yaml << 'EOF'
+    mqtt_auth="  # user: \"\"
+  # password: \"\""
+    if [ -n "$MQTT_USER" ]; then
+        mqtt_auth="  user: $(yaml_quote "$MQTT_USER")
+  password: $(yaml_quote "$MQTT_PASS")"
+    fi
+    (umask 077 && cat > /etc/renogy-rover/config.yaml << EOF
 # Renogy Rover MPPT BLE configuration
 # Find your device address with: renogy-rover scan
 
-address: ""  # Device MAC address (required)
+address: $(yaml_quote "$RENOGY_ADDRESS")  # Device MAC address (required)
 device_id: 255  # Modbus device ID (usually 255)
 poll_interval: 30  # Seconds between readings
 
 mqtt:
   host: localhost
   port: 1883
-  # user: ""
-  # password: ""
+${mqtt_auth}
   topic_prefix: renogy/rover
 EOF
+    )
     echo "Created /etc/renogy-rover/config.yaml"
 fi
+chmod 600 /etc/renogy-rover/config.yaml
 
 # Enable and start service
 echo "Enabling and starting service..."

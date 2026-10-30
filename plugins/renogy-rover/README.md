@@ -6,7 +6,14 @@ Read data from Renogy Rover MPPT solar charge controllers via Bluetooth (BT-2 mo
 
 - Linux with BlueZ Bluetooth stack
 - Renogy MPPT controller with BT-2 module installed
-- Python 3.9+
+- Python 3.10+
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
 
 ## Installation
 

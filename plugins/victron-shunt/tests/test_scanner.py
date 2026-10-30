@@ -1,6 +1,5 @@
 """Tests for scanner module."""
 
-import pytest
 
 from victron_shunt.scanner import BluetoothStatus, VictronDevice, VICTRON_PREFIXES
 
