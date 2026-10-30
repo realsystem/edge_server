@@ -42,6 +42,10 @@ TIMEZONE="${TIMEZONE:-America/Los_Angeles}"
 # removes its container but keeps its data directory, so it can be re-enabled.
 INSTALL_HOMEASSISTANT="${INSTALL_HOMEASSISTANT:-false}"
 INSTALL_MQTT="${INSTALL_MQTT:-false}"
+# Hardware video decoding (Intel VA-API). Off by default: it fails on some GPUs/
+# camera streams (e.g. H.264 profile 100) and software decoding always works.
+ENABLE_HWACCEL="${ENABLE_HWACCEL:-false}"
+DRI_DEVICE="${DRI_DEVICE:-/dev/dri/renderD128}"  # overridable for tests
 
 # MQTT credentials (only used when INSTALL_MQTT=true)
 MQTT_USER="${MQTT_USER:-admin}"
@@ -757,14 +761,18 @@ EOF
     # Without an Intel GPU the device mapping makes `docker compose up` fail
     # outright, so drop it (and VA-API below) on machines that lack it.
     local ffmpeg_block=$'ffmpeg:\n  hwaccel_args: preset-vaapi'
-    if [[ -e /dev/dri/renderD128 ]]; then
+    if [[ "$ENABLE_HWACCEL" == "true" && -e "$DRI_DEVICE" ]]; then
         sed -i "s| (__HWACCEL__)||" "$APP_DIR/docker-compose.yml"
     else
-        warn "No /dev/dri/renderD128 - Frigate will run without hardware acceleration"
+        if [[ "$ENABLE_HWACCEL" == "true" ]]; then
+            warn "ENABLE_HWACCEL=true but no /dev/dri/renderD128 - using software decoding"
+        else
+            info "Hardware acceleration off (software decoding); set ENABLE_HWACCEL=true to enable"
+        fi
         sed -i '/__HWACCEL__/d; /^    devices:$/d' "$APP_DIR/docker-compose.yml"
         # No `ffmpeg:` key at all: a key with only a comment under it is null,
         # which Frigate's config loader crashes on.
-        ffmpeg_block="# no Intel GPU detected: hardware acceleration (preset-vaapi) off"
+        ffmpeg_block="# hardware acceleration (preset-vaapi) off: set ENABLE_HWACCEL=true to enable"
     fi
 
     #---------------------------------------------------------------------------
