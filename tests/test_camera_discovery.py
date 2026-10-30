@@ -409,21 +409,33 @@ cameras:
 
 
 class TestFrigateConfig:
-    def test_camera_yaml_is_valid_and_url_encoded(self):
+    def test_camera_yaml_is_valid_and_password_not_encoded(self):
         block = yaml.safe_load(cd.camera_yaml("reolink_20", make_cam(), indent=0))
         cam = block["reolink_20"]
         record, detect = cam["ffmpeg"]["inputs"]
         assert record == {
-            "path": "rtsp://admin:p%40ss%2F%7Bx%7D@192.168.1.20:554/main",
+            # raw password (Frigate encodes it itself); braces doubled for
+            # Frigate's {FRIGATE_*} substitution
+            "path": "rtsp://admin:p@ss/{{x}}@192.168.1.20:554/main",
             "roles": ["record"],
         }
         assert detect["roles"] == ["detect"]
         assert cam["detect"] == {"width": 640, "height": 360, "fps": 5}
-        assert "{" not in record["path"]  # Frigate treats {...} as env substitution
 
     def test_masked_output_hides_password(self):
         text = cd.camera_yaml("c", make_cam(), mask=True)
-        assert "p%40ss" not in text and "admin:***@" in text
+        assert "p@ss" not in text and "admin:***@" in text
+
+    @pytest.mark.parametrize("password", ["#", "p#ss", "a%23b", "x?y/z", "p@ss:w", "with space"])
+    def test_password_round_trips_through_frigate_encoding(self, password):
+        # What Frigate does with the path: str.format for {FRIGATE_*} vars,
+        # then URL-encode the password (quote_plus). Decoding that must give
+        # the original password back, i.e. no double encoding.
+        path = cd.with_credentials("rtsp://10.0.0.1:554/s", cd.Credential("admin", password))
+        formatted = path.format()
+        userinfo = formatted[len("rtsp://") : formatted.rindex("@")]
+        assert userinfo.split(":", 1)[1] == password
+        assert formatted.endswith("@10.0.0.1:554/s")
 
     def test_existing_userinfo_replaced(self):
         uri = cd.with_credentials("rtsp://old:old@10.0.0.1/x", cd.Credential("u", "p"))
@@ -449,6 +461,22 @@ class TestFrigateConfig:
     def test_unexpected_layout_refused(self):
         with pytest.raises(ValueError):
             cd.insert_cameras("cameras: !include cams.yml\n", [("new", make_cam())])
+
+    @pytest.mark.parametrize(
+        "line,host",
+        [
+            (
+                '        - path: "rtsp://admin:p@ss:w/rd {{x}}@192.168.1.20:554/main"',
+                "192.168.1.20",
+            ),
+            ('        - path: "rtsp://admin:#@192.168.1.21:554/x"', "192.168.1.21"),
+            ("        - path: rtsp://192.168.1.22/stream", "192.168.1.22"),
+            ("        - path: rtsp://user:password@camera-ip:554/stream", "camera-ip"),
+            ('        - path: "rtsp://u:a b@cam.local"', "cam.local"),
+        ],
+    )
+    def test_configured_hosts_with_raw_passwords(self, line, host):
+        assert cd.configured_hosts(line) == {host}
 
     def test_plan_skips_known_hosts_and_avoids_name_clash(self):
         text = TEMPLATE.replace("placeholder_camera", "reolink_20") + (
@@ -507,7 +535,7 @@ class TestMain:
         out = capsys.readouterr().out
         assert "Reolink RLC-810A" in out and "3840x2160, 640x360" in out
         assert "Would add 1 camera(s)" in out
-        assert "admin:***@127.0.0.1" in out and "p%40ss" not in out
+        assert "admin:***@127.0.0.1" in out and "p@ss" not in out
         assert cfg.read_text() == TEMPLATE
 
     def test_apply_then_idempotent(self, setup, capsys):
