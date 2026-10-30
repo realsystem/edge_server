@@ -7,8 +7,10 @@ How it works:
   1. WS-Discovery: a multicast probe (UDP 239.255.255.250:3702) that ONVIF
      cameras on the same LAN answer with their device-service address.
      Cameras on other subnets can be given directly with --host.
-  2. For each camera, the logins from the credentials file (.cam, one
-     ``user:pass`` per line) are tried until one works.
+  2. Each camera is logged in to ONCE, with the login the credentials file
+     (.cam) gives for its IP address (``192.168.1.20 user:pass``), or else the
+     first plain ``user:pass`` line. A wrong password is never retried with
+     other logins, because many cameras lock the account after a few failures.
   3. The camera's stream profiles and RTSP addresses are read over ONVIF.
      The highest-resolution stream is used for recording, the lowest for
      detection.
@@ -25,6 +27,11 @@ Usage:
   camera_discovery.py --host 192.168.1.50     # skip discovery, ask this camera
   camera_discovery.py --verbose               # trace every step (debugging)
 
+Credentials file (.cam), one login per line:
+  192.168.1.20 admin:secret      # this camera only
+  192.168.1.21 viewer:other      # another camera, another password
+  admin:fallback                 # cameras without their own line (first one only)
+
 --verbose (or CAM_DEBUG=1) prints a timestamped trace to stderr: which logins
 are loaded, who answered discovery, every ONVIF call with its HTTP status and
 fault text, and the camera's clock. Passwords are never printed, only their
@@ -37,6 +44,7 @@ import argparse
 import base64
 import datetime as dt
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -156,20 +164,61 @@ def _operation(body: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def load_credentials(path: Path) -> list[Credential]:
-    """Read ``user:pass`` lines (``#`` comments and blank lines ignored)."""
-    creds: list[Credential] = []
+@dataclass
+class CredentialSet:
+    """Logins from the credentials file: per-camera ones and a fallback."""
+
+    by_host: dict[str, Credential] = field(default_factory=dict)
+    default: list[Credential] = field(default_factory=list)
+
+    def for_host(self, host: str, try_all: bool = False) -> tuple[list[Credential], str]:
+        """Logins to try on this camera, and where they came from.
+
+        A camera with its own line gets only that login. Otherwise just the
+        first fallback login, unless ``try_all`` (risks locking the camera).
+        """
+        if host in self.by_host:
+            return [self.by_host[host]], "line for this camera"
+        if self.default:
+            if try_all:
+                return list(self.default), "all fallback logins"
+            return self.default[:1], "first fallback login"
+        return [], "none"
+
+
+def load_credentials(path: Path) -> CredentialSet:
+    """Read the credentials file (``#`` comments and blank lines ignored).
+
+    ``IP user:pass`` lines belong to one camera; ``user:pass`` lines are the
+    fallback for cameras without their own line.
+    """
+    result = CredentialSet()
     for n, raw in enumerate(path.read_text().splitlines(), start=1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
+        host = ""
+        first, _, rest = line.partition(" ")
+        try:
+            host = str(ipaddress.ip_address(first))
+        except ValueError:
+            pass
+        else:
+            line = rest.strip()
         user, sep, password = line.partition(":")
         if not sep or not user:
-            raise ValueError(f"{path}:{n}: expected user:password")
-        creds.append(Credential(user, password))
-    if not creds:
-        raise ValueError(f"{path}: no user:password lines")
-    return creds
+            hint = "expected 'IP user:password' or 'user:password'"
+            raise ValueError(f"{path}:{n}: {hint}")
+        cred = Credential(user, password)
+        if host:
+            if host in result.by_host:
+                raise ValueError(f"{path}:{n}: {host} already has a login on an earlier line")
+            result.by_host[host] = cred
+        else:
+            result.default.append(cred)
+    if not result.by_host and not result.default:
+        raise ValueError(f"{path}: no logins")
+    return result
 
 
 def find_credentials_file(explicit: str | None) -> Path | None:
@@ -570,6 +619,10 @@ def probe_camera(xaddr: str, credentials: list[Credential], timeout: float = 5.0
     cam = Camera(host=urllib.parse.urlparse(xaddr).hostname or xaddr, xaddr=xaddr)
     tried: list[str] = []
     faults: list[str] = []
+    if not credentials:
+        cam.error = f"no login for this camera: add a line '{cam.host} user:password' to .cam"
+        log.debug("[%s] %s (no request with a login was sent)", cam.host, cam.error)
+        return cam
     log.debug("[%s] probing %s with %d login(s)", cam.host, xaddr, len(credentials))
     for cred in credentials:
         log.debug(
@@ -622,28 +675,34 @@ def probe_camera(xaddr: str, credentials: list[Credential], timeout: float = 5.0
         return cam
     if tried:
         cam.error = (
-            "login rejected for every user in the credentials file "
-            f"(tried: {', '.join(tried)}; camera said: {'; '.join(faults)})"
+            f"login rejected (tried: {', '.join(tried)}; camera said: {'; '.join(faults)}); "
+            "not retried, to avoid locking the account"
         )
-    else:
-        cam.error = "no credentials to try"
     return cam
 
 
 def failure_hints(cams: list[Camera]) -> list[str]:
-    """Next steps for cameras that answered but refused every login."""
-    if not any(c.error and c.error.startswith("login rejected") for c in cams):
-        return []
-    return [
-        "",
-        "Cameras that rejected the login:",
-        "  - Each camera needs its own user:pass line in the credentials file; every line",
-        "    is tried on every camera, so cameras with different passwords can share it.",
-        "  - Check the password by logging in to the camera's web page or app with the same user.",
-        "  - Some cameras lock the account for a while after several failed logins:",
-        "    wait a few minutes before retrying.",
-        "  - Run again with --verbose to see each step and the camera's reply.",
-    ]
+    """Next steps for cameras that refused the login or had none to try."""
+    rejected = [c for c in cams if c.error and c.error.startswith("login rejected")]
+    missing = [c for c in cams if c.error and c.error.startswith("no login for")]
+    hints: list[str] = []
+    if rejected:
+        hints += [
+            "",
+            "Cameras that rejected the login (each was tried once, so nothing is locked out):",
+            "  - Check the password by logging in to the camera's web page or app.",
+            "  - Give each camera its own line in .cam, e.g. "
+            + f"'{rejected[0].host} admin:its-password'.",
+            "  - If a camera is already locked, wait a few minutes before running this again.",
+            "  - Run with --verbose to see the camera's reply.",
+        ]
+    if missing:
+        hints += [
+            "",
+            "Cameras with no login in .cam (nothing was sent to them):",
+            "  - Add a line per camera: " + f"'{missing[0].host} admin:its-password'.",
+        ]
+    return hints
 
 
 def resolve_host(host: str, timeout: float = 3.0) -> str | None:
@@ -871,6 +930,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=float, default=3.0, help="discovery wait (seconds)")
     parser.add_argument("--interface-ip", help="local IP of the interface to discover on")
     parser.add_argument(
+        "--try-all-logins",
+        action="store_true",
+        help="for cameras without their own .cam line, try every plain user:pass line "
+        "(default: only the first). Wrong passwords can lock a camera - use with care",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         "--debug",
@@ -893,15 +958,28 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError) as e:
         print(f"Credentials: {e}", file=sys.stderr)
         return 2
-    log.debug("credentials: %d login(s) from %s", len(credentials), cred_path)
-    for i, cr in enumerate(credentials, start=1):
+    log.debug(
+        "credentials: %d camera line(s), %d fallback login(s) from %s",
+        len(credentials.by_host),
+        len(credentials.default),
+        cred_path,
+    )
+    labelled = [(h, cr) for h, cr in credentials.by_host.items()]
+    labelled += [("fallback", cr) for cr in credentials.default]
+    for label, cr in labelled:
         extras = ", non-ASCII characters" if not cr.password.isascii() else ""
         log.debug(
-            "credentials: #%d user %r, password %d characters%s",
-            i,
+            "credentials: %s user %r, password %d characters%s",
+            label,
             cr.user,
             len(cr.password),
             extras,
+        )
+    if len(credentials.default) > 1 and not args.try_all_logins:
+        print(
+            f"NOTE: {len(credentials.default)} fallback logins in {cred_path}; only the first is "
+            "used. Give each camera its own 'IP user:password' line, or pass --try-all-logins.",
+            file=sys.stderr,
         )
     warning = credentials_file_warning(cred_path)
     if warning:
@@ -927,7 +1005,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     with ThreadPoolExecutor(max_workers=8) as pool:
-        cams = list(pool.map(lambda x: probe_camera(x, credentials), xaddrs))
+
+        def probe(xaddr: str) -> Camera:
+            host = urllib.parse.urlparse(xaddr).hostname or xaddr
+            logins, source = credentials.for_host(host, args.try_all_logins)
+            log.debug("[%s] login source: %s (%d to try)", host, source, len(logins))
+            return probe_camera(xaddr, logins)
+
+        cams = list(pool.map(probe, xaddrs))
     cams.sort(key=lambda c: tuple(int(p) if p.isdigit() else 0 for p in c.host.split(".")))
 
     print(f"\nFound {len(cams)} camera(s):")
