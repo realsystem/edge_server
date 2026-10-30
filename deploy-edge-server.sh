@@ -631,6 +631,18 @@ disable_frigate_mqtt() {
     esac
 }
 
+# Older versions of this script wrote "motion: mask: []" for cameras. Current
+# Frigate expects masks as a dictionary and refuses to start on the empty
+# list, so remove that exact (empty, meaningless) pair from a kept config.
+repair_frigate_config() {
+    local cfg="$1"
+    if grep -qx '      mask: \[\]' "$cfg"; then
+        cp -p "$cfg" "${cfg}.bak.$(date +%Y%m%d%H%M%S)"
+        sed -i '/^    motion:$/{N;/\n      mask: \[\]$/d}' "$cfg"
+        warn "Removed empty 'motion: mask: []' entries Frigate no longer accepts (backup saved)"
+    fi
+}
+
 create_app_stack() {
     info "Creating application stack at $APP_DIR..."
 
@@ -742,13 +754,15 @@ EOF
 
     # Without an Intel GPU the device mapping makes `docker compose up` fail
     # outright, so drop it (and VA-API below) on machines that lack it.
-    local hwaccel_line="  hwaccel_args: preset-vaapi"
+    local ffmpeg_block=$'ffmpeg:\n  hwaccel_args: preset-vaapi'
     if [[ -e /dev/dri/renderD128 ]]; then
         sed -i "s| (__HWACCEL__)||" "$APP_DIR/docker-compose.yml"
     else
         warn "No /dev/dri/renderD128 - Frigate will run without hardware acceleration"
         sed -i '/__HWACCEL__/d; /^    devices:$/d' "$APP_DIR/docker-compose.yml"
-        hwaccel_line="  # hwaccel_args: preset-vaapi  # no Intel GPU detected"
+        # No `ffmpeg:` key at all: a key with only a comment under it is null,
+        # which Frigate's config loader crashes on.
+        ffmpeg_block="# no Intel GPU detected: hardware acceleration (preset-vaapi) off"
     fi
 
     #---------------------------------------------------------------------------
@@ -831,8 +845,7 @@ detectors:
     type: cpu
     num_threads: 2
 
-ffmpeg:
-${hwaccel_line}
+${ffmpeg_block}
 
 record:
   enabled: true
@@ -860,8 +873,6 @@ cameras:
         - car
         - dog
         - cat
-    motion:
-      mask: []
 
   # Example: Add your cameras here
   # barn_cam:
@@ -894,6 +905,7 @@ EOF
         if [[ "$INSTALL_MQTT" != "true" ]]; then
             disable_frigate_mqtt "$frigate_cfg"
         fi
+        repair_frigate_config "$frigate_cfg"
     else
         info "Created Frigate config: $frigate_cfg"
     fi

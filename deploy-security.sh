@@ -270,8 +270,10 @@ EOF
     # Frigate configuration with go2rtc
     #---------------------------------------------------------------------------
     step "Creating Frigate config..."
-    local hwaccel_line="  hwaccel_args: preset-vaapi"
-    [[ -e /dev/dri/renderD128 ]] || hwaccel_line="  # hwaccel_args: preset-vaapi  # no Intel GPU detected"
+    # No `ffmpeg:` key at all without a GPU: a key with only a comment under
+    # it is null, which Frigate's config loader crashes on.
+    local ffmpeg_block=$'ffmpeg:\n  hwaccel_args: preset-vaapi'
+    [[ -e /dev/dri/renderD128 ]] || ffmpeg_block="# no Intel GPU detected: hardware acceleration (preset-vaapi) off"
     # An existing config holds your cameras, zones and masks, so a re-deploy
     # (update) keeps it and writes the current template to config.yml.new for
     # reference. Set FRIGATE_CONFIG_OVERWRITE=true to regenerate it instead;
@@ -335,8 +337,7 @@ go2rtc:
 #-------------------------------------------------------------------------------
 # Hardware Acceleration - Intel VA-API
 #-------------------------------------------------------------------------------
-ffmpeg:
-${hwaccel_line}
+${ffmpeg_block}
 
 detectors:
   cpu1:
@@ -406,8 +407,6 @@ cameras:
       width: 640
       height: 360
       fps: 5
-    motion:
-      mask: []
 
   cam2_rear:
     enabled: true
@@ -424,8 +423,6 @@ cameras:
       width: 640
       height: 360
       fps: 5
-    motion:
-      mask: []
 
   cam3_side:
     enabled: true
@@ -442,8 +439,6 @@ cameras:
       width: 640
       height: 360
       fps: 5
-    motion:
-      mask: []
 
   cam4_gate:
     enabled: true
@@ -460,8 +455,6 @@ cameras:
       width: 640
       height: 360
       fps: 5
-    motion:
-      mask: []
 EOF
     chmod 600 "$frigate_out"  # contains credentials
     if [[ "$frigate_out" != "$frigate_cfg" ]]; then

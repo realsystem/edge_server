@@ -11,6 +11,10 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+  # Weekly, so a new Frigate "stable" that rejects our configs is noticed
+  # before the next deploy pulls it.
+  schedule:
+    - cron: "23 14 * * 1"
 
 permissions:
   contents: read
@@ -223,6 +227,24 @@ jobs:
             [[ "$file" == *mac* ]] && env_args=(--env-file tests/.env.mac)
             docker compose -f "$file" "${env_args[@]}" config -q
           done
+
+  frigate-config:
+    name: Frigate accepts generated configs
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Pull Frigate image
+        run: docker pull -q ghcr.io/blakeblackshear/frigate:stable
+
+      - name: Validate deploy and discovery configs with Frigate
+        run: ./tests/validate-frigate-configs.sh
 
   integration-test:
     name: Integration test (Docker)
