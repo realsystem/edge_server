@@ -2,20 +2,22 @@
 
 [![Test](https://github.com/realsystem/edge_server/actions/workflows/test.yml/badge.svg)](https://github.com/realsystem/edge_server/actions/workflows/test.yml)
 
-Headless Ubuntu edge server for Frigate NVR, Home Assistant, Mosquitto MQTT, and Tailscale.
+Headless Ubuntu edge server for Frigate NVR and Tailscale, with optional Home Assistant and
+Mosquitto MQTT.
 
 ## Components
 
 | Component | Purpose | Alternatives | Cost | Complexity |
 |-----------|---------|--------------|------|------------|
 | **Frigate NVR** | Open-source network video recorder with real-time AI object detection (people, cars, animals). Integrates with IP cameras and sends alerts only when something meaningful happens. | Blue Iris ($70), Shinobi, ZoneMinder, cloud NVRs (Ring, Nest) | Free (benefits from Coral TPU $25-60) | Medium-high |
-| **Home Assistant** | Open-source home automation hub. Unifies smart devices across vendors (Zigbee, Z-Wave, WiFi, Matter) into one dashboard with automations. | openHAB, Hubitat ($150), SmartThings, Apple HomeKit | Free ($6.50/mo optional cloud) | Medium |
-| **Mosquitto MQTT** | Lightweight message broker implementing MQTT protocol. The glue between Frigate, Home Assistant, and IoT sensors via publish/subscribe topics. | EMQX, HiveMQ, RabbitMQ, AWS IoT Core | Free | Low |
+| **Home Assistant** *(optional, off by default)* | Open-source home automation hub. Unifies smart devices across vendors (Zigbee, Z-Wave, WiFi, Matter) into one dashboard with automations. | openHAB, Hubitat ($150), SmartThings, Apple HomeKit | Free ($6.50/mo optional cloud) | Medium |
+| **Mosquitto MQTT** *(optional, off by default)* | Lightweight message broker implementing MQTT protocol. The glue between Frigate, Home Assistant, and IoT sensors via publish/subscribe topics. | EMQX, HiveMQ, RabbitMQ, AWS IoT Core | Free | Low |
 | **Tailscale** | Zero-config mesh VPN built on WireGuard. Secure remote access without exposing ports to the internet. | WireGuard (manual), ZeroTier, OpenVPN, Cloudflare Tunnel | Free (personal use) | Very low |
 
 ## Plugins
 
-Optional monitoring plugins that integrate with Home Assistant via MQTT.
+Optional monitoring plugins. They publish to Home Assistant via MQTT when
+`INSTALL_MQTT=true`; otherwise their readings are only logged.
 
 | Plugin | Purpose | Requirements |
 |--------|---------|--------------|
@@ -101,11 +103,46 @@ sudo ./deploy-edge-server.sh
 eval "$(./secrets.sh export)"
 sudo -E ./deploy-edge-server.sh
 
-# Option C: Batch mode (no prompts, fails if secrets missing)
+# Option C: Batch mode (no prompts)
 export BATCH_MODE=true
 eval "$(./secrets.sh export)"
-sudo -E ./deploy-security.sh
+sudo -E ./deploy-edge-server.sh
 ```
+
+By default this deploys **Frigate only**. Add Home Assistant and/or the MQTT
+broker with `INSTALL_HOMEASSISTANT=true` / `INSTALL_MQTT=true` (environment, or
+`[deploy]` in `bootstrap.cfg`). Turning them off on an existing server removes
+their containers but keeps `ha-config/` and `mosquitto/`, so they can be
+switched back on later.
+
+### Cameras (automatic discovery)
+
+ONVIF cameras on the same network are found and added to Frigate
+automatically. Put the camera logins in a `.cam` file next to the scripts, one
+`user:pass` per line (each camera is tried with each login):
+
+```bash
+printf 'admin:your-camera-password\n' > .cam
+chmod 600 .cam
+```
+
+The deploy script then adds every new camera it finds, recording from the
+highest-resolution stream and detecting on the lowest. Cameras already in the
+Frigate config (matched by IP) are left alone, and the config is backed up
+before any change. `.cam` is git-ignored; a root-only copy is kept at
+`/opt/edge-server/.cam`.
+
+To look for cameras again later (e.g. after adding one):
+
+```bash
+sudo ./discover-cameras.sh --dry-run          # show what would be added
+sudo ./discover-cameras.sh                    # add them and restart Frigate
+sudo ./discover-cameras.sh --host 192.168.1.50   # camera on another subnet
+```
+
+Cameras need ONVIF turned on (Reolink: *Settings > Network > Advanced > Server
+settings*). Discovery only reaches cameras on the server's own network
+segment; use `--host` for others.
 
 ### Updating an existing server
 
@@ -114,7 +151,7 @@ services in place:
 
 ```bash
 git pull
-eval "$(./secrets.sh export)"   # keep the current MQTT password
+eval "$(./secrets.sh export)"   # only needed with INSTALL_MQTT=true
 sudo -E ./deploy-edge-server.sh
 ```
 
@@ -128,9 +165,9 @@ config from the template instead, run with `FRIGATE_CONFIG_OVERWRITE=true`
 
 | Service | URL |
 |---------|-----|
-| Home Assistant | `http://<ip>:8123` |
 | Frigate | `http://<ip>:5000` |
-| MQTT | `<ip>:1883` |
+| Home Assistant (if installed) | `http://<ip>:8123` |
+| MQTT (if installed) | `<ip>:1883` |
 
 Get Tailscale auth key: [admin console](https://login.tailscale.com/admin/settings/keys)
 

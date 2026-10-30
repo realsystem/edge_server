@@ -942,6 +942,45 @@ EOF
 }
 
 #-------------------------------------------------------------------------------
+# CAMERA DISCOVERY
+#-------------------------------------------------------------------------------
+
+# Find ONVIF cameras and add new ones to the Frigate config, using the logins
+# in a .cam file (one user:pass per line). Skipped when there is no .cam file.
+discover_cameras() {
+    local script_dir cred_file="" candidate
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    for candidate in "${CAM_CREDENTIALS_FILE:-}" "$script_dir/.cam" "$APP_DIR/.cam"; do
+        if [[ -n "$candidate" && -f "$candidate" ]]; then
+            cred_file="$candidate"
+            break
+        fi
+    done
+    if [[ -z "$cred_file" ]]; then
+        info "No .cam file with camera logins - skipping camera discovery"
+        return 0
+    fi
+
+    # Keep a root-only copy next to the stack for later discover-cameras.sh runs
+    if [[ "$cred_file" != "$APP_DIR/.cam" ]]; then
+        install -m 600 "$cred_file" "$APP_DIR/.cam"
+    fi
+    chmod 600 "$APP_DIR/.cam"
+
+    if [[ ! -f "$script_dir/tools/camera_discovery.py" ]] || ! command -v python3 &>/dev/null; then
+        warn "Camera discovery tool or python3 missing - skipping camera discovery"
+        return 0
+    fi
+
+    info "Discovering cameras on the network..."
+    if ! python3 "$script_dir/tools/camera_discovery.py" \
+        --credentials "$APP_DIR/.cam" --config "$APP_DIR/frigate/config.yml" --apply; then
+        warn "Camera discovery failed - add cameras to $APP_DIR/frigate/config.yml by hand"
+    fi
+}
+
+#-------------------------------------------------------------------------------
 # SYSTEMD SERVICE
 #-------------------------------------------------------------------------------
 
@@ -1185,6 +1224,7 @@ main() {
     configure_firewall
     configure_storage
     create_app_stack
+    discover_cameras
     create_systemd_service
     start_services
     install_victron

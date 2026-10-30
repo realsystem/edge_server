@@ -42,7 +42,10 @@ class Bootstrap:
         "deploy-edge-server.sh",
         "deploy-security.sh",
         "secrets.sh",
+        "discover-cameras.sh",
         "plugins",  # deploy-edge-server.sh looks for plugins/ next to itself
+        "tools",  # camera discovery
+        ".cam",  # camera logins (user:pass per line), if present
     ]
 
     # /var/tmp survives the reboot at the end of initial setup; /tmp does not,
@@ -279,13 +282,18 @@ class Bootstrap:
         # Copy scripts
         self.progress.info(f"Copying scripts to {self.target}:{self.REMOTE_DIR}...")
         self._remote.mkdir(self.REMOTE_DIR)
+        # Private: the copied files can include .cam (camera logins)
+        self._remote.run(f"chmod 700 {self.REMOTE_DIR}")
         scripts = [self.script_dir / s for s in self.SCRIPTS if (self.script_dir / s).exists()]
         self.progress.info(f"  Scripts: {', '.join(s.name for s in scripts)}")
         if not self._remote.copy_files(scripts, self.REMOTE_DIR):
             self.progress.fail("Failed to copy scripts")
             self.state.complete_phase(Phase.PREREQUISITES, PhaseStatus.FAILED, "Copy failed", start)
             return False
-        self._remote.run(f"chmod +x {self.REMOTE_DIR}/*.sh")
+        self._remote.run(
+            f"chmod +x {self.REMOTE_DIR}/*.sh && "
+            f"if [ -f {self.REMOTE_DIR}/.cam ]; then chmod 600 {self.REMOTE_DIR}/.cam; fi"
+        )
         self.progress.ok(f"Copied {len(scripts)} scripts")
 
         self.state.complete_phase(Phase.PREREQUISITES, PhaseStatus.SUCCESS, "OK", start)

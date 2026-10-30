@@ -652,3 +652,105 @@ class TestFrigateOnlyDefault:
         )
         _, result = self.run(stub_path, tmp_path, body=body)
         assert "MQTT password" not in result.stdout
+
+
+# --------------------------------------------------------------------------
+# Camera discovery wiring
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_python(stub_path):
+    """python3 stub that records its arguments instead of probing the network."""
+    py = stub_path / "python3"
+    py.write_text('#!/usr/bin/env bash\necho "python3 $*" >> "$STUB_LOG"\n')
+    py.chmod(0o755)
+    return stub_path / "log"
+
+
+class TestDiscoverCamerasInDeploy:
+    def run(self, stub_path, tmp_path, **env):
+        app = tmp_path / "app"
+        (app / "frigate").mkdir(parents=True, exist_ok=True)
+        full_env = {"EDGE_SERVER_DIR": str(app), **env}
+        result = run_sourced("deploy-edge-server.sh", "discover_cameras", stub_path, full_env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        return app, result
+
+    def test_skipped_without_cam_file(self, stub_path, tmp_path, fake_python):
+        _, result = self.run(stub_path, tmp_path, CAM_CREDENTIALS_FILE=str(tmp_path / "none"))
+        assert "skipping camera discovery" in result.stdout
+        assert not fake_python.exists()
+
+    def test_runs_tool_with_private_copy(self, stub_path, tmp_path, fake_python):
+        cam = tmp_path / "my.cam"
+        cam.write_text("admin:secret\n")
+        cam.chmod(0o644)
+        app, _ = self.run(stub_path, tmp_path, CAM_CREDENTIALS_FILE=str(cam))
+        copy = app / ".cam"
+        assert copy.read_text() == "admin:secret\n"
+        assert stat.S_IMODE(copy.stat().st_mode) == 0o600
+        call = fake_python.read_text()
+        assert "tools/camera_discovery.py" in call
+        assert f"--credentials {copy}" in call
+        assert f"--config {app}/frigate/config.yml --apply" in call
+
+    def test_tool_failure_is_a_warning(self, stub_path, tmp_path):
+        py = stub_path / "python3"
+        py.write_text("#!/usr/bin/env bash\nexit 1\n")
+        py.chmod(0o755)
+        cam = tmp_path / "my.cam"
+        cam.write_text("a:b\n")
+        _, result = self.run(stub_path, tmp_path, CAM_CREDENTIALS_FILE=str(cam))
+        assert "add cameras to" in result.stdout
+
+    def test_deploy_main_runs_discovery_before_start(self):
+        text = (REPO / "deploy-edge-server.sh").read_text()
+        main_body = text[text.index("main() {") :]
+        assert main_body.index("discover_cameras") < main_body.index("start_services")
+
+
+class TestDiscoverCamerasWrapper:
+    WRAPPER = REPO / "discover-cameras.sh"
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="checks the non-root refusal")
+    def test_requires_root(self):
+        result = run_bash(str(self.WRAPPER))
+        assert result.returncode == 1 and "sudo" in result.stderr
+
+    @pytest.mark.skipif(os.geteuid() != 0, reason="wrapper only runs as root")
+    def test_restarts_frigate_only_when_config_changes(self, stub_path, tmp_path):
+        app = tmp_path / "app"
+        (app / "frigate").mkdir(parents=True)
+        cfg = app / "frigate" / "config.yml"
+        cfg.write_text("cameras:\n")
+        cam = tmp_path / "x.cam"
+        cam.write_text("a:b\n")
+        py = stub_path / "python3"
+        env = {
+            "PATH": f"{stub_path}:{os.environ['PATH']}",
+            "STUB_LOG": str(stub_path / "log"),
+            "EDGE_SERVER_DIR": str(app),
+            "CAM_CREDENTIALS_FILE": str(cam),
+        }
+        # 1) tool changes nothing -> no restart
+        py.write_text('#!/usr/bin/env bash\necho "python3 $*" >> "$STUB_LOG"\n')
+        py.chmod(0o755)
+        result = run_bash(f"{self.WRAPPER} --dry-run --host 10.0.0.5", env=env)
+        assert result.returncode == 0, result.stderr
+        log = (stub_path / "log").read_text()
+        assert "--apply" not in log and "--host 10.0.0.5" in log
+        assert "restart frigate" not in log
+        # 2) tool adds a camera -> Frigate restarted
+        py.write_text(f'#!/usr/bin/env bash\necho "  new: {{}}" >> {cfg}\n')
+        result = run_bash(str(self.WRAPPER), env=env)
+        assert result.returncode == 0, result.stderr
+        assert "docker compose restart frigate" in (stub_path / "log").read_text()
+
+    @pytest.mark.skipif(os.geteuid() != 0, reason="wrapper only runs as root")
+    def test_missing_cam_file(self, tmp_path):
+        env = {"EDGE_SERVER_DIR": str(tmp_path), "CAM_CREDENTIALS_FILE": str(tmp_path / "nope")}
+        result = run_bash(f"cd {tmp_path} && {self.WRAPPER}", env=env)
+        if (REPO / ".cam").exists():
+            pytest.skip("a real .cam exists in the repo checkout")
+        assert result.returncode == 1 and "No .cam file" in result.stderr

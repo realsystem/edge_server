@@ -254,6 +254,19 @@ class TestPrerequisites:
         assert copied == ["initial-setup.sh", "secrets.sh", "plugins"]
         assert b.ssh.copy_files.call_args.args[1] == "/var/tmp/edge-server-setup"
 
+    def test_copies_camera_logins_privately(self, tmp_path):
+        (tmp_path / ".cam").write_text("admin:x\n")
+        (tmp_path / "tools").mkdir()
+        b = make(script_dir=tmp_path)
+        b.ssh.copy_files.return_value = True
+        with patch("bootstrap.shutil.which", return_value="/usr/bin/x"):
+            assert b._phase_prerequisites() is True
+        copied = [p.name for p in b.ssh.copy_files.call_args.args[0]]
+        assert copied == ["tools", ".cam"]
+        cmds = commands(b)
+        assert cmds[0] == "chmod 700 /var/tmp/edge-server-setup"
+        assert "chmod 600 /var/tmp/edge-server-setup/.cam" in cmds[1]
+
     def test_missing_tool_fails_real_run(self):
         b = make()
         with patch("bootstrap.shutil.which", return_value=None):

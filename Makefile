@@ -15,7 +15,7 @@ LITE_COMPOSE := $(TESTS_DIR)/docker-compose.lite.yml
 FULL_COMPOSE := $(TESTS_DIR)/docker-compose.mac.yml
 HARNESS_COMPOSE := $(TESTS_DIR)/docker-compose.test-harness.yml
 
-.PHONY: help setup pytest ci-local check check-mem-lite check-mem-full test test-dev test-ci test-full test-full-dev test-scripts start start-full stop status logs clean reset lint mem target-start target-stop target-ssh victron-setup victron-check victron-scan victron-install victron-test nut-install nut-status nut-uninstall renogy-setup renogy-check renogy-scan renogy-install renogy-test ha-test ha-test-stop
+.PHONY: help setup pytest ci-local discover-cameras check check-mem-lite check-mem-full test test-dev test-ci test-full test-full-dev test-scripts start start-full stop status logs clean reset lint mem target-start target-stop target-ssh victron-setup victron-check victron-scan victron-install victron-test nut-install nut-status nut-uninstall renogy-setup renogy-check renogy-scan renogy-install renogy-test ha-test ha-test-stop
 
 help:
 	@echo "Edge Server - Local Testing"
@@ -24,6 +24,7 @@ help:
 	@echo "  make setup          - Create Python venv and install dependencies"
 	@echo "  make pytest         - Run Python unit tests"
 	@echo "  make ci-local       - Run the CI lint/type/test checks locally"
+	@echo "  make discover-cameras - Find ONVIF cameras and add them to Frigate"
 	@echo "  make test           - Run lite tests with pass/fail (auto-teardown)"
 	@echo "  make test-dev       - Lite tests, leave stack running"
 	@echo "  make test-full      - Run full tests (4 cameras, HA, auto-teardown)"
@@ -104,10 +105,10 @@ pytest: $(VENV_DIR)
 
 # Same checks as CI (.github/workflows/test.yml), without Docker
 ci-local: $(VENV_DIR)
-	@$(PYTHON) -m ruff check src tests
-	@$(PYTHON) -m black --check src tests
-	@$(PYTHON) -m mypy src --ignore-missing-imports
-	@$(PYTHON) -m pytest tests/ --cov=src --cov-report=term-missing
+	@$(PYTHON) -m ruff check src tests tools
+	@$(PYTHON) -m black --check src tests tools
+	@$(PYTHON) -m mypy src tools --ignore-missing-imports
+	@$(PYTHON) -m pytest tests/ --cov=src --cov=tools --cov-report=term-missing
 	@./tests/test-scripts.sh
 
 $(VENV_DIR):
@@ -231,6 +232,10 @@ clean: stop
 reset: clean
 	@docker compose -f $(LITE_COMPOSE) pull 2>/dev/null || true
 	@echo "Ready. Run: make test"
+
+# Find ONVIF cameras and add them to Frigate (needs .cam with user:pass lines)
+discover-cameras:
+	@sudo ./discover-cameras.sh
 
 # Run shell script unit tests
 test-scripts:
