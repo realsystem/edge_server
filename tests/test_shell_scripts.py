@@ -13,8 +13,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
-
-yaml = pytest.importorskip("yaml")
+import yaml
 
 REPO = Path(__file__).resolve().parent.parent
 BASH = shutil.which("bash")

@@ -10,10 +10,9 @@ import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
+import yaml
 
 import camera_discovery as cd
-
-yaml = pytest.importorskip("yaml")
 
 USER, PASSWORD = "admin", "p@ss:w/rd {x}"
 CLOCK_OFFSET = 3600  # camera clock runs an hour ahead (common in the field)
