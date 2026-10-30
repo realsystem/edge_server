@@ -433,3 +433,75 @@ class TestDeploySecurity:
         if "is not a docker command" in real.stderr:
             pytest.skip("docker compose plugin not installed")
         assert real.returncode == 0, real.stderr
+
+
+# --------------------------------------------------------------------------
+# Re-deploy (update) must not wipe a customised Frigate config
+# --------------------------------------------------------------------------
+
+CUSTOM_FRIGATE = "# my cameras\ncameras:\n  barn_cam:\n    enabled: true\n"
+
+
+@pytest.mark.parametrize(
+    "script,func,extra_env",
+    [
+        ("deploy-edge-server.sh", "create_app_stack", {"MQTT_USER": "u", "MQTT_PASS": "p"}),
+        (
+            "deploy-security.sh",
+            "create_configs",
+            {"REOLINK_USER": "admin", "REOLINK_PASS": "campass"},
+        ),
+    ],
+)
+class TestFrigateConfigPreserved:
+    def run(self, stub_path, tmp_path, script, func, extra_env, **more):
+        env = {
+            "EDGE_SERVER_DIR": str(tmp_path / "app"),
+            "EDGE_STORAGE_DIR": str(tmp_path / "storage"),
+            **extra_env,
+            **more,
+        }
+        result = run_sourced(script, func, stub_path, env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        return tmp_path / "app" / "frigate", result
+
+    def seed(self, tmp_path):
+        frigate = tmp_path / "app" / "frigate"
+        frigate.mkdir(parents=True)
+        cfg = frigate / "config.yml"
+        cfg.write_text(CUSTOM_FRIGATE)
+        cfg.chmod(0o644)
+        return cfg
+
+    def test_fresh_install_creates_config(self, stub_path, tmp_path, script, func, extra_env):
+        frigate, result = self.run(stub_path, tmp_path, script, func, extra_env)
+        assert yaml.safe_load((frigate / "config.yml").read_text())["cameras"]
+        assert not (frigate / "config.yml.new").exists()
+        assert "Created Frigate config" in result.stdout
+
+    def test_redeploy_keeps_existing_config(self, stub_path, tmp_path, script, func, extra_env):
+        cfg = self.seed(tmp_path)
+        frigate, result = self.run(stub_path, tmp_path, script, func, extra_env)
+        assert cfg.read_text() == CUSTOM_FRIGATE
+        assert stat.S_IMODE(cfg.stat().st_mode) == 0o600
+        new = frigate / "config.yml.new"
+        assert yaml.safe_load(new.read_text())["mqtt"]["enabled"] is True
+        assert stat.S_IMODE(new.stat().st_mode) == 0o600
+        assert "Kept existing Frigate config" in result.stdout
+
+    def test_overwrite_flag_regenerates_with_backup(
+        self, stub_path, tmp_path, script, func, extra_env
+    ):
+        cfg = self.seed(tmp_path)
+        frigate, _ = self.run(
+            stub_path, tmp_path, script, func, extra_env, FRIGATE_CONFIG_OVERWRITE="true"
+        )
+        assert cfg.read_text() != CUSTOM_FRIGATE
+        backups = list(frigate.glob("config.yml.bak.*"))
+        assert len(backups) == 1 and backups[0].read_text() == CUSTOM_FRIGATE
+        assert not (frigate / "config.yml.new").exists()
+
+    def test_replaces_empty_dir_left_by_docker(self, stub_path, tmp_path, script, func, extra_env):
+        (tmp_path / "app" / "frigate" / "config.yml").mkdir(parents=True)
+        frigate, _ = self.run(stub_path, tmp_path, script, func, extra_env)
+        assert (frigate / "config.yml").is_file()

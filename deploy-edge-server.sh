@@ -43,6 +43,9 @@ MQTT_PASS="${MQTT_PASS:-}"
 # Batch mode - skip interactive prompts (set to "true" for automated runs)
 BATCH_MODE="${BATCH_MODE:-false}"
 
+# Frigate config: kept on re-deploy unless this is "true" (old one is backed up)
+FRIGATE_CONFIG_OVERWRITE="${FRIGATE_CONFIG_OVERWRITE:-false}"
+
 # Victron Smart Shunt (optional BLE battery monitor)
 # Set to "true" to install, or leave empty to be prompted
 VICTRON_INSTALL="${VICTRON_INSTALL:-}"
@@ -706,7 +709,26 @@ EOF
     #---------------------------------------------------------------------------
     # Frigate Configuration
     #---------------------------------------------------------------------------
-    cat > "$APP_DIR/frigate/config.yml" << EOF
+    # An existing config holds your cameras, zones and masks, so a re-deploy
+    # (update) keeps it and writes the current template to config.yml.new for
+    # reference. Set FRIGATE_CONFIG_OVERWRITE=true to regenerate it instead;
+    # the old file is then backed up to config.yml.bak.<timestamp>.
+    local frigate_cfg="$APP_DIR/frigate/config.yml"
+    local frigate_out="$frigate_cfg"
+    if [[ -d "$frigate_cfg" ]]; then
+        # Docker creates an empty directory when the bind-mount source is
+        # missing; replace it with the real file.
+        rmdir "$frigate_cfg" 2>/dev/null || true
+    fi
+    if [[ -f "$frigate_cfg" ]]; then
+        if [[ "$FRIGATE_CONFIG_OVERWRITE" == "true" ]]; then
+            cp -p "$frigate_cfg" "${frigate_cfg}.bak.$(date +%Y%m%d%H%M%S)"
+            warn "Regenerating Frigate config (previous one backed up)"
+        else
+            frigate_out="${frigate_cfg}.new"
+        fi
+    fi
+    cat > "$frigate_out" << EOF
 # Frigate NVR Configuration
 # Documentation: https://docs.frigate.video/
 
@@ -779,8 +801,14 @@ cameras:
   #       - cow
 EOF
 
-    # Contains the MQTT password
-    chmod 600 "$APP_DIR/frigate/config.yml"
+    chmod 600 "$frigate_out"  # contains credentials
+    if [[ "$frigate_out" != "$frigate_cfg" ]]; then
+        chmod 600 "$frigate_cfg"
+        info "Kept existing Frigate config: $frigate_cfg"
+        info "Latest template written to ${frigate_out} (FRIGATE_CONFIG_OVERWRITE=true to replace)"
+    else
+        info "Created Frigate config: $frigate_cfg"
+    fi
 
     #---------------------------------------------------------------------------
     # Home Assistant Initial Configuration

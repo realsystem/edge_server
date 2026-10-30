@@ -107,6 +107,23 @@ eval "$(./secrets.sh export)"
 sudo -E ./deploy-security.sh
 ```
 
+### Updating an existing server
+
+Re-running the deploy script updates images, compose file, firewall and
+services in place:
+
+```bash
+git pull
+eval "$(./secrets.sh export)"   # keep the current MQTT password
+sudo -E ./deploy-edge-server.sh
+```
+
+Your Frigate config (`frigate/config.yml`) and Home Assistant
+`configuration.yaml` are kept; the latest Frigate template is written next to
+it as `frigate/config.yml.new` so you can compare. To regenerate the Frigate
+config from the template instead, run with `FRIGATE_CONFIG_OVERWRITE=true`
+(the old file is saved as `config.yml.bak.<timestamp>`).
+
 ## 6. Post-Deployment
 
 | Service | URL |
