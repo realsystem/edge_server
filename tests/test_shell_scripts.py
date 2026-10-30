@@ -311,9 +311,8 @@ class TestDeployEdgeServer:
         assert set(compose["services"]) == {"mosquitto", "homeassistant", "frigate"}
         frigate = compose["services"]["frigate"]
         assert f"{storage}/frigate:/media/frigate" in frigate["volumes"]
-        if not Path("/dev/dri/renderD128").exists():
-            # Without an Intel GPU the device mapping would break `compose up`
-            assert "devices" not in frigate
+        # Hardware acceleration is opt-in, so no device mapping by default
+        assert "devices" not in frigate
 
     def test_frigate_config_valid_and_private(self, stack):
         app, _, _ = stack
@@ -801,8 +800,7 @@ class TestFrigateMaskFormat:
         cfg = yaml.safe_load((tmp_path / "app" / "frigate" / "config.yml").read_text())
         nulls = [k for k, v in cfg.items() if v is None]
         assert nulls == []
-        if not Path("/dev/dri/renderD128").exists():
-            assert "ffmpeg" not in cfg
+        assert "ffmpeg" not in cfg  # hwaccel is opt-in
 
     def test_kept_config_repaired_with_backup(self, stub_path, tmp_path):
         frigate = tmp_path / "app" / "frigate"
@@ -842,3 +840,55 @@ class TestFrigateMaskFormat:
         )
         assert cfg.read_text() == "mqtt:\n  enabled: false\ncameras:\n  a:\n    enabled: true\n"
         assert not list(frigate.glob("config.yml.bak.*"))
+
+
+# --------------------------------------------------------------------------
+# Frigate must be able to write its config dir (UI "Save", database)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "script,func,env",
+    [
+        ("deploy-edge-server.sh", "create_app_stack", {}),
+        ("deploy-security.sh", "create_configs", {"REOLINK_USER": "a", "REOLINK_PASS": "b"}),
+    ],
+)
+def test_frigate_config_dir_mounted_writable(stub_path, tmp_path, script, func, env):
+    full_env = {"EDGE_SERVER_DIR": str(tmp_path / "app"), **env}
+    result = run_sourced(script, func, stub_path, full_env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    compose = yaml.safe_load((tmp_path / "app" / "docker-compose.yml").read_text())
+    volumes = compose["services"]["frigate"]["volumes"]
+    config_mounts = [v for v in volumes if isinstance(v, str) and ":/config" in v]
+    assert config_mounts == ["./frigate:/config"]
+
+
+# --------------------------------------------------------------------------
+# Hardware acceleration is opt-in
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "script,func,env",
+    [
+        ("deploy-edge-server.sh", "create_app_stack", {}),
+        ("deploy-security.sh", "create_configs", {"REOLINK_USER": "a", "REOLINK_PASS": "b"}),
+    ],
+)
+def test_hwaccel_enabled_only_on_request(stub_path, tmp_path, script, func, env):
+    """With a GPU present, ENABLE_HWACCEL=true maps it and turns on VA-API."""
+    fake_gpu = tmp_path / "renderD128"
+    fake_gpu.touch()
+    full_env = {
+        "EDGE_SERVER_DIR": str(tmp_path / "app"),
+        "ENABLE_HWACCEL": "true",
+        "DRI_DEVICE": str(fake_gpu),
+        **env,
+    }
+    result = run_sourced(script, func, stub_path, full_env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    compose = yaml.safe_load((tmp_path / "app" / "docker-compose.yml").read_text())
+    assert compose["services"]["frigate"]["devices"]
+    cfg = yaml.safe_load((tmp_path / "app" / "frigate" / "config.yml").read_text())
+    assert cfg["ffmpeg"]["hwaccel_args"] == "preset-vaapi"

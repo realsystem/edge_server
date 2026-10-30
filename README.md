@@ -161,6 +161,10 @@ it as `frigate/config.yml.new` so you can compare. To regenerate the Frigate
 config from the template instead, run with `FRIGATE_CONFIG_OVERWRITE=true`
 (the old file is saved as `config.yml.bak.<timestamp>`).
 
+Hardware video decoding (Intel VA-API) is **off by default**, because it fails
+on some GPUs and camera streams. Frigate decodes in software, which always works.
+To try it, deploy with `ENABLE_HWACCEL=true` (needs `/dev/dri/renderD128`).
+
 ## 6. Post-Deployment
 
 | Service | URL |

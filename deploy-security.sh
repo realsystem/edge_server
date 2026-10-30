@@ -23,6 +23,9 @@ BATCH_MODE="${BATCH_MODE:-false}"
 
 # Frigate config: kept on re-deploy unless this is "true" (old one is backed up)
 FRIGATE_CONFIG_OVERWRITE="${FRIGATE_CONFIG_OVERWRITE:-false}"
+# Intel VA-API decoding; off by default (fails on some GPUs/streams)
+ENABLE_HWACCEL="${ENABLE_HWACCEL:-false}"
+DRI_DEVICE="${DRI_DEVICE:-/dev/dri/renderD128}"  # overridable for tests
 
 # Camera configuration - loaded from env or secrets
 TZ="${TZ:-America/Los_Angeles}"
@@ -145,10 +148,12 @@ preflight_checks() {
     info "Disk space: ${free_gb}GB available"
 
     # Intel GPU check
-    if [[ -e /dev/dri/renderD128 ]]; then
+    if [[ "$ENABLE_HWACCEL" != "true" ]]; then
+        info "Hardware acceleration off (software decoding); set ENABLE_HWACCEL=true to enable"
+    elif [[ -e "$DRI_DEVICE" ]]; then
         info "Intel GPU detected: /dev/dri/renderD128"
     else
-        warn "Intel GPU not found - hardware acceleration will be disabled"
+        warn "ENABLE_HWACCEL=true but Intel GPU not found - using software decoding"
     fi
 }
 
@@ -273,7 +278,9 @@ EOF
     # No `ffmpeg:` key at all without a GPU: a key with only a comment under
     # it is null, which Frigate's config loader crashes on.
     local ffmpeg_block=$'ffmpeg:\n  hwaccel_args: preset-vaapi'
-    [[ -e /dev/dri/renderD128 ]] || ffmpeg_block="# no Intel GPU detected: hardware acceleration (preset-vaapi) off"
+    if [[ "$ENABLE_HWACCEL" != "true" || ! -e "$DRI_DEVICE" ]]; then
+        ffmpeg_block="# hardware acceleration (preset-vaapi) off: set ENABLE_HWACCEL=true to enable"
+    fi
     # An existing config holds your cameras, zones and masks, so a re-deploy
     # (update) keeps it and writes the current template to config.yml.new for
     # reference. Set FRIGATE_CONFIG_OVERWRITE=true to regenerate it instead;
@@ -504,7 +511,7 @@ services:
     shm_size: "128mb"
     network_mode: host
     volumes:
-      - ./frigate/config.yml:/config/config.yml:ro
+      # Writable: Frigate saves settings from its UI to config.yml
       - ./frigate:/config
       - ${STORAGE_PATH:-/mnt/storage/frigate}:/media/frigate
       - /etc/localtime:/etc/localtime:ro
@@ -540,7 +547,7 @@ services:
       - mosquitto
       - frigate
 EOF
-    if [[ ! -e /dev/dri/renderD128 ]]; then
+    if [[ "$ENABLE_HWACCEL" != "true" || ! -e "$DRI_DEVICE" ]]; then
         # The device mapping makes `docker compose up` fail without an Intel GPU
         sed -i '/__HWACCEL__/d; /^    devices:$/d' "$APP_DIR/docker-compose.yml"
     fi
