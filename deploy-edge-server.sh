@@ -754,13 +754,15 @@ EOF
 
     # Without an Intel GPU the device mapping makes `docker compose up` fail
     # outright, so drop it (and VA-API below) on machines that lack it.
-    local hwaccel_line="  hwaccel_args: preset-vaapi"
+    local ffmpeg_block=$'ffmpeg:\n  hwaccel_args: preset-vaapi'
     if [[ -e /dev/dri/renderD128 ]]; then
         sed -i "s| (__HWACCEL__)||" "$APP_DIR/docker-compose.yml"
     else
         warn "No /dev/dri/renderD128 - Frigate will run without hardware acceleration"
         sed -i '/__HWACCEL__/d; /^    devices:$/d' "$APP_DIR/docker-compose.yml"
-        hwaccel_line="  # hwaccel_args: preset-vaapi  # no Intel GPU detected"
+        # No `ffmpeg:` key at all: a key with only a comment under it is null,
+        # which Frigate's config loader crashes on.
+        ffmpeg_block="# no Intel GPU detected: hardware acceleration (preset-vaapi) off"
     fi
 
     #---------------------------------------------------------------------------
@@ -843,8 +845,7 @@ detectors:
     type: cpu
     num_threads: 2
 
-ffmpeg:
-${hwaccel_line}
+${ffmpeg_block}
 
 record:
   enabled: true

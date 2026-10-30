@@ -785,6 +785,25 @@ class TestFrigateMaskFormat:
         cfg = yaml.safe_load((tmp_path / "app" / "frigate" / "config.yml").read_text())
         assert not _has_empty_mask(cfg)
 
+    @pytest.mark.parametrize(
+        "script,func,env",
+        [
+            ("deploy-edge-server.sh", "create_app_stack", {}),
+            ("deploy-security.sh", "create_configs", {"REOLINK_USER": "a", "REOLINK_PASS": "b"}),
+        ],
+    )
+    def test_no_null_sections(self, stub_path, tmp_path, script, func, env):
+        # e.g. `ffmpeg:` with only a comment under it (no GPU) is null and
+        # crashes Frigate's config loader
+        full_env = {"EDGE_SERVER_DIR": str(tmp_path / "app"), **env}
+        result = run_sourced(script, func, stub_path, full_env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        cfg = yaml.safe_load((tmp_path / "app" / "frigate" / "config.yml").read_text())
+        nulls = [k for k, v in cfg.items() if v is None]
+        assert nulls == []
+        if not Path("/dev/dri/renderD128").exists():
+            assert "ffmpeg" not in cfg
+
     def test_kept_config_repaired_with_backup(self, stub_path, tmp_path):
         frigate = tmp_path / "app" / "frigate"
         frigate.mkdir(parents=True)
