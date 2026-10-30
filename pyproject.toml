@@ -37,6 +37,7 @@ dev = [
     "black>=23.0.0",
     "ruff>=0.1.0",
     "mypy>=1.0.0",
+    "pyyaml>=6.0",  # tests parse the configs the deploy scripts generate
 ]
 
 [project.scripts]
@@ -50,13 +51,13 @@ py-modules = ["bootstrap", "config", "progress", "secret_store", "services", "sn
 testpaths = ["tests"]
 # Tests import the flat modules in src/ directly; this makes them work without
 # an editable install (e.g. plain `pytest` from a fresh checkout).
-pythonpath = ["src"]
+pythonpath = ["src", "tools"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
 
 [tool.coverage.run]
-source = ["src"]
+source = ["src", "tools"]
 branch = true
 
 [tool.coverage.report]
@@ -75,6 +76,7 @@ target-version = ["py310"]
 
 [tool.ruff]
 line-length = 100
+src = [".", "src", "tools"]
 target-version = "py310"
 
 [tool.ruff.lint]

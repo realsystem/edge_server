@@ -85,6 +85,9 @@ class DeployConfig:
 
     edge_server_dir: str = ""  # Empty means use default (/opt/edge-server)
     edge_storage_dir: str = ""  # Empty means use default (/mnt/storage)
+    # Optional services; the default deployment is Frigate only
+    install_homeassistant: bool = False
+    install_mqtt: bool = False
 
 
 @dataclass
@@ -203,6 +206,12 @@ class Config:
             config.deploy.edge_storage_dir = parser.get(
                 "deploy", "EDGE_STORAGE_DIR", fallback=config.deploy.edge_storage_dir
             )
+            config.deploy.install_homeassistant = parser.getboolean(
+                "deploy", "INSTALL_HOMEASSISTANT", fallback=config.deploy.install_homeassistant
+            )
+            config.deploy.install_mqtt = parser.getboolean(
+                "deploy", "INSTALL_MQTT", fallback=config.deploy.install_mqtt
+            )
 
         return config
 
@@ -264,6 +273,8 @@ class Config:
         parser["deploy"] = {
             "EDGE_SERVER_DIR": self.deploy.edge_server_dir,
             "EDGE_STORAGE_DIR": self.deploy.edge_storage_dir,
+            "INSTALL_HOMEASSISTANT": str(self.deploy.install_homeassistant).lower(),
+            "INSTALL_MQTT": str(self.deploy.install_mqtt).lower(),
         }
 
         with open(config_path, "w") as f:

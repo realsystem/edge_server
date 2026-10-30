@@ -36,8 +36,15 @@ PROBE_COUNT = 3
 DEFAULT_DNS = 8.8.8.8
 DEFAULT_GATEWAY =
 
+[deploy]
+# Optional services (default: Frigate only)
+INSTALL_HOMEASSISTANT = false
+INSTALL_MQTT = false
+# EDGE_SERVER_DIR = /opt/edge-server
+# EDGE_STORAGE_DIR = /mnt/storage
+
 [services]
-# Service verification after deployment
+# Service verification after deployment (HA/MQTT are only checked when installed)
 VERIFY_TAILSCALE = true
 VERIFY_HOMEASSISTANT = true
 VERIFY_MQTT = true
