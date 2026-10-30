@@ -105,10 +105,45 @@ class TestDeploymentPhase:
         assert b._snapshot_taken is False
 
 
+class TestOptionalServices:
+    def test_default_deploy_env_disables_ha_and_mqtt(self):
+        b = make()
+        b._phase_deployment()
+        cmd = b.ssh.run.call_args.args[0]
+        assert "INSTALL_HOMEASSISTANT=false INSTALL_MQTT=false" in cmd
+
+    def test_enabled_services_passed_to_deploy(self):
+        b = make()
+        b.config.deploy.install_homeassistant = True
+        b.config.deploy.install_mqtt = True
+        b._phase_deployment()
+        cmd = b.ssh.run.call_args.args[0]
+        assert "INSTALL_HOMEASSISTANT=true INSTALL_MQTT=true" in cmd
+
+    def test_no_mqtt_prompts_by_default(self, monkeypatch):
+        b = make(dry_run=True)
+        monkeypatch.setenv("MQTT_PASS", "x")
+        b._phase_secrets()
+        assert "MQTT_USER" not in b._secrets and "MQTT_PASS" not in b._secrets
+
+    def test_success_urls(self, capsys):
+        b = make()
+        b._print_success()
+        out = capsys.readouterr().out
+        assert "Frigate: http://192.0.2.10:5000" in out
+        assert "Home Assistant" not in out and "MQTT" not in out
+        b.config.deploy.install_homeassistant = True
+        b.config.deploy.install_mqtt = True
+        b._print_success()
+        out = capsys.readouterr().out
+        assert "Home Assistant: http://192.0.2.10:8123" in out and "MQTT:" in out
+
+
 class TestSecretsPhase:
     def test_values_and_password_never_on_command_line(self, monkeypatch):
         monkeypatch.setenv("SECRETS_PASSWORD", "storepw")
         b = make()
+        b.config.deploy.install_mqtt = True
         b._secrets = {}
         b.secrets_file = None
         monkeypatch.setenv("MQTT_PASS", "mq'tt;pass")
@@ -254,6 +289,8 @@ class TestDiscovery:
 class TestVerification:
     def test_all_healthy(self):
         b = make()
+        b.config.deploy.install_mqtt = True
+        b.config.deploy.install_homeassistant = True
         b._secrets = {"MQTT_USER": "u", "MQTT_PASS": "p"}
         healthy = ServiceHealth("x", HealthStatus.HEALTHY, "ok", details={"extracted": "1"})
         for m in ["check_tailscale", "check_homeassistant", "check_mqtt", "check_frigate"]:
@@ -265,6 +302,16 @@ class TestVerification:
             "user": "u",
             "password": "p",
         }
+
+    def test_frigate_only_skips_ha_and_mqtt(self):
+        b = make()
+        healthy = ServiceHealth("x", HealthStatus.HEALTHY, "ok", details={"extracted": "1"})
+        b.checker.check_tailscale.return_value = healthy
+        b.checker.check_frigate.return_value = healthy
+        with patch("bootstrap.time.sleep"):
+            assert b._phase_verification() is True
+        b.checker.check_mqtt.assert_not_called()
+        b.checker.check_homeassistant.assert_not_called()
 
     def test_unhealthy_service_fails(self):
         b = make()

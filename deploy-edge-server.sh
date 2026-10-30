@@ -5,7 +5,9 @@
 #
 # Usage: sudo ./deploy-edge-server.sh
 #
-# Components: Frigate NVR, Home Assistant, Mosquitto MQTT, Tailscale
+# Components: Frigate NVR, Tailscale
+#   optional: Home Assistant (INSTALL_HOMEASSISTANT=true),
+#             Mosquitto MQTT (INSTALL_MQTT=true)
 #===============================================================================
 
 set -euo pipefail
@@ -36,7 +38,12 @@ LOCAL_SUBNET="${LOCAL_SUBNET:-192.168.0.0/16}"
 # Timezone
 TIMEZONE="${TIMEZONE:-America/Los_Angeles}"
 
-# MQTT credentials
+# Optional services (off by default). Turning one off on an existing server
+# removes its container but keeps its data directory, so it can be re-enabled.
+INSTALL_HOMEASSISTANT="${INSTALL_HOMEASSISTANT:-false}"
+INSTALL_MQTT="${INSTALL_MQTT:-false}"
+
+# MQTT credentials (only used when INSTALL_MQTT=true)
 MQTT_USER="${MQTT_USER:-admin}"
 MQTT_PASS="${MQTT_PASS:-}"
 
@@ -144,7 +151,7 @@ preflight_checks() {
     fi
 
     # Prompt for MQTT password if not set
-    if [[ -z "$MQTT_PASS" ]]; then
+    if [[ "$INSTALL_MQTT" == "true" ]] && [[ -z "$MQTT_PASS" ]]; then
         if [[ "$BATCH_MODE" == "true" ]]; then
             MQTT_PASS=$(openssl rand -base64 16)
             info "Generated random MQTT password"
@@ -370,6 +377,9 @@ install_victron() {
     fi
 
     info "Installing Victron Smart Shunt monitor..."
+    if [[ "$INSTALL_MQTT" != "true" ]]; then
+        warn "MQTT broker not installed - Victron Smart Shunt readings will only be logged"
+    fi
 
     # Find the plugin directory (deployed alongside this script or in plugins/)
     local plugin_dir=""
@@ -475,6 +485,9 @@ install_renogy() {
     fi
 
     info "Installing Renogy Rover monitor..."
+    if [[ "$INSTALL_MQTT" != "true" ]]; then
+        warn "MQTT broker not installed - Renogy Rover readings will only be logged"
+    fi
 
     # Find the plugin directory
     local plugin_dir=""
@@ -518,9 +531,13 @@ configure_firewall() {
     ufw allow ssh comment 'SSH'
 
     # Allow services from local subnet only
-    ufw allow from "$LOCAL_SUBNET" to any port 1883 proto tcp comment 'MQTT'
-    ufw allow from "$LOCAL_SUBNET" to any port 8123 proto tcp comment 'Home Assistant'
     ufw allow from "$LOCAL_SUBNET" to any port 5000 proto tcp comment 'Frigate'
+    if [[ "$INSTALL_MQTT" == "true" ]]; then
+        ufw allow from "$LOCAL_SUBNET" to any port 1883 proto tcp comment 'MQTT'
+    fi
+    if [[ "$INSTALL_HOMEASSISTANT" == "true" ]]; then
+        ufw allow from "$LOCAL_SUBNET" to any port 8123 proto tcp comment 'Home Assistant'
+    fi
 
     # Allow Tailscale interface
     ufw allow in on tailscale0 comment 'Tailscale'
@@ -581,20 +598,65 @@ configure_storage() {
 # APPLICATION STACK
 #-------------------------------------------------------------------------------
 
+# Turn off MQTT in an existing (kept) Frigate config. Only the exact layout
+# this script writes is edited ("mqtt:" followed by "  enabled: true"); the
+# file is backed up first. Anything else gets a warning to edit by hand,
+# because Frigate keeps retrying a broker that no longer exists.
+disable_frigate_mqtt() {
+    local cfg="$1" state
+    state=$(awk '
+        prev == "mqtt:" && /^  enabled:[[:space:]]*true([[:space:]]|$)/  { s = "enabled" }
+        prev == "mqtt:" && /^  enabled:[[:space:]]*false([[:space:]]|$)/ { s = "disabled" }
+        /^mqtt:/ && s == "" { s = "other" }
+        { prev = $0 }
+        END { print (s == "" ? "absent" : s) }' "$cfg")
+    case "$state" in
+        enabled)
+            cp -p "$cfg" "${cfg}.bak.$(date +%Y%m%d%H%M%S)"
+            awk '{
+                if (prev == "mqtt:" && /^  enabled:[[:space:]]*true([[:space:]]|$)/)
+                    print "  enabled: false  # no MQTT broker installed (INSTALL_MQTT=false)"
+                else
+                    print
+                prev = $0
+            }' "$cfg" > "${cfg}.tmp"
+            cat "${cfg}.tmp" > "$cfg"   # keeps owner and permissions
+            rm -f "${cfg}.tmp"
+            warn "Turned off MQTT in the existing Frigate config (backup saved next to it)"
+            ;;
+        disabled) ;;
+        *)
+            warn "MQTT broker is not installed: set 'mqtt: enabled: false' in $cfg"
+            ;;
+    esac
+}
+
 create_app_stack() {
     info "Creating application stack at $APP_DIR..."
 
-    mkdir -p "$APP_DIR"/{mosquitto/{config,data,log},ha-config,frigate}
+    mkdir -p "$APP_DIR/frigate"
+    [[ "$INSTALL_MQTT" == "true" ]] && mkdir -p "$APP_DIR"/mosquitto/{config,data,log}
+    [[ "$INSTALL_HOMEASSISTANT" == "true" ]] && mkdir -p "$APP_DIR/ha-config"
     # Only the directories themselves: a recursive chmod on re-deploy would make
     # Home Assistant's .storage (auth tokens) and other secrets world-readable.
-    chmod 755 "$APP_DIR" "$APP_DIR"/mosquitto "$APP_DIR"/frigate
-    chmod 700 "$APP_DIR"/ha-config
+    chmod 755 "$APP_DIR" "$APP_DIR/frigate"
+    [[ -d "$APP_DIR/mosquitto" ]] && chmod 755 "$APP_DIR/mosquitto"
+    [[ -d "$APP_DIR/ha-config" ]] && chmod 700 "$APP_DIR/ha-config"
+
+    # Remember the Frigate config as it was, so start_services can restart
+    # Frigate if this run changes it (MQTT setting, discovered cameras).
+    FRIGATE_CONFIG_HASH_BEFORE=""
+    if [[ -f "$APP_DIR/frigate/config.yml" ]]; then
+        FRIGATE_CONFIG_HASH_BEFORE=$(sha256sum "$APP_DIR/frigate/config.yml" | cut -d' ' -f1)
+    fi
 
     #---------------------------------------------------------------------------
     # Docker Compose
     #---------------------------------------------------------------------------
-    cat > "$APP_DIR/docker-compose.yml" << 'EOF'
-services:
+    {
+        echo "services:"
+        if [[ "$INSTALL_MQTT" == "true" ]]; then
+            cat << 'EOF'
   #-----------------------------------------------------------------------------
   # Eclipse Mosquitto MQTT Broker
   #-----------------------------------------------------------------------------
@@ -610,6 +672,10 @@ services:
       - ./mosquitto/log:/mosquitto/log
     user: "1883:1883"
 
+EOF
+        fi
+        if [[ "$INSTALL_HOMEASSISTANT" == "true" ]]; then
+            cat << 'EOF'
   #-----------------------------------------------------------------------------
   # Home Assistant Core
   #-----------------------------------------------------------------------------
@@ -625,9 +691,13 @@ services:
     volumes:
       - ./ha-config:/config
       - /etc/localtime:/etc/localtime:ro
-    depends_on:
-      - mosquitto
-
+EOF
+            if [[ "$INSTALL_MQTT" == "true" ]]; then
+                printf '    depends_on:\n      - mosquitto\n'
+            fi
+            echo
+        fi
+        cat << 'EOF'
   #-----------------------------------------------------------------------------
   # Frigate NVR
   #-----------------------------------------------------------------------------
@@ -654,14 +724,18 @@ services:
           size: 1000000000
     devices:
       - /dev/dri/renderD128:/dev/dri/renderD128  # Intel QuickSync (__HWACCEL__)
-    depends_on:
-      - mosquitto
+EOF
+        if [[ "$INSTALL_MQTT" == "true" ]]; then
+            printf '    depends_on:\n      - mosquitto\n'
+        fi
+        cat << 'EOF'
 
 networks:
   default:
     name: edge-server
     driver: bridge
 EOF
+    } > "$APP_DIR/docker-compose.yml"
 
     # Substitute storage mount path
     sed -i "s|__STORAGE_MOUNT__|${STORAGE_MOUNT}|g" "$APP_DIR/docker-compose.yml"
@@ -680,6 +754,7 @@ EOF
     #---------------------------------------------------------------------------
     # Mosquitto Configuration
     #---------------------------------------------------------------------------
+    if [[ "$INSTALL_MQTT" == "true" ]]; then
     cat > "$APP_DIR/mosquitto/config/mosquitto.conf" << 'EOF'
 # Mosquitto MQTT Broker Configuration
 persistence true
@@ -705,6 +780,8 @@ EOF
         eclipse-mosquitto:2 mosquitto_passwd -b -c /mosquitto/config/passwd "$MQTT_USER" "$MQTT_PASS"
     chown 1883:1883 "$APP_DIR/mosquitto/config/passwd"
     chmod 600 "$APP_DIR/mosquitto/config/passwd"
+    chown -R 1883:1883 "$APP_DIR/mosquitto"
+    fi
 
     #---------------------------------------------------------------------------
     # Frigate Configuration
@@ -728,18 +805,26 @@ EOF
             frigate_out="${frigate_cfg}.new"
         fi
     fi
-    cat > "$frigate_out" << EOF
-# Frigate NVR Configuration
-# Documentation: https://docs.frigate.video/
-
-mqtt:
+    local mqtt_block
+    if [[ "$INSTALL_MQTT" == "true" ]]; then
+        mqtt_block="mqtt:
   enabled: true
   host: mosquitto
   port: 1883
   user: ${MQTT_USER}
   password: ${MQTT_PASS}
   topic_prefix: frigate
-  stats_interval: 60
+  stats_interval: 60"
+    else
+        mqtt_block="mqtt:
+  enabled: false  # no MQTT broker installed (INSTALL_MQTT=false)"
+    fi
+
+    cat > "$frigate_out" << EOF
+# Frigate NVR Configuration
+# Documentation: https://docs.frigate.video/
+
+${mqtt_block}
 
 detectors:
   cpu1:
@@ -806,6 +891,9 @@ EOF
         chmod 600 "$frigate_cfg"
         info "Kept existing Frigate config: $frigate_cfg"
         info "Latest template written to ${frigate_out} (FRIGATE_CONFIG_OVERWRITE=true to replace)"
+        if [[ "$INSTALL_MQTT" != "true" ]]; then
+            disable_frigate_mqtt "$frigate_cfg"
+        fi
     else
         info "Created Frigate config: $frigate_cfg"
     fi
@@ -813,7 +901,7 @@ EOF
     #---------------------------------------------------------------------------
     # Home Assistant Initial Configuration
     #---------------------------------------------------------------------------
-    if [[ ! -f "$APP_DIR/ha-config/configuration.yaml" ]]; then
+    if [[ "$INSTALL_HOMEASSISTANT" == "true" ]] && [[ ! -f "$APP_DIR/ha-config/configuration.yaml" ]]; then
         cat > "$APP_DIR/ha-config/configuration.yaml" << 'EOF'
 # Home Assistant Configuration
 # Documentation: https://www.home-assistant.io/docs/configuration/
@@ -850,9 +938,6 @@ EOF
         info "Created initial Home Assistant configuration"
     fi
 
-    # Set correct ownership for mosquitto
-    chown -R 1883:1883 "$APP_DIR/mosquitto"
-
     success "Application stack created at $APP_DIR"
 }
 
@@ -866,7 +951,7 @@ create_systemd_service() {
     cat > /etc/systemd/system/edge-server.service << EOF
 [Unit]
 Description=Edge Server Docker Compose Stack
-Documentation=https://docs.frigate.video https://home-assistant.io
+Documentation=https://docs.frigate.video
 After=network-online.target docker.service
 Wants=network-online.target
 Requires=docker.service
@@ -920,6 +1005,7 @@ set -euo pipefail
 
 COMPOSE_DIR="__APP_DIR__"
 STORAGE_MOUNT="__STORAGE_MOUNT__"
+CONTAINERS=(__CONTAINERS__)
 LOG_FILE="/var/log/edge-server-health.log"
 
 log() {
@@ -928,21 +1014,17 @@ log() {
 
 cd "$COMPOSE_DIR"
 
-# Check each container
-for container in mosquitto homeassistant frigate; do
+# Check each container that is part of this deployment
+for container in "${CONTAINERS[@]}"; do
     status=$(docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null || echo "missing")
-    if [[ "$status" != "running" ]]; then
+    if [[ "$status" == "restarting" ]]; then
+        log "Container $container is in a restart loop"
+    elif [[ "$status" != "running" ]]; then
         log "Container $container is $status - restarting stack"
         docker compose up -d --remove-orphans
         exit 0
     fi
 done
-
-# Check if containers are healthy (not restarting)
-restart_count=$(docker ps --filter "name=mosquitto" --filter "name=homeassistant" --filter "name=frigate" --format "{{.Status}}" | grep -c "Restarting" || true)
-if [[ "$restart_count" -gt 0 ]]; then
-    log "Detected $restart_count containers in restart loop"
-fi
 
 # Check disk space on storage
 if [[ -d "$STORAGE_MOUNT" ]]; then
@@ -955,8 +1037,11 @@ fi
 log "Health check passed - all containers running"
 EOF
 
+    local containers="frigate"
+    [[ "$INSTALL_MQTT" == "true" ]] && containers="$containers mosquitto"
+    [[ "$INSTALL_HOMEASSISTANT" == "true" ]] && containers="$containers homeassistant"
     sed -i -e "s|__APP_DIR__|${APP_DIR}|" -e "s|__STORAGE_MOUNT__|${STORAGE_MOUNT}|" \
-        "$APP_DIR/health-check.sh"
+        -e "s|__CONTAINERS__|${containers}|" "$APP_DIR/health-check.sh"
     chmod +x "$APP_DIR/health-check.sh"
 
     # Reload and enable services
@@ -979,8 +1064,19 @@ start_services() {
     # Pull images
     docker compose pull
 
-    # Start stack
-    docker compose up -d
+    # Start stack. --remove-orphans stops and removes services that were
+    # turned off (e.g. Home Assistant/Mosquitto); their data stays on disk.
+    docker compose up -d --remove-orphans
+
+    # Frigate only reads its config at start-up
+    if [[ -n "${FRIGATE_CONFIG_HASH_BEFORE:-}" ]] && [[ -f "$APP_DIR/frigate/config.yml" ]]; then
+        local hash_now
+        hash_now=$(sha256sum "$APP_DIR/frigate/config.yml" | cut -d' ' -f1)
+        if [[ "$hash_now" != "$FRIGATE_CONFIG_HASH_BEFORE" ]]; then
+            info "Frigate config changed - restarting Frigate"
+            docker compose restart frigate
+        fi
+    fi
 
     # Wait for containers to start
     sleep 10
@@ -1008,19 +1104,21 @@ show_summary() {
     echo "=============================================================================="
     echo
     echo "Access URLs (replace with Tailscale IP for remote access):"
-    echo "  - Home Assistant: http://${ip_addr}:8123"
     echo "  - Frigate NVR:    http://${ip_addr}:5000"
-    echo "  - MQTT Broker:    mqtt://${ip_addr}:1883"
-    echo
-    echo "Credentials:"
-    echo "  - MQTT User:     ${MQTT_USER}"
-    echo "  - MQTT Password: ${MQTT_PASS}"
+    [[ "$INSTALL_HOMEASSISTANT" == "true" ]] && echo "  - Home Assistant: http://${ip_addr}:8123"
+    if [[ "$INSTALL_MQTT" == "true" ]]; then
+        echo "  - MQTT Broker:    mqtt://${ip_addr}:1883"
+        echo
+        echo "Credentials:"
+        echo "  - MQTT User:     ${MQTT_USER}"
+        echo "  - MQTT Password: ${MQTT_PASS}"
+    fi
     echo
     echo "Configuration Files:"
     echo "  - Docker Compose:  ${APP_DIR}/docker-compose.yml"
     echo "  - Frigate Config:  ${APP_DIR}/frigate/config.yml"
-    echo "  - HA Config:       ${APP_DIR}/ha-config/configuration.yaml"
-    echo "  - Mosquitto:       ${APP_DIR}/mosquitto/config/mosquitto.conf"
+    [[ "$INSTALL_HOMEASSISTANT" == "true" ]] && echo "  - HA Config:       ${APP_DIR}/ha-config/configuration.yaml"
+    [[ "$INSTALL_MQTT" == "true" ]] && echo "  - Mosquitto:       ${APP_DIR}/mosquitto/config/mosquitto.conf"
     echo
     echo "Storage:"
     echo "  - Video Storage:   ${STORAGE_MOUNT}/frigate"
@@ -1039,13 +1137,15 @@ show_summary() {
     fi
     echo
     echo "Next Steps:"
-    echo "  1. Configure your cameras in ${APP_DIR}/frigate/config.yml"
-    echo "  2. Complete Home Assistant onboarding at http://${ip_addr}:8123"
-    echo "  3. Add MQTT integration in Home Assistant"
+    echo "  - Cameras: put camera logins in ${APP_DIR}/.cam (user:pass per line) and run"
+    echo "    sudo ./discover-cameras.sh, or edit ${APP_DIR}/frigate/config.yml"
+    if [[ "$INSTALL_HOMEASSISTANT" == "true" ]]; then
+        echo "  - Complete Home Assistant onboarding at http://${ip_addr}:8123"
+    fi
     if [[ -z "$TAILSCALE_AUTH_KEY" ]]; then
-        echo "  4. Authenticate Tailscale: sudo tailscale up"
+        echo "  - Authenticate Tailscale: sudo tailscale up"
     else
-        echo "  4. Verify Tailscale: tailscale status"
+        echo "  - Verify Tailscale: tailscale status"
     fi
     echo
     echo "Log file: ${LOG_FILE}"

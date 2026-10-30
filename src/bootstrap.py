@@ -419,8 +419,9 @@ class Bootstrap:
             self._secrets["TAILSCALE_AUTH_KEY"] = self._prompt(
                 "TAILSCALE_AUTH_KEY", "", secret=True
             )
-            self._secrets["MQTT_USER"] = self._prompt("MQTT_USER", "homeassistant")
-            self._secrets["MQTT_PASS"] = self._prompt("MQTT_PASS", "", secret=True)
+            if self.config.deploy.install_mqtt:
+                self._secrets["MQTT_USER"] = self._prompt("MQTT_USER", "homeassistant")
+                self._secrets["MQTT_PASS"] = self._prompt("MQTT_PASS", "", secret=True)
             self._secrets["REOLINK_USER"] = self._prompt("REOLINK_USER", "admin")
             self._secrets["REOLINK_PASS"] = self._prompt("REOLINK_PASS", "", secret=True)
 
@@ -536,7 +537,12 @@ class Bootstrap:
             "deploy", "Before deployment", paths=["/opt/edge-server"], include_docker=True
         )
 
-        deploy_env = "export BATCH_MODE=true"
+        deploy = self.config.deploy
+        deploy_env = (
+            "export BATCH_MODE=true"
+            f" INSTALL_HOMEASSISTANT={str(deploy.install_homeassistant).lower()}"
+            f" INSTALL_MQTT={str(deploy.install_mqtt).lower()}"
+        )
         if self.config.deploy.edge_server_dir:
             deploy_env += f" EDGE_SERVER_DIR={shlex.quote(self.config.deploy.edge_server_dir)}"
         if self.config.deploy.edge_storage_dir:
@@ -547,7 +553,7 @@ class Bootstrap:
             if not self._run_deploy_script(
                 "deploy-edge-server.sh",
                 "base stack",
-                "Deploying base stack (Tailscale, MQTT, Home Assistant, Frigate)...",
+                f"Deploying base stack ({self._stack_description()})...",
                 deploy_env,
                 self.config.timeouts.deployment_base,
             ):
@@ -644,7 +650,7 @@ class Bootstrap:
                 failed += 1
 
         # Check Home Assistant
-        if self.config.services.verify_homeassistant:
+        if self.config.services.verify_homeassistant and self.config.deploy.install_homeassistant:
             health = self._checker.check_homeassistant(
                 self.target,
                 self.config.services.ha_port,
@@ -659,7 +665,7 @@ class Bootstrap:
                 failed += 1
 
         # Check MQTT
-        if self.config.services.verify_mqtt:
+        if self.config.services.verify_mqtt and self.config.deploy.install_mqtt:
             health = self._checker.check_mqtt(
                 port=self.config.services.mqtt_port,
                 user=self._secrets.get("MQTT_USER") or None,
@@ -695,15 +701,23 @@ class Bootstrap:
 
     def _print_success(self) -> None:
         """Print success footer."""
-        urls = {
-            "Home Assistant": f"http://{self.target}:{self.config.services.ha_port}",
-            "MQTT": f"{self.target}:{self.config.services.mqtt_port}",
-            "SSH": self._ssh_command(),
-        }
-        if self.deploy_type in ["security", "full"]:
-            urls["Frigate"] = f"http://{self.target}:{self.config.services.frigate_port}"
+        services = self.config.services
+        urls = {"Frigate": f"http://{self.target}:{services.frigate_port}"}
+        if self.config.deploy.install_homeassistant:
+            urls["Home Assistant"] = f"http://{self.target}:{services.ha_port}"
+        if self.config.deploy.install_mqtt:
+            urls["MQTT"] = f"{self.target}:{services.mqtt_port}"
+        urls["SSH"] = self._ssh_command()
 
         self.progress.footer(True, urls)
+
+    def _stack_description(self) -> str:
+        parts = ["Tailscale", "Frigate"]
+        if self.config.deploy.install_mqtt:
+            parts.append("MQTT")
+        if self.config.deploy.install_homeassistant:
+            parts.append("Home Assistant")
+        return ", ".join(parts)
 
     def _create_snapshot(self, phase: str, description: str, **kwargs: object) -> None:
         """Create a pre-change snapshot if rollback is configured."""

@@ -293,10 +293,18 @@ class TestDeployEdgeServer:
             "EDGE_STORAGE_DIR": str(storage),
             "MQTT_USER": "mqttuser",
             "MQTT_PASS": "s3cret#pass",
+            "INSTALL_HOMEASSISTANT": "true",
+            "INSTALL_MQTT": "true",
         }
         result = run_sourced("deploy-edge-server.sh", "create_app_stack", stub_path, env)
         assert result.returncode == 0, result.stdout + result.stderr
         return app, storage, result
+
+    def test_full_stack_dependencies(self, stack):
+        app, _, _ = stack
+        services = yaml.safe_load((app / "docker-compose.yml").read_text())["services"]
+        assert services["frigate"]["depends_on"] == ["mosquitto"]
+        assert services["homeassistant"]["depends_on"] == ["mosquitto"]
 
     def test_compose_is_valid_and_uses_storage_dir(self, stack):
         app, storage, _ = stack
@@ -342,6 +350,8 @@ class TestDeployEdgeServer:
             "EDGE_STORAGE_DIR": str(storage),
             "MQTT_USER": "u",
             "MQTT_PASS": "p",
+            "INSTALL_HOMEASSISTANT": "true",
+            "INSTALL_MQTT": "true",
         }
         result = run_sourced("deploy-edge-server.sh", "create_app_stack", stub_path, env)
         assert result.returncode == 0
@@ -485,7 +495,7 @@ class TestFrigateConfigPreserved:
         assert cfg.read_text() == CUSTOM_FRIGATE
         assert stat.S_IMODE(cfg.stat().st_mode) == 0o600
         new = frigate / "config.yml.new"
-        assert yaml.safe_load(new.read_text())["mqtt"]["enabled"] is True
+        assert "mqtt" in yaml.safe_load(new.read_text())
         assert stat.S_IMODE(new.stat().st_mode) == 0o600
         assert "Kept existing Frigate config" in result.stdout
 
@@ -505,3 +515,140 @@ class TestFrigateConfigPreserved:
         (tmp_path / "app" / "frigate" / "config.yml").mkdir(parents=True)
         frigate, _ = self.run(stub_path, tmp_path, script, func, extra_env)
         assert (frigate / "config.yml").is_file()
+
+
+# --------------------------------------------------------------------------
+# Frigate-only default (Home Assistant and Mosquitto off)
+# --------------------------------------------------------------------------
+
+
+class TestFrigateOnlyDefault:
+    def run(self, stub_path, tmp_path, body="create_app_stack", **env):
+        full_env = {
+            "EDGE_SERVER_DIR": str(tmp_path / "app"),
+            "EDGE_STORAGE_DIR": str(tmp_path / "storage"),
+            **env,
+        }
+        result = run_sourced("deploy-edge-server.sh", body, stub_path, full_env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        return tmp_path / "app", result
+
+    def test_only_frigate_in_compose(self, stub_path, tmp_path):
+        app, _ = self.run(stub_path, tmp_path)
+        services = yaml.safe_load((app / "docker-compose.yml").read_text())["services"]
+        assert set(services) == {"frigate"}
+        assert "depends_on" not in services["frigate"]
+        assert not (app / "mosquitto").exists()
+        assert not (app / "ha-config").exists()
+
+    def test_fresh_frigate_config_has_mqtt_off(self, stub_path, tmp_path):
+        app, _ = self.run(stub_path, tmp_path)
+        cfg = yaml.safe_load((app / "frigate" / "config.yml").read_text())
+        assert cfg["mqtt"] == {"enabled": False}
+
+    def test_existing_config_mqtt_turned_off_with_backup(self, stub_path, tmp_path):
+        frigate = tmp_path / "app" / "frigate"
+        frigate.mkdir(parents=True)
+        cfg = frigate / "config.yml"
+        original = (
+            "mqtt:\n  enabled: true\n  host: mosquitto\n  password: x\n"
+            "cameras:\n  barn:\n    enabled: true\n"
+        )
+        cfg.write_text(original)
+        _, result = self.run(stub_path, tmp_path)
+        data = yaml.safe_load(cfg.read_text())
+        assert data["mqtt"]["enabled"] is False
+        assert data["cameras"] == {"barn": {"enabled": True}}  # cameras untouched
+        backups = list(frigate.glob("config.yml.bak.*"))
+        assert len(backups) == 1 and backups[0].read_text() == original
+        assert "Turned off MQTT" in result.stdout
+
+    def test_existing_config_already_off_untouched(self, stub_path, tmp_path):
+        frigate = tmp_path / "app" / "frigate"
+        frigate.mkdir(parents=True)
+        cfg = frigate / "config.yml"
+        cfg.write_text("mqtt:\n  enabled: false\ncameras: {}\n")
+        self.run(stub_path, tmp_path)
+        assert cfg.read_text() == "mqtt:\n  enabled: false\ncameras: {}\n"
+        assert not list(frigate.glob("config.yml.bak.*"))
+
+    def test_unrecognised_mqtt_layout_warns_only(self, stub_path, tmp_path):
+        frigate = tmp_path / "app" / "frigate"
+        frigate.mkdir(parents=True)
+        cfg = frigate / "config.yml"
+        cfg.write_text("mqtt: {host: broker}\n")
+        _, result = self.run(stub_path, tmp_path)
+        assert cfg.read_text() == "mqtt: {host: broker}\n"
+        assert "set 'mqtt: enabled: false'" in result.stdout
+
+    def test_firewall_only_opens_frigate(self, stub_path, tmp_path):
+        ufw = stub_path / "ufw"
+        ufw.write_text('#!/usr/bin/env bash\necho "ufw $*" >> "$STUB_LOG"\n')
+        ufw.chmod(0o755)
+        self.run(stub_path, tmp_path, body="configure_firewall")
+        log = (stub_path / "log").read_text()
+        assert "port 5000" in log
+        assert "port 1883" not in log and "port 8123" not in log
+
+    def test_firewall_with_optional_services(self, stub_path, tmp_path):
+        ufw = stub_path / "ufw"
+        ufw.write_text('#!/usr/bin/env bash\necho "ufw $*" >> "$STUB_LOG"\n')
+        ufw.chmod(0o755)
+        self.run(
+            stub_path,
+            tmp_path,
+            body="configure_firewall",
+            INSTALL_MQTT="true",
+            INSTALL_HOMEASSISTANT="true",
+        )
+        log = (stub_path / "log").read_text()
+        assert "port 1883" in log and "port 8123" in log
+
+    @pytest.mark.parametrize(
+        "env,expected",
+        [
+            ({}, "CONTAINERS=(frigate)"),
+            (
+                {"INSTALL_MQTT": "true", "INSTALL_HOMEASSISTANT": "true"},
+                "CONTAINERS=(frigate mosquitto homeassistant)",
+            ),
+        ],
+    )
+    def test_health_check_watches_installed_containers(self, stub_path, tmp_path, env, expected):
+        (tmp_path / "app").mkdir()
+        script = (
+            f"export UNIT_DIR={tmp_path}\n"
+            'eval "$(declare -f create_systemd_service '
+            "| sed 's|/etc/systemd/system|'$UNIT_DIR'|g')\"\n"
+            "create_systemd_service\n"
+        )
+        app, _ = self.run(stub_path, tmp_path, body=script, **env)
+        assert expected in (app / "health-check.sh").read_text()
+
+    def test_start_services_removes_orphans_and_restarts_on_change(self, stub_path, tmp_path):
+        frigate = tmp_path / "app" / "frigate"
+        frigate.mkdir(parents=True)
+        (frigate / "config.yml").write_text("mqtt:\n  enabled: true\n")
+        body = "create_app_stack\nsleep() { :; }\nstart_services"
+        self.run(stub_path, tmp_path, body=body)
+        log = (stub_path / "log").read_text()
+        assert "docker compose up -d --remove-orphans" in log
+        assert "docker compose restart frigate" in log
+
+    def test_start_services_no_restart_when_unchanged(self, stub_path, tmp_path):
+        frigate = tmp_path / "app" / "frigate"
+        frigate.mkdir(parents=True)
+        (frigate / "config.yml").write_text("mqtt:\n  enabled: false\n")
+        body = "create_app_stack\nsleep() { :; }\nstart_services"
+        self.run(stub_path, tmp_path, body=body)
+        assert "restart frigate" not in (stub_path / "log").read_text()
+
+    def test_no_mqtt_password_prompt_by_default(self, stub_path, tmp_path):
+        # preflight would block on `read` if it still asked for an MQTT password
+        body = (
+            "curl() { :; }; df() { printf 'h\\n/ 1 2 50G 1%% /\\n'; }\n"
+            "fatal() { :; }  # root/OS checks are not under test here\n"
+            "BATCH_MODE=false EXTERNAL_DRIVE_UUID=x TAILSCALE_AUTH_KEY=x preflight_checks"
+        )
+        _, result = self.run(stub_path, tmp_path, body=body)
+        assert "MQTT password" not in result.stdout
