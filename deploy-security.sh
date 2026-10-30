@@ -504,7 +504,7 @@ services:
     shm_size: "128mb"
     network_mode: host
     volumes:
-      - ./frigate/config.yml:/config/config.yml:ro
+      # Writable: Frigate saves settings from its UI to config.yml
       - ./frigate:/config
       - ${STORAGE_PATH:-/mnt/storage/frigate}:/media/frigate
       - /etc/localtime:/etc/localtime:ro

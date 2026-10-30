@@ -728,7 +728,9 @@ EOF
       - TZ=${TIMEZONE:-America/Los_Angeles}
       - FRIGATE_RTSP_PASSWORD=${FRIGATE_RTSP_PASSWORD:-}
     volumes:
-      - ./frigate/config.yml:/config/config.yml:ro
+      # Whole directory, writable: Frigate saves settings from its UI to
+      # config.yml and keeps its database (events, recording index) here.
+      - ./frigate:/config
       - __STORAGE_MOUNT__/frigate:/media/frigate
       - type: tmpfs
         target: /tmp/cache

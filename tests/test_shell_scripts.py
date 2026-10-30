@@ -842,3 +842,25 @@ class TestFrigateMaskFormat:
         )
         assert cfg.read_text() == "mqtt:\n  enabled: false\ncameras:\n  a:\n    enabled: true\n"
         assert not list(frigate.glob("config.yml.bak.*"))
+
+
+# --------------------------------------------------------------------------
+# Frigate must be able to write its config dir (UI "Save", database)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "script,func,env",
+    [
+        ("deploy-edge-server.sh", "create_app_stack", {}),
+        ("deploy-security.sh", "create_configs", {"REOLINK_USER": "a", "REOLINK_PASS": "b"}),
+    ],
+)
+def test_frigate_config_dir_mounted_writable(stub_path, tmp_path, script, func, env):
+    full_env = {"EDGE_SERVER_DIR": str(tmp_path / "app"), **env}
+    result = run_sourced(script, func, stub_path, full_env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    compose = yaml.safe_load((tmp_path / "app" / "docker-compose.yml").read_text())
+    volumes = compose["services"]["frigate"]["volumes"]
+    config_mounts = [v for v in volumes if isinstance(v, str) and ":/config" in v]
+    assert config_mounts == ["./frigate:/config"]
