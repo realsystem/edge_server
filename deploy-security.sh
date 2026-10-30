@@ -406,8 +406,6 @@ cameras:
       width: 640
       height: 360
       fps: 5
-    motion:
-      mask: []
 
   cam2_rear:
     enabled: true
@@ -424,8 +422,6 @@ cameras:
       width: 640
       height: 360
       fps: 5
-    motion:
-      mask: []
 
   cam3_side:
     enabled: true
@@ -442,8 +438,6 @@ cameras:
       width: 640
       height: 360
       fps: 5
-    motion:
-      mask: []
 
   cam4_gate:
     enabled: true
@@ -460,8 +454,6 @@ cameras:
       width: 640
       height: 360
       fps: 5
-    motion:
-      mask: []
 EOF
     chmod 600 "$frigate_out"  # contains credentials
     if [[ "$frigate_out" != "$frigate_cfg" ]]; then

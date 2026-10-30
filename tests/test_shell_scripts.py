@@ -753,3 +753,73 @@ class TestDiscoverCamerasWrapper:
         if (REPO / ".cam").exists():
             pytest.skip("a real .cam exists in the repo checkout")
         assert result.returncode == 1 and "No .cam file" in result.stderr
+
+
+# --------------------------------------------------------------------------
+# Current Frigate rejects `motion: mask: []` (masks are now a dictionary)
+# --------------------------------------------------------------------------
+
+
+def _has_empty_mask(node):
+    if isinstance(node, dict):
+        if node.get("mask") == []:
+            return True
+        return any(_has_empty_mask(v) for v in node.values())
+    if isinstance(node, list):
+        return any(_has_empty_mask(v) for v in node)
+    return False
+
+
+class TestFrigateMaskFormat:
+    @pytest.mark.parametrize(
+        "script,func,env",
+        [
+            ("deploy-edge-server.sh", "create_app_stack", {}),
+            ("deploy-security.sh", "create_configs", {"REOLINK_USER": "a", "REOLINK_PASS": "b"}),
+        ],
+    )
+    def test_generated_config_has_no_empty_mask(self, stub_path, tmp_path, script, func, env):
+        full_env = {"EDGE_SERVER_DIR": str(tmp_path / "app"), **env}
+        result = run_sourced(script, func, stub_path, full_env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        cfg = yaml.safe_load((tmp_path / "app" / "frigate" / "config.yml").read_text())
+        assert not _has_empty_mask(cfg)
+
+    def test_kept_config_repaired_with_backup(self, stub_path, tmp_path):
+        frigate = tmp_path / "app" / "frigate"
+        frigate.mkdir(parents=True)
+        cfg = frigate / "config.yml"
+        old = (
+            "mqtt:\n  enabled: false\n"
+            "cameras:\n"
+            "  front:\n    enabled: true\n    motion:\n      mask: []\n"
+            "  back:\n    enabled: true\n    motion:\n      mask:\n"
+            "        m1:\n          coordinates: '0,0,1,0,1,1'\n"
+        )
+        cfg.write_text(old)
+        result = run_sourced(
+            "deploy-edge-server.sh",
+            "create_app_stack",
+            stub_path,
+            {"EDGE_SERVER_DIR": str(tmp_path / "app")},
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        data = yaml.safe_load(cfg.read_text())
+        assert "motion" not in data["cameras"]["front"]
+        assert data["cameras"]["back"]["motion"]["mask"]["m1"]  # real masks kept
+        assert any(b.read_text() == old for b in frigate.glob("config.yml.bak.*"))
+        assert "no longer accepts" in result.stdout
+
+    def test_valid_config_not_touched(self, stub_path, tmp_path):
+        frigate = tmp_path / "app" / "frigate"
+        frigate.mkdir(parents=True)
+        cfg = frigate / "config.yml"
+        cfg.write_text("mqtt:\n  enabled: false\ncameras:\n  a:\n    enabled: true\n")
+        run_sourced(
+            "deploy-edge-server.sh",
+            "create_app_stack",
+            stub_path,
+            {"EDGE_SERVER_DIR": str(tmp_path / "app")},
+        )
+        assert cfg.read_text() == "mqtt:\n  enabled: false\ncameras:\n  a:\n    enabled: true\n"
+        assert not list(frigate.glob("config.yml.bak.*"))

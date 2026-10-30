@@ -631,6 +631,18 @@ disable_frigate_mqtt() {
     esac
 }
 
+# Older versions of this script wrote "motion: mask: []" for cameras. Current
+# Frigate expects masks as a dictionary and refuses to start on the empty
+# list, so remove that exact (empty, meaningless) pair from a kept config.
+repair_frigate_config() {
+    local cfg="$1"
+    if grep -qx '      mask: \[\]' "$cfg"; then
+        cp -p "$cfg" "${cfg}.bak.$(date +%Y%m%d%H%M%S)"
+        sed -i '/^    motion:$/{N;/\n      mask: \[\]$/d}' "$cfg"
+        warn "Removed empty 'motion: mask: []' entries Frigate no longer accepts (backup saved)"
+    fi
+}
+
 create_app_stack() {
     info "Creating application stack at $APP_DIR..."
 
@@ -860,8 +872,6 @@ cameras:
         - car
         - dog
         - cat
-    motion:
-      mask: []
 
   # Example: Add your cameras here
   # barn_cam:
@@ -894,6 +904,7 @@ EOF
         if [[ "$INSTALL_MQTT" != "true" ]]; then
             disable_frigate_mqtt "$frigate_cfg"
         fi
+        repair_frigate_config "$frigate_cfg"
     else
         info "Created Frigate config: $frigate_cfg"
     fi
