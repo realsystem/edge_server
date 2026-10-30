@@ -103,6 +103,11 @@ for cfg in "${configs[@]}"; do
     else
         echo "  FAIL  $name"
         echo "$out" | tail -n 25 | sed 's/^/        /'
+        if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+            # Annotation, so the reason is visible without opening the log
+            msg=$(echo "$out" | tail -n 15 | sed ':a;N;$!ba;s/%/%25/g;s/\r//g;s/\n/%0A/g')
+            echo "::error title=Frigate rejected ${name} config::${msg}"
+        fi
         failed=$((failed + 1))
     fi
 done
