@@ -3,6 +3,8 @@
 import base64
 import datetime as dt
 import hashlib
+import io
+import logging
 import socket
 import stat
 import threading
@@ -589,3 +591,125 @@ class TestMain:
         cfg.write_text("cameras: !weird\n")
         assert cd.main([*base, "--apply"]) == 1
         assert cfg.read_text() == "cameras: !weird\n"
+
+
+# -------------------------------------------------------------- debug trace
+
+
+@pytest.fixture
+def trace():
+    """Capture the --verbose trace (the logger does not propagate)."""
+    buf = io.StringIO()
+    handler = logging.StreamHandler(buf)
+    cd.log.addHandler(handler)
+    old_level = cd.log.level
+    cd.log.setLevel(logging.DEBUG)
+    yield buf
+    cd.log.removeHandler(handler)
+    cd.log.setLevel(old_level)
+
+
+class TestDebugTrace:
+    def test_probe_traces_each_step_without_passwords(self, camera, trace):
+        cam = cd.probe_camera(camera.xaddr, CREDS)
+        assert cam.ok, cam.error
+        out = trace.getvalue()
+        assert "trying user 'admin' (password: 5 characters)" in out
+        assert "rejected at GetDeviceInformation" in out
+        assert f"user '{USER}' accepted: Reolink RLC-810A" in out
+        for op in ("GetSystemDateAndTime", "GetCapabilities", "GetProfiles", "GetStreamUri"):
+            assert op in out
+        assert "camera clock" in out and "compensated" in out
+        assert "HTTP 200" in out
+        assert PASSWORD not in out and "wrong" not in out
+
+    def test_rejection_traces_fault_and_error_names_users(self, camera, trace):
+        cam = cd.probe_camera(camera.xaddr, [cd.Credential("admin", "nope")])
+        assert "login rejected" in cam.error
+        assert "tried: admin" in cam.error and "camera said:" in cam.error
+        out = trace.getvalue()
+        assert "HTTP" in out and "fault" in out
+        assert "nope" not in out
+
+    def test_unreachable_camera_traced(self, trace):
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        cd.probe_camera(f"http://127.0.0.1:{port}/onvif/device_service", CREDS, timeout=1)
+        assert "failed after" in trace.getvalue()
+
+    def test_discovery_traces_replies(self, trace):
+        responder = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        responder.bind(("127.0.0.1", 0))
+        responder.settimeout(5)
+        port = responder.getsockname()[1]
+
+        def reply():
+            _, addr = responder.recvfrom(65535)
+            responder.sendto(probe_match("http://192.168.1.20/onvif/device_service"), addr)
+
+        t = threading.Thread(target=reply)
+        t.start()
+        try:
+            cd.ws_discover(timeout=0.5, target=("127.0.0.1", port))
+        finally:
+            t.join()
+            responder.close()
+        out = trace.getvalue()
+        assert "answered with http://192.168.1.20/onvif/device_service" in out
+        assert "differs from sender" in out  # advertised IP != reply source
+
+    def test_silent_discovery_explains_why(self, trace):
+        silent = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        silent.bind(("127.0.0.1", 0))
+        try:
+            assert cd.ws_discover(timeout=0.2, target=("127.0.0.1", silent.getsockname()[1])) == []
+        finally:
+            silent.close()
+        assert "nothing answered" in trace.getvalue()
+
+    def test_failure_hints_only_for_rejected_logins(self):
+        ok = cd.Camera("10.0.0.1", "x")
+        down = cd.Camera("10.0.0.2", "x", error="no response from x: timed out")
+        bad = cd.Camera("10.0.0.3", "x", error="login rejected for every user (tried: a)")
+        assert cd.failure_hints([ok, down]) == []
+        assert any("--verbose" in line for line in cd.failure_hints([ok, bad]))
+
+    @pytest.mark.parametrize("flag", ["--verbose", "-v", "--debug"])
+    def test_main_verbose_flag(self, setup, capsys, flag):
+        _, base = setup
+        assert cd.main([*base, flag]) == 0
+        captured = capsys.readouterr()
+        assert "credentials: 2 login(s)" in captured.err
+        assert "trying user" in captured.err
+        assert "p@ss" not in captured.err and "p@ss" not in captured.out
+        assert "Would add 1 camera(s)" in captured.out  # report still on stdout
+
+    def test_main_quiet_by_default(self, setup, capsys, monkeypatch):
+        monkeypatch.delenv("CAM_DEBUG", raising=False)
+        _, base = setup
+        assert cd.main(base) == 0
+        assert "trying user" not in capsys.readouterr().err
+
+    def test_cam_debug_env_enables_trace(self, setup, capsys, monkeypatch):
+        monkeypatch.setenv("CAM_DEBUG", "1")
+        _, base = setup
+        assert cd.main(base) == 0
+        assert "trying user" in capsys.readouterr().err
+
+    def test_main_prints_hints_for_rejected_camera(self, tmp_path, camera, capsys):
+        creds = tmp_path / ".cam"
+        creds.write_text("admin:nope\n")
+        creds.chmod(0o600)
+        args = [
+            "--credentials",
+            str(creds),
+            "--config",
+            str(tmp_path / "c.yml"),
+            "--host",
+            f"127.0.0.1:{camera.port}",
+        ]
+        assert cd.main(args) == 0
+        out = capsys.readouterr().out
+        assert "login rejected" in out and "Cameras that rejected the login" in out
