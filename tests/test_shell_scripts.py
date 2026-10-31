@@ -1100,3 +1100,48 @@ class TestTelegramBotInDeploy:
         text = (REPO / "deploy-edge-server.sh").read_text()
         main_body = text[text.index("main() {") :]
         assert main_body.index("prepare_telegram_bot") < main_body.index("create_app_stack")
+
+
+# --------------------------------------------------------------------------
+# Docker log rotation
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "script,func,env,services",
+    [
+        ("deploy-edge-server.sh", "create_app_stack", {}, {"frigate"}),
+        (
+            "deploy-edge-server.sh",
+            "create_app_stack",
+            {
+                "INSTALL_MQTT": "true",
+                "INSTALL_HOMEASSISTANT": "true",
+                "INSTALL_TELEGRAM_BOT": "true",
+                "MQTT_USER": "mqtt",
+                "MQTT_PASS": "pw",
+            },
+            {"frigate", "mosquitto", "homeassistant", "telegram-bot"},
+        ),
+        (
+            "deploy-security.sh",
+            "create_configs",
+            {"REOLINK_USER": "a", "REOLINK_PASS": "b", "MQTT_USER": "m", "MQTT_PASS": "p"},
+            {"frigate", "mosquitto", "homeassistant"},
+        ),
+    ],
+)
+def test_every_service_rotates_its_logs(stub_path, tmp_path, script, func, env, services):
+    """Docker keeps container logs forever by default; they would fill the disk."""
+    full_env = {
+        "EDGE_SERVER_DIR": str(tmp_path / "app"),
+        "EDGE_STORAGE_DIR": str(tmp_path / "storage"),
+        **env,
+    }
+    result = run_sourced(script, func, stub_path, full_env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    compose = yaml.safe_load((tmp_path / "app" / "docker-compose.yml").read_text())
+    assert set(compose["services"]) == services
+    expected = {"driver": "json-file", "options": {"max-size": "10m", "max-file": "3"}}
+    for name, service in compose["services"].items():
+        assert service.get("logging") == expected, name

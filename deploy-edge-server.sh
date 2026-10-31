@@ -757,7 +757,15 @@ create_app_stack() {
     # Docker Compose
     #---------------------------------------------------------------------------
     {
-        echo "services:"
+        cat << 'EOF'
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"   # Docker keeps container logs forever by default
+    max-file: "3"
+
+services:
+EOF
         if [[ "$INSTALL_MQTT" == "true" ]]; then
             cat << 'EOF'
   #-----------------------------------------------------------------------------
@@ -767,6 +775,7 @@ create_app_stack() {
     image: eclipse-mosquitto:2
     container_name: mosquitto
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "1883:1883"
     volumes:
@@ -786,6 +795,7 @@ EOF
     image: ghcr.io/home-assistant/home-assistant:stable
     container_name: homeassistant
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "8123:8123"
     privileged: true
@@ -808,6 +818,7 @@ EOF
     image: ghcr.io/blakeblackshear/frigate:stable
     container_name: frigate
     restart: unless-stopped
+    logging: *default-logging
     privileged: true
     shm_size: "256mb"
     ports:
@@ -845,6 +856,7 @@ EOF
     pull_policy: never
     container_name: telegram-bot
     restart: unless-stopped
+    logging: *default-logging
     init: true
     pid: host
     read_only: true

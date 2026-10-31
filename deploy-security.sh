@@ -477,6 +477,12 @@ EOF
     #---------------------------------------------------------------------------
     step "Creating docker-compose.yml..."
     cat > "$APP_DIR/docker-compose.yml" << 'EOF'
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"   # Docker keeps container logs forever by default
+    max-file: "3"
+
 services:
   #-----------------------------------------------------------------------------
   # Mosquitto MQTT Broker
@@ -485,6 +491,7 @@ services:
     image: eclipse-mosquitto:2
     container_name: mosquitto
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "1883:1883"
     volumes:
@@ -507,6 +514,7 @@ services:
     image: ghcr.io/blakeblackshear/frigate:stable
     container_name: frigate
     restart: unless-stopped
+    logging: *default-logging
     privileged: true
     shm_size: "128mb"
     network_mode: host
@@ -536,6 +544,7 @@ services:
     image: ghcr.io/home-assistant/home-assistant:stable
     container_name: homeassistant
     restart: unless-stopped
+    logging: *default-logging
     network_mode: host
     privileged: true
     volumes:
