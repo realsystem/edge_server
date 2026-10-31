@@ -250,6 +250,29 @@ STUBS = {
         exit 0
         """),
     "chown": "#!/usr/bin/env bash\nexit 0\n",
+    # ip: a server on 10.0.0.0/24 (enp3s0) with Docker, Tailscale and a Wi-Fi card around.
+    # STUB_IP_LINK / STUB_IP_DEFAULT replace the two answers; "fail" makes ip fail.
+    "ip": textwrap.dedent("""\
+        #!/usr/bin/env bash
+        [[ "${STUB_IP_LINK:-}" == fail ]] && exit 1
+        case "$*" in
+        *"route show default"*)
+            printf '%s\\n' "${STUB_IP_DEFAULT-default via 10.0.0.1 dev enp3s0 proto dhcp src 10.0.0.5 metric 100}"
+            ;;
+        *"scope link"*)
+            if [[ -n "${STUB_IP_LINK+x}" ]]; then
+                printf '%b\\n' "$STUB_IP_LINK"
+            else
+                printf '%s\\n' \
+                    "172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1 linkdown" \
+                    "172.18.0.0/16 dev br-5a1273157628 proto kernel scope link src 172.18.0.1" \
+                    "192.168.50.0/24 dev wlp2s0 proto kernel scope link src 192.168.50.7" \
+                    "10.0.0.0/24 dev enp3s0 proto kernel scope link src 10.0.0.5"
+            fi
+            ;;
+        esac
+        exit 0
+        """),
     "systemctl": '#!/usr/bin/env bash\necho "systemctl $*" >> "$STUB_LOG"\nexit 0\n',
 }
 
@@ -519,6 +542,149 @@ class TestFrigateOnlyDefault:
         log = (stub_path / "log").read_text()
         assert "port 5000" in log
         assert "port 1883" not in log and "port 8123" not in log
+
+    def test_firewall_uses_the_detected_network(self, stub_path, tmp_path):
+        ufw = stub_path / "ufw"
+        ufw.write_text('#!/usr/bin/env bash\necho "ufw $*" >> "$STUB_LOG"\n')
+        ufw.chmod(0o755)
+        self.run(
+            stub_path,
+            tmp_path,
+            body="configure_firewall",
+            INSTALL_MQTT="true",
+            INSTALL_HOMEASSISTANT="true",
+        )
+        log = (stub_path / "log").read_text()
+        for port in ("5000", "1883", "8123"):
+            assert f"ufw allow from 10.0.0.0/24 to any port {port} proto tcp" in log
+        assert "192.168" not in log
+
+    # ---- LOCAL_SUBNET detection ----
+
+    def detect(self, stub_path, tmp_path, body="detect_local_subnet", **env):
+        return run_sourced(
+            "deploy-edge-server.sh",
+            body,
+            stub_path,
+            {"EDGE_SERVER_DIR": str(tmp_path / "app"), **env},
+        )
+
+    def test_detects_the_ethernet_network_not_docker_or_wifi(self, stub_path, tmp_path):
+        result = self.detect(stub_path, tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip().splitlines()[-1] == "10.0.0.0/24 enp3s0 wired"
+
+    def test_other_ethernet_names_and_sizes(self, stub_path, tmp_path):
+        link = "172.16.8.0/22 dev eth0 proto kernel scope link src 172.16.8.9"
+        result = self.detect(stub_path, tmp_path, STUB_IP_LINK=link, STUB_IP_DEFAULT="")
+        assert result.stdout.strip().splitlines()[-1] == "172.16.8.0/22 eth0 wired"
+
+    def test_several_wired_interfaces_prefer_the_default_route(self, stub_path, tmp_path):
+        link = (
+            "192.168.7.0/24 dev enp1s0 proto kernel scope link src 192.168.7.2\\n"
+            "10.0.0.0/24 dev enp3s0 proto kernel scope link src 10.0.0.5"
+        )
+        result = self.detect(stub_path, tmp_path, STUB_IP_LINK=link)
+        assert result.stdout.strip().splitlines()[-1] == "10.0.0.0/24 enp3s0 wired"
+
+    def test_falls_back_to_the_default_route_interface_without_ethernet(self, stub_path, tmp_path):
+        link = (
+            "172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1\\n"
+            "192.168.50.0/24 dev wlp2s0 proto kernel scope link src 192.168.50.7"
+        )
+        default = "default via 192.168.50.1 dev wlp2s0 proto dhcp src 192.168.50.7"
+        result = self.detect(
+            stub_path,
+            tmp_path,
+            'resolve_local_subnet; echo "subnet=$LOCAL_SUBNET"',
+            STUB_IP_LINK=link,
+            STUB_IP_DEFAULT=default,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "subnet=192.168.50.0/24" in result.stdout
+        assert "No ethernet interface found" in result.stdout and "wlp2s0" in result.stdout
+
+    def test_docker_bridges_are_never_the_local_network(self, stub_path, tmp_path):
+        link = "172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1"
+        default = "default dev docker0 scope link"
+        result = self.detect(stub_path, tmp_path, STUB_IP_LINK=link, STUB_IP_DEFAULT=default)
+        assert result.returncode == 1
+
+    def test_no_network_found_stops_with_a_hint(self, stub_path, tmp_path):
+        result = self.detect(
+            stub_path, tmp_path, "resolve_local_subnet; echo not-reached", STUB_IP_LINK="fail"
+        )
+        assert result.returncode == 1 and "not-reached" not in result.stdout
+        assert "Cannot tell the local network" in result.stdout
+        assert "LOCAL_SUBNET=10.0.0.0/24" in result.stdout
+
+    def test_an_explicit_subnet_is_not_detected(self, stub_path, tmp_path):
+        result = self.detect(
+            stub_path,
+            tmp_path,
+            'resolve_local_subnet; echo "subnet=$LOCAL_SUBNET"',
+            LOCAL_SUBNET="172.16.4.0/22",
+            STUB_IP_LINK="fail",  # detection would fail: it must not run
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "subnet=172.16.4.0/22" in result.stdout and "set by LOCAL_SUBNET" in result.stdout
+
+    @pytest.mark.parametrize(
+        "bad", ["abc", "10.0.0.0", "10.0.0.0/33", "10.0.0.0/24|x", "10.0.0.0/24; id"]
+    )
+    def test_invalid_subnet_is_rejected(self, stub_path, tmp_path, bad):
+        result = self.detect(stub_path, tmp_path, "resolve_local_subnet", LOCAL_SUBNET=bad)
+        assert result.returncode == 1 and "is not an IPv4 network" in result.stdout
+
+    def test_saved_settings_keep_asking_for_detection(self, stub_path, tmp_path):
+        app = tmp_path / "app"
+        body = "resolve_local_subnet; save_settings"
+        self.detect(stub_path, tmp_path, body)
+        saved = (app / "deploy.env").read_text()
+        assert "LOCAL_SUBNET=''" in saved and "10.0.0.0" not in saved  # not pinned to today's LAN
+        self.detect(stub_path, tmp_path, body, LOCAL_SUBNET="172.16.4.0/22")
+        assert "LOCAL_SUBNET=172.16.4.0/22" in (app / "deploy.env").read_text()
+        check = run_bash(f"source {app / 'deploy.env'}; echo \"[$LOCAL_SUBNET]\"")
+        assert check.stdout.strip() == "[172.16.4.0/22]"
+
+    def test_auto_redeploy_follows_the_network(self, stub_path, tmp_path):
+        """Saved empty value + a new LAN = the new network, with no manual step."""
+        app = tmp_path / "app"
+        app.mkdir()
+        link = "10.20.30.0/24 dev enp3s0 proto kernel scope link src 10.20.30.4"
+
+        def resolved(saved):
+            (app / "deploy.env").write_text(saved)
+            result = run_bash(
+                f'source {REPO / "deploy-edge-server.sh"} --auto\n'  # --auto: reads deploy.env
+                'info() { echo "$*"; }; warn() { echo "$*"; }\n'
+                'resolve_local_subnet; echo "subnet=$LOCAL_SUBNET"',
+                env={
+                    "PATH": f"{stub_path}:{os.environ['PATH']}",
+                    "EDGE_SERVER_DIR": str(app),
+                    "STUB_IP_LINK": link,
+                },
+            )
+            assert result.returncode == 0, result.stdout + result.stderr
+            return result.stdout
+
+        assert "subnet=10.20.30.0/24" in resolved("[[ -v LOCAL_SUBNET ]] || LOCAL_SUBNET=''\n")
+        # a value that was set on purpose stays
+        pinned = resolved("[[ -v LOCAL_SUBNET ]] || LOCAL_SUBNET=172.16.4.0/22\n")
+        assert "subnet=172.16.4.0/22" in pinned
+
+    def test_resolve_runs_before_anything_changes(self):
+        text = (REPO / "deploy-edge-server.sh").read_text()
+        body = text[text.index("run_deploy() {") : text.index("main() {")]
+        assert body.index("resolve_local_subnet") < body.index("configure_system")
+
+    def test_firewall_subnet_can_be_changed(self, stub_path, tmp_path):
+        ufw = stub_path / "ufw"
+        ufw.write_text('#!/usr/bin/env bash\necho "ufw $*" >> "$STUB_LOG"\n')
+        ufw.chmod(0o755)
+        self.run(stub_path, tmp_path, body="configure_firewall", LOCAL_SUBNET="172.16.4.0/22")
+        log = (stub_path / "log").read_text()
+        assert "ufw allow from 172.16.4.0/22 to any port 5000" in log and "10.0.0.0" not in log
 
     def test_firewall_with_optional_services(self, stub_path, tmp_path):
         ufw = stub_path / "ufw"
@@ -1298,7 +1464,12 @@ class TestUnattendedHardening:
         assert f"ExecStart={app}/docker-firewall.sh" in unit
         assert "After=docker.service" in unit and "PartOf=docker.service" in unit
         log = (stub_path / "log").read_text()
-        assert "systemctl enable --now edge-docker-firewall.service" in log
+        # restarted on every deploy, so a changed subnet reaches Docker's chain at once
+        assert "systemctl enable edge-docker-firewall.service" in log
+        assert "systemctl restart edge-docker-firewall.service" in log
+        assert log.index("systemctl restart edge-docker-firewall.service") > log.index(
+            "daemon-reload"
+        )
 
     def test_firewall_script_applies_the_expected_rules(self, stub_path, tmp_path):
         app, _, _ = self.install_helpers(stub_path, tmp_path)

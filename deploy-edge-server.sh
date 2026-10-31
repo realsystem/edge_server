@@ -55,7 +55,10 @@ APP_DIR="${EDGE_SERVER_DIR:-/opt/edge-server}"
 SOURCE_DIR="$APP_DIR/source"  # checkout that --auto updates and deploys from
 
 # Local subnet for firewall rules (CIDR notation)
-LOCAL_SUBNET="${LOCAL_SUBNET:-192.168.0.0/16}"
+# Empty (the default) = use the network of the ethernet interface, detected on every
+# deploy (resolve_local_subnet). Set it, e.g. LOCAL_SUBNET=10.0.0.0/24, to pin one.
+LOCAL_SUBNET="${LOCAL_SUBNET:-}"
+LOCAL_SUBNET_REQUEST="$LOCAL_SUBNET"  # what gets saved for --auto: empty = keep detecting
 
 # Timezone
 TIMEZONE="${TIMEZONE:-America/Los_Angeles}"
@@ -577,7 +580,59 @@ install_renogy() {
 # FIREWALL CONFIGURATION
 #-------------------------------------------------------------------------------
 
+# Print "NETWORK INTERFACE KIND" for the local network the server sits on: the connected
+# network of the ethernet interface (en*, eth*; the one with the default route if there
+# are several), else of the default-route interface (KIND "fallback"). Docker bridges,
+# Tailscale and the like are never used. Fails when nothing is found.
+detect_local_subnet() {
+    local IFS=$' \t\n'
+    local net dev defdev="" wired_dev="" wired_net="" via_dev="" via_net=""
+    defdev=$(ip -4 -o route show default 2> /dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}')
+    while read -r net _ dev _; do
+        [[ "$net" =~ ^[0-9]+(\.[0-9]+){3}/[0-9]+$ && -n "$dev" ]] || continue
+        if [[ "$dev" =~ ^(en|eth) ]]; then
+            if [[ -z "$wired_dev" || "$dev" == "$defdev" && "$wired_dev" != "$defdev" ]]; then
+                wired_dev=$dev
+                wired_net=$net
+            fi
+        elif [[ -n "$defdev" && "$dev" == "$defdev" && ! "$dev" =~ ^(docker|br-|veth|virbr|tailscale|lo) ]]; then
+            via_dev=$dev
+            via_net=$net
+        fi
+    done < <(ip -4 -o route show scope link proto kernel 2> /dev/null)
+    if [[ -n "$wired_net" ]]; then
+        echo "$wired_net $wired_dev wired"
+    elif [[ -n "$via_net" ]]; then
+        echo "$via_net $via_dev fallback"
+    else
+        return 1
+    fi
+}
+
+# Make LOCAL_SUBNET a valid IPv4 network (CIDR): keep the one that was set, or detect it.
+resolve_local_subnet() {
+    local IFS=$' \t\n'
+    local found net dev kind
+    if [[ -z "$LOCAL_SUBNET" ]]; then
+        if ! found=$(detect_local_subnet); then
+            fatal "Cannot tell the local network from the ethernet interface (is the cable plugged in?). Set it by hand: sudo LOCAL_SUBNET=10.0.0.0/24 ./deploy-edge-server.sh"
+        fi
+        read -r net dev kind <<< "$found"
+        LOCAL_SUBNET=$net
+        if [[ "$kind" == "wired" ]]; then
+            info "Local network $LOCAL_SUBNET (detected on $dev)"
+        else
+            warn "No ethernet interface found: using $LOCAL_SUBNET of $dev, which has the default route"
+        fi
+    else
+        info "Local network $LOCAL_SUBNET (set by LOCAL_SUBNET)"
+    fi
+    [[ "$LOCAL_SUBNET" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$ ]] \
+        || fatal "LOCAL_SUBNET '$LOCAL_SUBNET' is not an IPv4 network like 10.0.0.0/24"
+}
+
 configure_firewall() {
+    resolve_local_subnet
     info "Configuring UFW firewall..."
 
     # Reset to defaults (idempotent)
@@ -941,6 +996,7 @@ install_host_helpers() {
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     containers=$(stack_containers)
     mkdir -p "$dir" "$APP_DIR"
+    resolve_local_subnet
     info "Installing the Docker firewall, image cleanup and disk health timers..."
 
     cat > "$APP_DIR/docker-firewall.sh" << 'SCRIPT'
@@ -1092,7 +1148,10 @@ UNIT
 
     chmod 644 "$dir"/edge-docker-*.service "$dir"/edge-docker-clean.timer
     systemctl daemon-reload
-    systemctl enable --now edge-docker-firewall.service
+    # restart, not just "enable --now": the unit stays active after it has run once, so
+    # without this a changed LOCAL_SUBNET would not reach Docker's chain until a reboot
+    systemctl enable edge-docker-firewall.service
+    systemctl restart edge-docker-firewall.service
     systemctl enable --now edge-docker-clean.timer
     if [[ "$smart" == "true" ]]; then
         chmod 644 "$dir/edge-smart.service" "$dir/edge-smart.timer"
@@ -1764,7 +1823,7 @@ show_summary() {
 # MQTT password and BLE keys.
 SAVED_SETTINGS=(
     INSTALL_HOMEASSISTANT INSTALL_MQTT MQTT_USER MQTT_PASS ENABLE_HWACCEL DRI_DEVICE
-    LOCAL_SUBNET TIMEZONE EXTERNAL_DRIVE_UUID FRIGATE_IMAGE
+    TIMEZONE EXTERNAL_DRIVE_UUID FRIGATE_IMAGE
     NUT_POWER_INSTALL NUT_SHUTDOWN_DELAY NUT_LOW_BATTERY
     VICTRON_INSTALL VICTRON_ADDRESS VICTRON_KEY RENOGY_INSTALL RENOGY_ADDRESS
     REDEPLOY_REPO
@@ -1781,6 +1840,8 @@ save_settings() {
         done
         printf '[[ -v INSTALL_TELEGRAM_BOT ]] || INSTALL_TELEGRAM_BOT=%q\n' "$INSTALL_TELEGRAM_BOT_REQUEST"
         printf '[[ -v EDGE_STORAGE_DIR ]] || EDGE_STORAGE_DIR=%q\n' "$STORAGE_MOUNT"
+        # as requested, not as detected: empty keeps following the network the server is on
+        printf '[[ -v LOCAL_SUBNET ]] || LOCAL_SUBNET=%q\n' "$LOCAL_SUBNET_REQUEST"
     } > "$tmp"
     chmod 600 "$tmp"
     mv "$tmp" "$SETTINGS_FILE"
@@ -2116,6 +2177,7 @@ run_deploy() {
     info "Log file: $LOG_FILE"
 
     preflight_checks
+    resolve_local_subnet # before anything changes: fail early if the network is unknown
     configure_system
     install_packages
     install_docker
