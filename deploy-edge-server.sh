@@ -118,6 +118,14 @@ NUT_LOW_BATTERY="${NUT_LOW_BATTERY:-20}"          # Shutdown below this battery 
 RENOGY_INSTALL="${RENOGY_INSTALL:-}"
 RENOGY_ADDRESS="${RENOGY_ADDRESS:-}"
 
+# Uninstall (--uninstall): "true" removes without asking, "false" skips without
+# asking, empty asks. REMOVE_ADDON_CONFIG does the same for the saved settings
+# (device key, MQTT password) of the Bluetooth add-ons; they are kept by default.
+VICTRON_UNINSTALL="${VICTRON_UNINSTALL:-}"
+RENOGY_UNINSTALL="${RENOGY_UNINSTALL:-}"
+NUT_POWER_UNINSTALL="${NUT_POWER_UNINSTALL:-}"
+REMOVE_ADDON_CONFIG="${REMOVE_ADDON_CONFIG:-}"
+
 #-------------------------------------------------------------------------------
 # LOGGING & UTILITIES
 #-------------------------------------------------------------------------------
@@ -1906,18 +1914,130 @@ auto_apply() {
 }
 
 #-------------------------------------------------------------------------------
+# UNINSTALL ADD-ONS (--uninstall)
+#-------------------------------------------------------------------------------
+
+# Where a plugin lives: next to this script, in plugins/ or directly.
+find_plugin_dir() {
+    local name="$1" script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [[ -d "${script_dir}/plugins/${name}" ]]; then
+        echo "${script_dir}/plugins/${name}"
+    elif [[ -d "${script_dir}/${name}" ]]; then
+        echo "${script_dir}/${name}"
+    else
+        return 1
+    fi
+}
+
+# Make the next --auto run leave an uninstalled add-on alone: its INSTALL flag
+# becomes false and its secrets are dropped. Edits single lines of deploy.env;
+# save_settings would overwrite every saved value with this run's defaults.
+forget_addon_settings() {
+    local install_var="$1" name tmp
+    shift
+    [[ -f "$SETTINGS_FILE" ]] || return 0
+    tmp=$(umask 077 && mktemp "$SETTINGS_FILE.XXXXXX")
+    {
+        # keep every line except the ones for this add-on
+        while IFS= read -r line; do
+            for name in "$install_var" "$@"; do
+                [[ "$line" == "[[ -v $name ]] || $name="* ]] && continue 2
+            done
+            printf '%s\n' "$line"
+        done < "$SETTINGS_FILE"
+        printf '[[ -v %s ]] || %s=false\n' "$install_var" "$install_var"
+        for name in "$@"; do
+            printf '[[ -v %s ]] || %s=%q\n' "$name" "$name" ""
+        done
+    } > "$tmp"
+    chmod 600 "$tmp"
+    mv "$tmp" "$SETTINGS_FILE"
+}
+
+# uninstall_addon TITLE UNIT PLUGIN FLAG INSTALL_VAR [SECRET_VAR...]
+#   FLAG: current value of the *_UNINSTALL variable ("true", "false" or empty = ask)
+uninstall_addon() {
+    local title="$1" unit="$2" plugin="$3" flag="$4" install_var="$5"
+    shift 5
+    local plugin_dir remove_config=false
+
+    if [[ ! -f "$SYSTEMD_DIR/$unit" ]]; then
+        info "$title is not installed - nothing to remove"
+        return 0
+    fi
+    case "$flag" in
+        true) ;;
+        false)
+            info "Keeping $title"
+            return 0
+            ;;
+        *)
+            echo ""
+            echo "=== $title ==="
+            if ! confirm "Uninstall $title?"; then
+                info "Keeping $title"
+                return 0
+            fi
+            ;;
+    esac
+
+    if ! plugin_dir=$(find_plugin_dir "$plugin"); then
+        warn "$title plugin files not found next to this script - cannot uninstall"
+        return 1
+    fi
+
+    if [[ "$plugin" != "nut-power" ]]; then
+        case "$REMOVE_ADDON_CONFIG" in
+            true) remove_config=true ;;
+            false) ;;
+            *)
+                if confirm "Also delete its saved configuration (device key, MQTT password)?"; then
+                    remove_config=true
+                fi
+                ;;
+        esac
+    fi
+
+    info "Uninstalling $title..."
+    if REMOVE_CONFIG="$remove_config" SYSTEMD_DIR="$SYSTEMD_DIR" bash "${plugin_dir}/uninstall.sh"; then
+        forget_addon_settings "$install_var" "$@"
+        success "$title uninstalled"
+    else
+        warn "$title uninstall failed - check the output above"
+        return 1
+    fi
+}
+
+uninstall_addons() {
+    local failed=0
+    info "Uninstalling add-ons (each one is asked about separately)"
+    uninstall_addon "Victron Smart Shunt monitor" victron-shunt.service victron-shunt \
+        "$VICTRON_UNINSTALL" VICTRON_INSTALL VICTRON_ADDRESS VICTRON_KEY || failed=1
+    uninstall_addon "Renogy Rover monitor" renogy-rover.service renogy-rover \
+        "$RENOGY_UNINSTALL" RENOGY_INSTALL RENOGY_ADDRESS || failed=1
+    uninstall_addon "power loss monitor (NUT)" battery-poller.service nut-power \
+        "$NUT_POWER_UNINSTALL" NUT_POWER_INSTALL || failed=1
+    info "Add-on uninstall finished"
+    return "$failed"
+}
+
+#-------------------------------------------------------------------------------
 # MAIN
 #-------------------------------------------------------------------------------
 
 usage() {
     cat << 'EOF'
-Usage: sudo ./deploy-edge-server.sh [--auto]
+Usage: sudo ./deploy-edge-server.sh [--auto | --uninstall]
 
   (no option)  deploy or update this server, asking questions where needed
   --auto       unattended: fetch the newest code from GitHub, require green CI,
                deploy it with the settings of the last manual run, check that
                everything comes up and roll back if not. The Telegram bot's
                /redeploy command runs this.
+  --uninstall  remove add-ons (Victron Smart Shunt, Renogy Rover, power loss
+               monitor), asking about each one. Everything else stays. Not
+               combinable with --auto.
   -h, --help   this text
 EOF
 }
@@ -1951,11 +2071,12 @@ run_deploy() {
 }
 
 main() {
-    local mode=manual
+    local mode=manual uninstall=false
     while (($# > 0)); do
         case "$1" in
             --auto) mode=auto ;;
             --auto-apply) mode=apply ;;
+            --uninstall) uninstall=true ;;
             --rolled-back) ROLLED_BACK=true ;;
             -h | --help)
                 usage
@@ -1969,6 +2090,11 @@ main() {
         esac
         shift
     done
+
+    if [[ "$uninstall" == "true" && "$mode" != "manual" ]]; then
+        echo "--uninstall is for manual runs and cannot be combined with --auto" >&2
+        return 2
+    fi
 
     echo
     echo "=============================================================================="
@@ -1986,6 +2112,11 @@ main() {
     mkdir -p "$(dirname "$LOG_FILE")"
     touch "$LOG_FILE"
     chmod 644 "$LOG_FILE"
+
+    if [[ "$uninstall" == "true" ]]; then
+        uninstall_addons
+        return $?
+    fi
 
     case "$mode" in
         manual) run_deploy ;;
