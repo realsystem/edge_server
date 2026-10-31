@@ -16,8 +16,9 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # --auto: redeploy without anyone present (the Telegram bot's /redeploy runs this).
-#   1. fetch the newest code from GitHub (REDEPLOY_REPO / REDEPLOY_BRANCH) into
-#      $APP_DIR/source and require green CI on it
+#   1. fetch the newest release tag (vMAJOR.MINOR or vMAJOR.MINOR.PATCH, nothing
+#      else) from GitHub (REDEPLOY_REPO) into $APP_DIR/source and require green
+#      CI on it
 #   2. deploy it with the settings saved by the last manual deploy ($APP_DIR/deploy.env)
 #   3. check that every container and Frigate come up; if not, go back to the
 #      previous version and deploy that
@@ -85,7 +86,9 @@ FRIGATE_IMAGE="${FRIGATE_IMAGE:-ghcr.io/blakeblackshear/frigate:0.18.2}"
 # Where --auto gets new code, and whether the new commit must have passed CI
 # (GitHub check runs) first. VERIFY_TIMEOUT: seconds to wait for the stack to come up.
 REDEPLOY_REPO="${REDEPLOY_REPO:-https://github.com/realsystem/edge_server.git}"
-REDEPLOY_BRANCH="${REDEPLOY_BRANCH:-main}"
+# --auto deploys release tags only: v1.0, v1.2, v2.0.1. Not branches, not commit ids,
+# not pre-release names. Deliberately a constant, not a setting.
+readonly RELEASE_TAG_REGEX='^v[0-9]+\.[0-9]+(\.[0-9]+)?$'
 REDEPLOY_REQUIRE_CI="${REDEPLOY_REQUIRE_CI:-true}"
 VERIFY_TIMEOUT="${VERIFY_TIMEOUT:-300}"
 REDEPLOY_LOCK_FILE="${REDEPLOY_LOCK_FILE:-/run/lock/edge-redeploy.lock}"
@@ -906,8 +909,21 @@ ensure_source_checkout() {
         return 0
     fi
     rm -rf "$SOURCE_DIR"
-    git clone --quiet --depth 50 --branch "$REDEPLOY_BRANCH" "$REDEPLOY_REPO" "$SOURCE_DIR" \
+    git clone --quiet "$REDEPLOY_REPO" "$SOURCE_DIR" \
         && [[ -f "$SOURCE_DIR/deploy-edge-server.sh" ]]
+}
+
+# Highest release tag in the source checkout, or nothing. Only names matching
+# RELEASE_TAG_REGEX count, so a branch, a commit id or "v1.0-rc1" can never be picked.
+latest_release_tag() {
+    local tag
+    git -C "$SOURCE_DIR" tag --list 'v*' --sort=-v:refname 2> /dev/null \
+        | while IFS= read -r tag; do
+            if [[ "$tag" =~ $RELEASE_TAG_REGEX ]]; then
+                echo "$tag"
+                break
+            fi
+        done
 }
 
 # Host-side helpers, each a small script plus a systemd unit:
@@ -1709,7 +1725,7 @@ SAVED_SETTINGS=(
     LOCAL_SUBNET TIMEZONE EXTERNAL_DRIVE_UUID FRIGATE_IMAGE
     NUT_POWER_INSTALL NUT_SHUTDOWN_DELAY NUT_LOW_BATTERY
     VICTRON_INSTALL VICTRON_ADDRESS VICTRON_KEY RENOGY_INSTALL RENOGY_ADDRESS
-    REDEPLOY_REPO REDEPLOY_BRANCH
+    REDEPLOY_REPO
 )
 
 save_settings() {
@@ -1734,14 +1750,16 @@ save_settings() {
 
 # Tell the Telegram bot how it went. Plain text only: it ends up inside JSON.
 write_redeploy_result() {
-    local status="$1" from="${2:-}" to="${3:-}" detail="${4:-}" dir="$APP_DIR/bot-requests" tmp
+    local status="$1" from="${2:-}" to="${3:-}" detail="${4:-}" tag="${5:-${REDEPLOY_TAG:-}}"
+    local dir="$APP_DIR/bot-requests" tmp
     [[ -d "$dir" ]] || return 0
     from=${from//[^0-9a-f]/}
     to=${to//[^0-9a-f]/}
+    tag=${tag//[^0-9.v]/}
     detail=${detail//[^[:alnum:] .,:;()_\/-]/ }
     tmp=$(mktemp "$dir/.redeploy-result.XXXXXX")
-    printf '{"status": "%s", "from": "%s", "to": "%s", "detail": "%s", "at": %s}\n' \
-        "$status" "$from" "$to" "$detail" "$(date +%s)" > "$tmp"
+    printf '{"status": "%s", "from": "%s", "to": "%s", "tag": "%s", "detail": "%s", "at": %s}\n' \
+        "$status" "$from" "$to" "$tag" "$detail" "$(date +%s)" > "$tmp"
     chmod 644 "$tmp"
     mv "$tmp" "$dir/redeploy-result"
 }
@@ -1823,7 +1841,7 @@ take_redeploy_lock() {
 
 # Phase 1: fetch, gate, back up, then hand over to the freshly fetched script
 auto_update() {
-    local prev new state
+    local prev new state tag
     if ! take_redeploy_lock; then
         write_redeploy_result refused "" "" "another deploy is already running"
         fatal "Another deploy is running"
@@ -1838,14 +1856,22 @@ auto_update() {
     fi
 
     prev=$(git -C "$SOURCE_DIR" rev-parse HEAD)
-    info "Fetching $REDEPLOY_BRANCH from $REDEPLOY_REPO..."
+    info "Fetching release tags from $REDEPLOY_REPO..."
     git -C "$SOURCE_DIR" remote set-url origin "$REDEPLOY_REPO"
-    if ! GIT_TERMINAL_PROMPT=0 timeout 180 git -C "$SOURCE_DIR" fetch --quiet origin "$REDEPLOY_BRANCH"; then
+    # tags only: no branch is ever fetched for deploying
+    if ! GIT_TERMINAL_PROMPT=0 timeout 180 git -C "$SOURCE_DIR" fetch --quiet --force --no-tags origin \
+        '+refs/tags/*:refs/tags/*'; then
         write_redeploy_result refused "$prev" "" "cannot fetch from GitHub"
         fatal "git fetch failed"
     fi
-    new=$(git -C "$SOURCE_DIR" rev-parse FETCH_HEAD)
-    info "Current ${prev:0:7}, available ${new:0:7}"
+    tag=$(latest_release_tag)
+    if [[ -z "$tag" ]]; then
+        write_redeploy_result refused "$prev" "" "no release tag (like v1.0) exists on GitHub yet"
+        fatal "No release tag matching $RELEASE_TAG_REGEX in $REDEPLOY_REPO"
+    fi
+    new=$(git -C "$SOURCE_DIR" rev-parse "refs/tags/$tag^{commit}")
+    info "Current ${prev:0:7}, newest release $tag (${new:0:7})"
+    export REDEPLOY_TAG="$tag"
 
     if [[ "$new" != "$prev" && "$REDEPLOY_REQUIRE_CI" == "true" ]]; then
         state=$(ci_state "$new")
@@ -1865,7 +1891,7 @@ auto_update() {
 
     backup_for_redeploy
     git -C "$SOURCE_DIR" reset --quiet --hard "$new"
-    info "Handing over to ${new:0:7}"
+    info "Handing over to $tag (${new:0:7})"
     # exec: this process must not read another byte of a script that was just replaced
     REDEPLOY_FROM="$prev" REDEPLOY_TO="$new" exec "$SOURCE_DIR/deploy-edge-server.sh" --auto-apply
 }
@@ -2031,7 +2057,8 @@ usage() {
 Usage: sudo ./deploy-edge-server.sh [--auto | --uninstall]
 
   (no option)  deploy or update this server, asking questions where needed
-  --auto       unattended: fetch the newest code from GitHub, require green CI,
+  --auto       unattended: fetch the newest release tag (v1.0, v1.2.3; nothing
+               else is ever deployed) from GitHub, require green CI,
                deploy it with the settings of the last manual run, check that
                everything comes up and roll back if not. The Telegram bot's
                /redeploy command runs this.
