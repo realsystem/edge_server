@@ -218,6 +218,32 @@ How it is kept safe:
 Turn it off with `INSTALL_TELEGRAM_BOT=false` (the container is removed on the
 next deploy); removing `.telegram` alone does not remove a running bot.
 
+#### Alerts you get without asking
+
+Every 5 minutes the bot checks the server and messages every user in
+`TELEGRAM_ALLOWED_IDS` when something is wrong. A problem must be seen twice in a row
+(about 10 minutes) before it is reported, so a Frigate restart or a camera reboot is
+not an outage. It repeats every 6 hours while the problem lasts and says so once when
+it is fixed.
+
+| Alert | When | Setting in `.telegram` |
+|---|---|---|
+| Low disk space | recordings or system disk below 15% free | `ALERT_DISK_FREE_PERCENT` (0 = off) |
+| Frigate not responding | the Frigate API does not answer | `ALERT_WATCH=false` turns all of the rows below off |
+| Camera offline | an enabled camera delivers no video | |
+| CPU hot | 85 °C or more (clears below 80 °C) | `ALERT_TEMP_C` (0 = off) |
+| Disk failing or worn out | SMART health fails, bad sectors, SSD 80% worn | `ALERT_DISK_WEAR_PERCENT` |
+| Disk health not checked | no report for 3 days (the checker died) | |
+
+Disk health comes from `edge-smart.timer` on the host (every 6 hours, `smartmontools`).
+The bot cannot read SMART itself because its container has no access to the disks.
+Other settings: `ALERT_CONFIRM=2` (checks in a row), `ALERT_INTERVAL=300`,
+`ALERT_REPEAT_HOURS=6`.
+
+A silent bot can also mean a dead server. For that case use an outside "dead-man's
+switch" (a service that alerts you when your server stops pinging it, such as
+healthchecks.io) in addition to the bot.
+
 #### Reboot from Telegram (`/reboot`)
 
 Off by default. A stolen phone or hijacked Telegram account must not be enough to
@@ -249,6 +275,26 @@ Safeguards:
 Keep the secret like a password. Anyone who has it can generate valid codes (but
 still needs to be one of the listed Telegram users). Test it once while you are
 sitting at the laptop.
+
+### Built for unattended operation
+
+- **Starts without internet.** After a reboot the stack starts from the images already on
+  disk. Nothing is pulled at boot, and Frigate is pinned to a version
+  (`FRIGATE_IMAGE`, default in `deploy-edge-server.sh`). To upgrade, change the version
+  and run the deploy script, which pulls the new image.
+- **Docker ports follow the firewall.** Docker publishes ports around UFW, so the
+  "local network only" UFW rule did not cover Frigate (5000, 8554, 8555). The
+  `edge-docker-firewall` unit adds the same rule to Docker's own `DOCKER-USER` chain:
+  only `LOCAL_SUBNET` and Tailscale can reach published ports. Check with
+  `sudo iptables -S EDGE-DOCKER-INPUT`.
+- **Old images are removed.** `edge-docker-clean.timer` runs weekly (Sunday 04:30),
+  only while the whole stack is running, and removes images that nothing uses and
+  that are older than 14 days.
+- **The bot sees little.** Its container mounts only the Frigate folder, the compose
+  file and its own code, read-only. Camera logins (`.cam`), Home Assistant data and the
+  MQTT password file are not visible to it.
+- **One deploy script.** `deploy-security.sh` is gone; `deploy-edge-server.sh` deploys
+  everything, Frigate included.
 
 ### Performance diagnostics
 
@@ -322,8 +368,7 @@ docker compose pull && docker compose up -d
 
 **Target scripts (run on Ubuntu server via SSH):**
 - `initial-setup.sh` — System setup (static IP, Docker, storage)
-- `deploy-edge-server.sh` — Deploy base stack (Home Assistant, MQTT, Tailscale)
-- `deploy-security.sh` — Deploy security stack (Frigate, cameras)
+- `deploy-edge-server.sh` — Deploy the stack (Frigate, Tailscale, firewall, Telegram bot; optional Home Assistant, MQTT)
 - `secrets.sh` — Encrypted secrets management on target
 
 **Plugins:**

@@ -54,10 +54,6 @@ configs=()
 configs+=("$(generate edge-default deploy-edge-server.sh create_app_stack)")
 configs+=("$(generate edge-mqtt deploy-edge-server.sh create_app_stack \
     INSTALL_MQTT=true INSTALL_HOMEASSISTANT=true MQTT_USER=mqtt MQTT_PASS='s3cret#1')")
-configs+=("$(generate security deploy-security.sh create_configs \
-    REOLINK_USER=admin REOLINK_PASS=campass)")
-configs+=("$(generate security-mqtt deploy-security.sh create_configs \
-    REOLINK_USER=admin REOLINK_PASS=campass MQTT_USER=mqtt MQTT_PASS=pw)")
 
 # Default config plus a camera the way discovery adds it
 mkdir -p "$WORK/discovered/frigate"

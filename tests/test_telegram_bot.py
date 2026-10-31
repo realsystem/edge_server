@@ -605,13 +605,15 @@ class TestDiskAlerts:
                 real_start(self)  # the fake HTTP servers need real threads
 
         monkeypatch.setattr(threading.Thread, "start", tracking_start)
-        for allowed, percent, expected in [
-            (frozenset({ALICE}), 15.0, ["alert_loop"]),
-            (frozenset(), 15.0, []),
-            (frozenset({ALICE}), 0.0, []),
+        for allowed, percent, watch, expected in [
+            (frozenset({ALICE}), 15.0, True, ["alert_loop"]),
+            (frozenset({ALICE}), 0.0, True, ["alert_loop"]),  # watchers alone are enough
+            (frozenset({ALICE}), 15.0, False, ["alert_loop"]),
+            (frozenset(), 15.0, True, []),
+            (frozenset({ALICE}), 0.0, False, []),
         ]:
             started.clear()
-            b = make_bot(telegram, frigate, host, alert_free_percent=percent)
+            b = make_bot(telegram, frigate, host, alert_free_percent=percent, watch=watch)
             b.cfg.allowed = allowed
             b.sleep = lambda s: (_ for _ in ()).throw(KeyboardInterrupt)
             telegram.routes["getUpdates"] = (500, {"ok": False})
@@ -955,3 +957,242 @@ class TestMainTotpSetup:
         monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
         assert bot.main(["--totp-setup"]) == 0
         assert "REBOOT_TOTP_SECRET=" in capsys.readouterr().out
+
+
+# ------------------------------------------------------------------ watchers
+
+T0 = 1_000_000.0  # fake monotonic time for the watchers
+
+
+def stats_with(front_fps=5.0, back_fps=5.0):
+    return {
+        "service": {"uptime": 9000},
+        "detectors": {"cpu1": {"inference_speed": 87.5}},
+        "cameras": {
+            "front": {"camera_fps": front_fps, "detection_fps": 1.0, "skipped_fps": 0.0},
+            "back": {"camera_fps": back_fps, "detection_fps": 1.0, "skipped_fps": 0.0},
+        },
+    }
+
+
+@pytest.fixture
+def watcher(telegram, frigate, host):
+    """A bot whose watchers see healthy defaults; tests break one thing at a time."""
+    (host / "status").mkdir()
+    b = make_bot(
+        telegram,
+        frigate,
+        host,
+        status_dir=host / "status",
+        alert_repeat=3600.0,
+        alert_free_percent=0,
+    )
+    b.clock = lambda: NOW
+    return b
+
+
+def run_checks(b, times, start=T0, step=300):
+    """Run the watchers ``times`` times, ``step`` seconds apart; collect messages per run."""
+    return [b.watch_messages(start + i * step) for i in range(times)]
+
+
+class TestWatchFrigate:
+    def test_healthy_says_nothing(self, watcher):
+        assert run_checks(watcher, 3) == [[], [], []]
+
+    def test_down_is_reported_after_two_checks_then_reminded_then_recovers(self, watcher, frigate):
+        good_url = watcher.cfg.frigate_url
+        watcher.cfg.frigate_url = "http://127.0.0.1:9"  # nothing listens here
+        first, second, third = run_checks(watcher, 3)
+        assert first == [] and third == []
+        assert len(second) == 1 and "Frigate is not responding" in second[0]
+        assert "/reboot" in second[0]
+        # an hour later: a reminder
+        assert "(reminder)" in watcher.watch_messages(T0 + 3600 + 600)[0]
+        watcher.cfg.frigate_url = good_url
+        assert watcher.watch_messages(T0 + 8000) == ["✅ Frigate: back to normal."]
+        assert watcher.watch_messages(T0 + 8300) == []
+
+    def test_a_restart_blip_is_not_reported(self, watcher):
+        good_url = watcher.cfg.frigate_url
+        watcher.cfg.frigate_url = "http://127.0.0.1:9"
+        assert watcher.watch_messages(T0) == []
+        watcher.cfg.frigate_url = good_url
+        assert run_checks(watcher, 3, start=T0 + 300) == [[], [], []]  # not even "recovered"
+
+    def test_camera_offline_and_back(self, watcher, frigate):
+        frigate.routes["/api/stats"] = (200, stats_with(front_fps=0.0))
+        first, second = run_checks(watcher, 2)
+        assert first == []
+        assert len(second) == 1 and "Camera front has no video" in second[0]
+        frigate.routes["/api/stats"] = (200, stats_with())
+        assert watcher.watch_messages(T0 + 900) == ["✅ Camera front: back to normal."]
+
+    def test_each_camera_is_tracked_separately(self, watcher, frigate):
+        frigate.routes["/api/stats"] = (200, stats_with(front_fps=0.0, back_fps=0.0))
+        _, second = run_checks(watcher, 2)
+        assert len(second) == 2
+        assert {"Camera front" in m or "Camera back" in m for m in second} == {True}
+
+    def test_disabled_cameras_are_ignored(self, watcher, frigate):
+        frigate.routes["/api/stats"] = (200, stats_with(front_fps=0.0))
+        frigate.routes["/api/config"] = (200, {"cameras": {"front": {"enabled": False}}})
+        assert run_checks(watcher, 3) == [[], [], []]
+
+    def test_no_camera_alerts_while_frigate_is_down(self, watcher, frigate):
+        frigate.routes["/api/stats"] = (200, stats_with(front_fps=0.0))
+        watcher.watch_messages(T0)  # front: strike 1
+        watcher.cfg.frigate_url = "http://127.0.0.1:9"
+        messages = watcher.watch_messages(T0 + 300)
+        assert all("Camera" not in m for m in messages)
+
+
+class TestWatchTemperature:
+    def set_temp(self, host, milli):
+        (host / "sys/class/thermal/thermal_zone0/temp").write_text(f"{milli}\n")
+
+    def test_hot_cpu_alerts_after_two_checks_and_recovers_with_margin(self, watcher, host):
+        self.set_temp(host, 90000)
+        first, second = run_checks(watcher, 2)
+        assert first == []
+        assert len(second) == 1 and "90 °C" in second[0] and "x86_pkg_temp" in second[0]
+        self.set_temp(host, 82000)  # below the level but inside the 5 degree margin
+        assert watcher.watch_messages(T0 + 900) == []
+        self.set_temp(host, 70000)
+        assert watcher.watch_messages(T0 + 1200) == ["✅ CPU temperature: back to normal."]
+
+    def test_normal_temperature_is_quiet(self, watcher):
+        assert run_checks(watcher, 3) == [[], [], []]  # fixture: 61 C
+
+    def test_can_be_switched_off(self, watcher, host):
+        self.set_temp(host, 99000)
+        watcher.cfg.alert_temp_c = 0
+        assert run_checks(watcher, 3) == [[], [], []]
+
+    def test_no_sensor_is_quiet(self, watcher, host):
+        (host / "sys/class/thermal/thermal_zone0/temp").unlink()
+        assert run_checks(watcher, 3) == [[], [], []]
+
+
+def write_disks(b, disks, generated=NOW, **extra):
+    (b.cfg.status_dir / "disks.json").write_text(
+        json.dumps({"generated": generated, "disks": disks, **extra})
+    )
+
+
+GOOD_DISK = {
+    "device": "sda",
+    "model": "Samsung SSD 860",
+    "passed": True,
+    "wear_used": 12,
+    "reallocated": 0,
+    "pending": 0,
+    "media_errors": 0,
+}
+
+
+class TestWatchDiskHealth:
+    def test_no_report_means_nothing_installed(self, watcher):
+        assert run_checks(watcher, 3) == [[], [], []]
+
+    def test_healthy_disk_is_quiet(self, watcher):
+        write_disks(watcher, [GOOD_DISK])
+        assert run_checks(watcher, 3) == [[], [], []]
+
+    def test_worn_ssd_alerts_at_once_and_recovers(self, watcher):
+        write_disks(watcher, [{**GOOD_DISK, "wear_used": 83}])
+        messages = watcher.watch_messages(T0)
+        assert len(messages) == 1
+        assert "sda (Samsung SSD 860)" in messages[0] and "83% of its rated life" in messages[0]
+        assert watcher.watch_messages(T0 + 300) == []  # no repeat inside the reminder period
+        write_disks(watcher, [GOOD_DISK])
+        assert watcher.watch_messages(T0 + 600) == [
+            "✅ Disk sda (Samsung SSD 860): back to normal."
+        ]
+
+    def test_smart_failure_and_bad_sectors(self, watcher):
+        write_disks(watcher, [{**GOOD_DISK, "passed": False, "reallocated": 8, "pending": 2}])
+        (message,) = watcher.watch_messages(T0)
+        assert "FAILED" in message and "8 reallocated, 2 pending" in message
+
+    def test_wear_level_is_configurable_and_can_be_off(self, watcher):
+        write_disks(watcher, [{**GOOD_DISK, "wear_used": 60}])
+        assert watcher.watch_messages(T0) == []
+        watcher.cfg.alert_wear_percent = 50
+        assert len(watcher.watch_messages(T0 + 300)) == 1
+
+    def test_stale_report_means_the_monitor_died(self, watcher):
+        write_disks(watcher, [GOOD_DISK], generated=NOW - 4 * 86400)
+        (message,) = watcher.watch_messages(T0)
+        assert "has not been checked for" in message and "edge-smart" in message
+        write_disks(watcher, [GOOD_DISK])
+        assert watcher.watch_messages(T0 + 300) == ["✅ Disk health monitor: back to normal."]
+
+    def test_monitor_error_is_reported(self, watcher):
+        write_disks(watcher, [], error="smartctl is not installed or failed")
+        (message,) = watcher.watch_messages(T0)
+        assert "smartctl is not installed" in message
+
+    def test_unreadable_report_is_reported_not_fatal(self, watcher):
+        (watcher.cfg.status_dir / "disks.json").write_text("{nope")
+        (message,) = watcher.watch_messages(T0)
+        assert "unreadable" in message
+
+    def test_disk_problems_helper(self):
+        assert bot.disk_problems(GOOD_DISK, 80) == []
+        assert bot.disk_problems({"wear_used": None, "media_errors": 3}, 80) == ["3 media errors"]
+        assert bot.disk_problems({"wear_used": 90}, 0) == []  # wear alert off
+
+
+class TestWatchIntegration:
+    def test_send_alerts_delivers_watcher_messages_to_every_user(self, watcher, telegram, host):
+        watcher.cfg.allowed = frozenset({ALICE, 2002})
+        write_disks(watcher, [{**GOOD_DISK, "wear_used": 90}])
+        watcher.send_alerts()
+        recipients = sorted(p["chat_id"] for p in telegram.sent())
+        assert recipients == [ALICE, 2002]
+        assert "90% of its rated life" in telegram.texts()[0]
+
+    def test_watchers_can_be_switched_off(self, watcher, telegram):
+        write_disks(watcher, [{**GOOD_DISK, "wear_used": 90}])
+        watcher.cfg.watch = False
+        watcher.send_alerts()
+        assert telegram.texts() == []
+
+    def test_a_broken_check_does_not_hide_the_others(self, watcher, monkeypatch):
+        write_disks(watcher, [{**GOOD_DISK, "wear_used": 90}])
+
+        def boom(now):
+            raise RuntimeError("bug")
+
+        monkeypatch.setattr(watcher, "watch_temperature", boom)
+        monkeypatch.setattr(
+            bot.Bot, "watch_frigate", lambda self, now: (_ for _ in ()).throw(OSError())
+        )
+        assert len(watcher.watch_messages(T0)) == 1
+
+    def test_system_disk_is_measured_through_the_frigate_mount(self, watcher, host):
+        assert bot.system_path(watcher.cfg) == host / "app"
+        (host / "app" / "frigate").mkdir()
+        assert bot.system_path(watcher.cfg) == host / "app" / "frigate"
+        assert bot.watched_disks(watcher.cfg)
+
+    def test_config_from_env(self):
+        env = {"TELEGRAM_BOT_TOKEN": TOKEN}
+        cfg = bot.Config.from_env(env)
+        assert cfg.watch and cfg.alert_confirm == 2 and cfg.alert_temp_c == 85.0
+        assert cfg.alert_wear_percent == 80.0 and cfg.status_dir == Path("/status")
+        cfg = bot.Config.from_env(
+            {
+                **env,
+                "ALERT_WATCH": "false",
+                "ALERT_TEMP_C": "90",
+                "ALERT_DISK_WEAR_PERCENT": "70",
+                "ALERT_CONFIRM": "0",
+                "STATUS_DIR": "/s",
+            }
+        )
+        assert not cfg.watch and cfg.alert_temp_c == 90 and cfg.alert_wear_percent == 70
+        assert cfg.alert_confirm == 1 and cfg.status_dir == Path("/s")
+        with pytest.raises(ValueError, match="must be numbers"):
+            bot.Config.from_env({**env, "ALERT_TEMP_C": "hot"})

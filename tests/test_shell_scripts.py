@@ -379,70 +379,6 @@ class TestDeployEdgeServer:
         assert subprocess.run([BASH, "-n", str(app / "health-check.sh")]).returncode == 0
 
 
-class TestDeploySecurity:
-    def make(self, stub_path, tmp_path, **extra):
-        app = tmp_path / "app"
-        env = {
-            "EDGE_SERVER_DIR": str(app),
-            "EDGE_STORAGE_DIR": str(tmp_path / "storage"),
-            "REOLINK_USER": "admin",
-            "REOLINK_PASS": "campass",
-        }
-        env.update(extra)
-        result = run_sourced("deploy-security.sh", "create_configs", stub_path, env)
-        assert result.returncode == 0, result.stdout + result.stderr
-        return app
-
-    def test_honours_edge_server_dir(self, stub_path, tmp_path):
-        app = self.make(stub_path, tmp_path)
-        assert (app / "docker-compose.yml").exists()
-        env_file = (app / ".env").read_text()
-        assert f"STORAGE_PATH={tmp_path / 'storage'}/frigate" in env_file
-        assert stat.S_IMODE((app / ".env").stat().st_mode) == 0o600
-
-    def test_mqtt_auth_when_credentials_given(self, stub_path, tmp_path):
-        app = self.make(stub_path, tmp_path, MQTT_USER="mq", MQTT_PASS="pw")
-        conf = (app / "mosquitto/config/mosquitto.conf").read_text()
-        assert "allow_anonymous false" in conf
-        assert "password_file /mosquitto/config/passwd" in conf
-        frigate = yaml.safe_load((app / "frigate/config.yml").read_text())
-        assert frigate["mqtt"]["user"] == "{FRIGATE_MQTT_USER}"
-        assert frigate["mqtt"]["password"] == "{FRIGATE_MQTT_PASSWORD}"
-        assert "FRIGATE_MQTT_PASSWORD=pw" in (app / ".env").read_text()
-
-    def test_anonymous_without_credentials(self, stub_path, tmp_path):
-        app = self.make(stub_path, tmp_path)
-        conf = (app / "mosquitto/config/mosquitto.conf").read_text()
-        assert "allow_anonymous true" in conf
-        frigate = yaml.safe_load((app / "frigate/config.yml").read_text())
-        assert "user" not in frigate["mqtt"]
-
-    def test_generated_files_are_valid_yaml(self, stub_path, tmp_path):
-        app = self.make(stub_path, tmp_path, MQTT_USER="mq", MQTT_PASS="pw")
-        compose = yaml.safe_load((app / "docker-compose.yml").read_text())
-        assert set(compose["services"]) == {"mosquitto", "frigate", "homeassistant"}
-        hc = compose["services"]["mosquitto"]["healthcheck"]["test"]
-        assert hc[0] == "CMD-SHELL"
-        frigate = yaml.safe_load((app / "frigate/config.yml").read_text())
-        assert len(frigate["cameras"]) == 4
-        assert stat.S_IMODE((app / "frigate/config.yml").stat().st_mode) == 0o600
-        ha = yaml.safe_load((app / "ha-config/configuration.yaml").read_text())
-        assert "mqtt" not in ha
-
-    @pytest.mark.skipif(shutil.which("docker") is None, reason="docker not installed")
-    def test_compose_config_validates(self, stub_path, tmp_path):
-        app = self.make(stub_path, tmp_path, MQTT_USER="mq", MQTT_PASS="pw")
-        real = subprocess.run(
-            ["docker", "compose", "-f", str(app / "docker-compose.yml"), "config", "-q"],
-            capture_output=True,
-            text=True,
-            cwd=app,
-        )
-        if "is not a docker command" in real.stderr:
-            pytest.skip("docker compose plugin not installed")
-        assert real.returncode == 0, real.stderr
-
-
 # --------------------------------------------------------------------------
 # Re-deploy (update) must not wipe a customised Frigate config
 # --------------------------------------------------------------------------
@@ -454,11 +390,6 @@ CUSTOM_FRIGATE = "# my cameras\ncameras:\n  barn_cam:\n    enabled: true\n"
     "script,func,extra_env",
     [
         ("deploy-edge-server.sh", "create_app_stack", {"MQTT_USER": "u", "MQTT_PASS": "p"}),
-        (
-            "deploy-security.sh",
-            "create_configs",
-            {"REOLINK_USER": "admin", "REOLINK_PASS": "campass"},
-        ),
     ],
 )
 class TestFrigateConfigPreserved:
@@ -775,7 +706,6 @@ class TestFrigateMaskFormat:
         "script,func,env",
         [
             ("deploy-edge-server.sh", "create_app_stack", {}),
-            ("deploy-security.sh", "create_configs", {"REOLINK_USER": "a", "REOLINK_PASS": "b"}),
         ],
     )
     def test_generated_config_has_no_empty_mask(self, stub_path, tmp_path, script, func, env):
@@ -789,7 +719,6 @@ class TestFrigateMaskFormat:
         "script,func,env",
         [
             ("deploy-edge-server.sh", "create_app_stack", {}),
-            ("deploy-security.sh", "create_configs", {"REOLINK_USER": "a", "REOLINK_PASS": "b"}),
         ],
     )
     def test_no_null_sections(self, stub_path, tmp_path, script, func, env):
@@ -852,7 +781,6 @@ class TestFrigateMaskFormat:
     "script,func,env",
     [
         ("deploy-edge-server.sh", "create_app_stack", {}),
-        ("deploy-security.sh", "create_configs", {"REOLINK_USER": "a", "REOLINK_PASS": "b"}),
     ],
 )
 def test_frigate_config_dir_mounted_writable(stub_path, tmp_path, script, func, env):
@@ -874,7 +802,6 @@ def test_frigate_config_dir_mounted_writable(stub_path, tmp_path, script, func, 
     "script,func,env",
     [
         ("deploy-edge-server.sh", "create_app_stack", {}),
-        ("deploy-security.sh", "create_configs", {"REOLINK_USER": "a", "REOLINK_PASS": "b"}),
     ],
 )
 def test_hwaccel_enabled_only_on_request(stub_path, tmp_path, script, func, env):
@@ -1240,12 +1167,6 @@ class TestTelegramBotInDeploy:
             },
             {"frigate", "mosquitto", "homeassistant", "telegram-bot"},
         ),
-        (
-            "deploy-security.sh",
-            "create_configs",
-            {"REOLINK_USER": "a", "REOLINK_PASS": "b", "MQTT_USER": "m", "MQTT_PASS": "p"},
-            {"frigate", "mosquitto", "homeassistant"},
-        ),
     ],
 )
 def test_every_service_rotates_its_logs(stub_path, tmp_path, script, func, env, services):
@@ -1262,3 +1183,226 @@ def test_every_service_rotates_its_logs(stub_path, tmp_path, script, func, env, 
     expected = {"driver": "json-file", "options": {"max-size": "10m", "max-file": "3"}}
     for name, service in compose["services"].items():
         assert service.get("logging") == expected, name
+
+
+# --------------------------------------------------------------------------
+# Unattended-operation hardening: boot without internet, Docker ports,
+# narrow bot mounts, image cleanup, disk health timer
+# --------------------------------------------------------------------------
+
+
+class TestUnattendedHardening:
+    def run(self, stub_path, tmp_path, body, telegram=None, **env):
+        app = tmp_path / "app"
+        app.mkdir(exist_ok=True)
+        full_env = {
+            "EDGE_SERVER_DIR": str(app),
+            "EDGE_STORAGE_DIR": str(tmp_path / "storage"),
+            "SYSTEMD_DIR": str(tmp_path / "units"),
+            "TELEGRAM_CREDENTIALS_FILE": str(tmp_path / ".telegram"),
+            **env,
+        }
+        if telegram is not None:
+            (tmp_path / ".telegram").write_text(telegram)
+        result = run_sourced("deploy-edge-server.sh", body, stub_path, full_env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        return app, tmp_path / "units", result
+
+    GOOD = f"TELEGRAM_BOT_TOKEN={BOT_TOKEN}\nTELEGRAM_ALLOWED_IDS=1001\n"
+
+    @pytest.fixture(autouse=True)
+    def _no_real_dotfile(self):
+        if (REPO / ".telegram").exists():
+            pytest.skip("a real .telegram exists in the repo checkout")
+
+    # ---- boot without internet ----
+
+    def test_stack_unit_does_not_pull_images_at_boot(self, stub_path, tmp_path):
+        script = (
+            f"export UNIT_DIR={tmp_path}\n"
+            'eval "$(declare -f create_systemd_service '
+            "| sed 's|/etc/systemd/system|'$UNIT_DIR'|g')\"\n"
+            "create_systemd_service\n"
+        )
+        self.run(stub_path, tmp_path, script)
+        unit = (tmp_path / "edge-server.service").read_text()
+        commands = [ln for ln in unit.splitlines() if ln.startswith("Exec")]
+        assert commands and not any("pull" in ln for ln in commands)
+        assert "ExecStart=/usr/bin/docker compose up -d --remove-orphans" in unit
+        assert "edge-docker-firewall.service" in unit  # ports are locked before containers start
+
+    def test_frigate_image_is_pinned(self, stub_path, tmp_path):
+        app, _, _ = self.run(stub_path, tmp_path, "create_app_stack")
+        image = yaml.safe_load((app / "docker-compose.yml").read_text())["services"]["frigate"][
+            "image"
+        ]
+        assert image.startswith("ghcr.io/blakeblackshear/frigate:")
+        assert not image.endswith((":stable", ":latest", ":dev"))
+
+    def test_frigate_image_can_be_overridden(self, stub_path, tmp_path):
+        app, _, _ = self.run(
+            stub_path, tmp_path, "create_app_stack", FRIGATE_IMAGE="example.com/frigate:9.9.9"
+        )
+        compose = yaml.safe_load((app / "docker-compose.yml").read_text())
+        assert compose["services"]["frigate"]["image"] == "example.com/frigate:9.9.9"
+
+    # ---- the bot sees only what it needs ----
+
+    def test_bot_mounts_are_narrow_and_read_only(self, stub_path, tmp_path):
+        app, _, _ = self.run(
+            stub_path, tmp_path, "prepare_telegram_bot; create_app_stack", telegram=self.GOOD
+        )
+        compose = yaml.safe_load((app / "docker-compose.yml").read_text())
+        volumes = compose["services"]["telegram-bot"]["volumes"]
+        assert all(v.endswith(":ro") for v in volumes)
+        targets = {v.split(":")[1] for v in volumes}
+        assert "/opt/edge-server" not in targets  # not the whole app directory
+        assert targets == {
+            "/app",
+            "/opt/edge-server/frigate",
+            "/opt/edge-server/docker-compose.yml",
+            "/status",
+            "/media/frigate",
+        }
+        code = "\n".join(
+            ln for ln in (app / "docker-compose.yml").read_text().splitlines() if "#" not in ln
+        )
+        assert ".cam" not in code and ".telegram:" not in code and "ha-config" not in code
+
+    def test_bot_status_dir_exists_for_the_mount(self, stub_path, tmp_path):
+        app, _, _ = self.run(stub_path, tmp_path, "prepare_telegram_bot", telegram=self.GOOD)
+        assert stat.S_IMODE((app / "bot-status").stat().st_mode) == 0o755
+
+    # ---- Docker ports ----
+
+    def install_helpers(self, stub_path, tmp_path, **env):
+        return self.run(
+            stub_path,
+            tmp_path,
+            "prepare_telegram_bot; install_host_helpers",
+            telegram=self.GOOD,
+            LOCAL_SUBNET="10.1.0.0/16",
+            **env,
+        )
+
+    def test_firewall_script_and_unit(self, stub_path, tmp_path):
+        app, units, _ = self.install_helpers(stub_path, tmp_path)
+        script = app / "docker-firewall.sh"
+        assert stat.S_IMODE(script.stat().st_mode) == 0o700
+        assert subprocess.run([BASH, "-n", str(script)]).returncode == 0
+        text = script.read_text()
+        assert 'LOCAL_SUBNET="10.1.0.0/16"' in text and "__" not in text
+        unit = (units / "edge-docker-firewall.service").read_text()
+        assert f"ExecStart={app}/docker-firewall.sh" in unit
+        assert "After=docker.service" in unit and "PartOf=docker.service" in unit
+        log = (stub_path / "log").read_text()
+        assert "systemctl enable --now edge-docker-firewall.service" in log
+
+    def test_firewall_script_applies_the_expected_rules(self, stub_path, tmp_path):
+        app, _, _ = self.install_helpers(stub_path, tmp_path)
+        iptables = stub_path / "iptables"
+        iptables.write_text(
+            "#!/usr/bin/env bash\n"
+            'echo "iptables $*" >> "$STUB_LOG"\n'
+            '[[ " $* " == *" -C "* ]] && exit 1\n'  # the jump is not installed yet
+            "exit 0\n"
+        )
+        iptables.chmod(0o755)
+        (stub_path / "log").write_text("")
+        env = {"PATH": f"{stub_path}:{os.environ['PATH']}", "STUB_LOG": str(stub_path / "log")}
+        result = run_bash(f"{app}/docker-firewall.sh", env=env)
+        assert result.returncode == 0, result.stderr
+        rules = [
+            line.removeprefix("iptables -w ")
+            for line in (stub_path / "log").read_text().splitlines()
+            if line.startswith("iptables")
+        ]
+        a = "-A EDGE-DOCKER-INPUT"
+        assert rules.index(f"{a} -s 10.1.0.0/16 -j RETURN") < rules.index(f"{a} -j DROP")
+        assert f"{a} -i tailscale0 -j RETURN" in rules
+        assert f"{a} -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN" in rules
+        assert rules[-2] == f"{a} -j DROP" or f"{a} -j DROP" in rules
+        assert rules[-1] == "-I DOCKER-USER 1 -j EDGE-DOCKER-INPUT"
+        assert "-F EDGE-DOCKER-INPUT" in rules  # rebuilt from scratch, so re-runs do not pile up
+
+    def test_firewall_jump_is_not_added_twice(self, stub_path, tmp_path):
+        app, _, _ = self.install_helpers(stub_path, tmp_path)
+        (stub_path / "log").write_text("")
+        env = {"PATH": f"{stub_path}:{os.environ['PATH']}", "STUB_LOG": str(stub_path / "log")}
+        iptables = stub_path / "iptables"
+        iptables.write_text('#!/usr/bin/env bash\necho "iptables $*" >> "$STUB_LOG"\nexit 0\n')
+        iptables.chmod(0o755)
+        run_bash(f"{app}/docker-firewall.sh", env=env)
+        assert "-I DOCKER-USER" not in (stub_path / "log").read_text()  # -C succeeded
+
+    # ---- image cleanup ----
+
+    def test_image_cleanup_timer(self, stub_path, tmp_path):
+        app, units, _ = self.install_helpers(stub_path, tmp_path)
+        script = app / "docker-clean.sh"
+        assert subprocess.run([BASH, "-n", str(script)]).returncode == 0
+        text = script.read_text()
+        assert "for c in frigate telegram-bot; do" in text and "__" not in text
+        assert "docker image prune -af" in text
+        timer = (units / "edge-docker-clean.timer").read_text()
+        assert "OnCalendar=Sun" in timer and "Persistent=true" in timer
+        assert "ExecStart=" + str(script) in (units / "edge-docker-clean.service").read_text()
+        assert "systemctl enable --now edge-docker-clean.timer" in (stub_path / "log").read_text()
+
+    def run_clean(self, stub_path, app, running):
+        docker = stub_path / "docker"
+        docker.write_text(
+            "#!/usr/bin/env bash\n"
+            'echo "docker $*" >> "$STUB_LOG"\n'
+            f'if [[ "$1" == inspect ]]; then echo {"true" if running else "false"}; fi\n'
+            "exit 0\n"
+        )
+        docker.chmod(0o755)
+        (stub_path / "log").write_text("")
+        env = {"PATH": f"{stub_path}:{os.environ['PATH']}", "STUB_LOG": str(stub_path / "log")}
+        run_bash(f"{app}/docker-clean.sh", env=env)
+        return (stub_path / "log").read_text()
+
+    def test_cleanup_prunes_only_while_the_stack_is_running(self, stub_path, tmp_path):
+        app, _, _ = self.install_helpers(stub_path, tmp_path)
+        assert "docker image prune" in self.run_clean(stub_path, app, running=True)
+        assert "docker image prune" not in self.run_clean(stub_path, app, running=False)
+
+    # ---- disk health ----
+
+    def test_disk_health_timer_with_the_bot(self, stub_path, tmp_path):
+        app, units, _ = self.install_helpers(stub_path, tmp_path)
+        assert (app / "smart-report.py").read_text() == (
+            REPO / "telegram-bot/smart-report.py"
+        ).read_text()
+        assert os.access(app / "smart-report.py", os.X_OK)
+        service = (units / "edge-smart.service").read_text()
+        assert f"ExecStart={app}/smart-report.py {app}/bot-status/disks.json" in service
+        timer = (units / "edge-smart.timer").read_text()
+        assert "OnBootSec=" in timer and "OnUnitActiveSec=6h" in timer
+        log = (stub_path / "log").read_text()
+        assert "systemctl enable --now edge-smart.timer" in log
+        assert "systemctl start --no-block edge-smart.service" in log
+
+    def test_no_disk_health_timer_without_the_bot(self, stub_path, tmp_path):
+        app, units, _ = self.run(stub_path, tmp_path, "install_host_helpers")
+        assert not (units / "edge-smart.timer").exists()
+        assert not (app / "smart-report.py").exists()
+        assert (units / "edge-docker-firewall.service").exists()  # the rest is always installed
+
+    def test_disk_health_units_removed_when_bot_is_turned_off(self, stub_path, tmp_path):
+        app, units, _ = self.install_helpers(stub_path, tmp_path)
+        assert (units / "edge-smart.timer").exists()
+        self.run(
+            stub_path,
+            tmp_path,
+            "prepare_telegram_bot; install_host_helpers",
+            INSTALL_TELEGRAM_BOT="false",
+        )
+        assert not (units / "edge-smart.timer").exists()
+        assert not (units / "edge-smart.service").exists()
+        assert not (app / "smart-report.py").exists()
+        assert "systemctl disable --now edge-smart.timer" in (stub_path / "log").read_text()
+
+    def test_smartmontools_is_installed(self):
+        assert "smartmontools" in (REPO / "deploy-edge-server.sh").read_text()

@@ -42,7 +42,7 @@ section() {
 
 section "Syntax Validation"
 
-for script in initial-setup.sh deploy-edge-server.sh deploy-security.sh secrets.sh; do
+for script in initial-setup.sh deploy-edge-server.sh secrets.sh; do
     if [ -f "$script" ]; then
         if bash -n "$script" 2>/dev/null; then
             pass "$script syntax OK"
@@ -233,31 +233,6 @@ if grep -q "docker.compose\|docker compose" deploy-edge-server.sh 2>/dev/null; t
     pass "Contains docker compose logic"
 else
     fail "Missing docker compose logic"
-fi
-
-#-----------------------------------------------------------------------------
-# Test: deploy-security.sh
-#-----------------------------------------------------------------------------
-
-section "deploy-security.sh"
-
-# Test: Script requires root. Only run it as a non-root user: as root it
-# would really start provisioning this machine. The output is captured first:
-# piping into grep under `pipefail` would report the script's (expected)
-# non-zero exit as a failed match.
-if [ "$(id -u)" -eq 0 ]; then
-    skip "Running as root - not executing deploy-security.sh"
-elif ! out=$(./deploy-security.sh < /dev/null 2>&1) && grep -qi "root\|sudo" <<< "$out"; then
-    pass "Checks for root/sudo"
-else
-    fail "deploy-security.sh does not refuse to run without root"
-fi
-
-# Test: Has Frigate config
-if grep -q "frigate\|FRIGATE" deploy-security.sh 2>/dev/null; then
-    pass "Contains Frigate configuration"
-else
-    fail "Missing Frigate configuration"
 fi
 
 #-----------------------------------------------------------------------------

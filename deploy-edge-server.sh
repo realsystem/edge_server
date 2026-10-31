@@ -56,6 +56,11 @@ TELEGRAM_CHANGED=false
 TELEGRAM_REBOOT_ENABLED=false  # /reboot: needs REBOOT_TOTP_SECRET in .telegram
 SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
 
+# Frigate image. Pinned: the stack must come up the same way after every boot,
+# so a new upstream release never arrives unattended. To upgrade, change this
+# and run the deploy script again.
+FRIGATE_IMAGE="${FRIGATE_IMAGE:-ghcr.io/blakeblackshear/frigate:0.18.2}"
+
 # MQTT credentials (only used when INSTALL_MQTT=true)
 MQTT_USER="${MQTT_USER:-admin}"
 MQTT_PASS="${MQTT_PASS:-}"
@@ -246,6 +251,7 @@ install_packages() {
         net-tools \
         git \
         unattended-upgrades \
+        smartmontools \
         ufw \
         htop \
         iotop \
@@ -543,7 +549,8 @@ configure_firewall() {
     # Allow SSH from anywhere (critical for remote access)
     ufw allow ssh comment 'SSH'
 
-    # Allow services from local subnet only
+    # Allow services from local subnet only. (Docker publishes its ports around
+    # UFW; edge-docker-firewall applies the same rule to them, see install_host_helpers.)
     ufw allow from "$LOCAL_SUBNET" to any port 5000 proto tcp comment 'Frigate'
     if [[ "$INSTALL_MQTT" == "true" ]]; then
         ufw allow from "$LOCAL_SUBNET" to any port 1883 proto tcp comment 'MQTT'
@@ -742,6 +749,12 @@ prepare_telegram_bot() {
         warn "Could not build the Telegram bot image (no network?) - skipping the Telegram bot"
     fi
 
+    if [[ "$INSTALL_TELEGRAM_BOT" == "true" ]]; then
+        # Written by the host (smart-report.py), mounted read-only into the bot
+        mkdir -p "$APP_DIR/bot-status"
+        chmod 755 "$APP_DIR/bot-status"
+    fi
+
     if [[ "$INSTALL_TELEGRAM_BOT" == "true" && -n "$totp_secret" ]]; then
         # Root-only drop box: the container writes a request file, a host systemd
         # unit acts on it (see install_reboot_unit).
@@ -795,6 +808,145 @@ UNIT
     rm -f "$APP_DIR/bot-requests/reboot"
     systemctl daemon-reload
     systemctl enable --now edge-reboot.path
+}
+
+# Host-side helpers, each a small script plus a systemd unit:
+#  - edge-docker-firewall: Docker publishes ports around UFW, so the "allow from
+#    the local network" rules do not apply to them. This puts the same rule in
+#    Docker's own DOCKER-USER chain.
+#  - edge-docker-clean (weekly): remove images nothing uses, so updates do not
+#    slowly fill the disk.
+#  - edge-smart (every 6 h): disk health for the Telegram bot (it cannot read
+#    SMART from inside its locked-down container).
+install_host_helpers() {
+    local dir="$SYSTEMD_DIR" script_dir containers
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    containers=$(stack_containers)
+    mkdir -p "$dir" "$APP_DIR"
+    info "Installing the Docker firewall, image cleanup and disk health timers..."
+
+    cat > "$APP_DIR/docker-firewall.sh" << 'SCRIPT'
+#!/usr/bin/env bash
+# Only the local network and Tailscale may reach the ports Docker publishes
+# (Frigate's web UI and RTSP restream have no login on these ports).
+set -euo pipefail
+LOCAL_SUBNET="__LOCAL_SUBNET__"
+CHAIN=EDGE-DOCKER-INPUT
+
+iptables -w -N DOCKER-USER 2> /dev/null || true # Docker creates it; harmless if it exists
+iptables -w -N "$CHAIN" 2> /dev/null || true
+iptables -w -F "$CHAIN"
+iptables -w -A "$CHAIN" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+iptables -w -A "$CHAIN" -s "$LOCAL_SUBNET" -j RETURN
+iptables -w -A "$CHAIN" -i tailscale0 -j RETURN
+iptables -w -A "$CHAIN" -i docker0 -j RETURN   # containers talking out and to each other
+iptables -w -A "$CHAIN" -i br+ -j RETURN
+iptables -w -A "$CHAIN" -j DROP
+iptables -w -C DOCKER-USER -j "$CHAIN" 2> /dev/null || iptables -w -I DOCKER-USER 1 -j "$CHAIN"
+SCRIPT
+    sed -i "s|__LOCAL_SUBNET__|${LOCAL_SUBNET}|" "$APP_DIR/docker-firewall.sh"
+    chmod 700 "$APP_DIR/docker-firewall.sh"
+
+    cat > "$dir/edge-docker-firewall.service" << UNIT
+[Unit]
+Description=Restrict Docker published ports to the local network and Tailscale
+After=docker.service
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$APP_DIR/docker-firewall.sh
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+    cat > "$APP_DIR/docker-clean.sh" << 'SCRIPT'
+#!/usr/bin/env bash
+# Remove images nothing uses (old Frigate versions after an upgrade).
+# Only while the whole stack is running, so a stopped container never loses its image.
+set -euo pipefail
+for c in __CONTAINERS__; do
+    if [[ "$(docker inspect -f '{{.State.Running}}' "$c" 2> /dev/null)" != "true" ]]; then
+        echo "$c is not running - skipping cleanup"
+        exit 0
+    fi
+done
+docker image prune -af --filter "until=336h"
+docker builder prune -f --filter "until=168h"
+SCRIPT
+    sed -i "s|__CONTAINERS__|${containers}|" "$APP_DIR/docker-clean.sh"
+    chmod 700 "$APP_DIR/docker-clean.sh"
+
+    cat > "$dir/edge-docker-clean.service" << UNIT
+[Unit]
+Description=Remove unused Docker images
+After=docker.service
+
+[Service]
+Type=oneshot
+Nice=19
+ExecStart=$APP_DIR/docker-clean.sh
+UNIT
+    cat > "$dir/edge-docker-clean.timer" << 'UNIT'
+[Unit]
+Description=Remove unused Docker images weekly
+
+[Timer]
+OnCalendar=Sun *-*-* 04:30:00
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+    local smart=false
+    if [[ "$INSTALL_TELEGRAM_BOT" == "true" && -f "$script_dir/telegram-bot/smart-report.py" ]]; then
+        smart=true
+        install -m 755 "$script_dir/telegram-bot/smart-report.py" "$APP_DIR/smart-report.py"
+        mkdir -p "$APP_DIR/bot-status"
+        chmod 755 "$APP_DIR/bot-status"
+        cat > "$dir/edge-smart.service" << UNIT
+[Unit]
+Description=Write disk health for the Telegram bot
+After=local-fs.target
+
+[Service]
+Type=oneshot
+Nice=19
+ExecStart=$APP_DIR/smart-report.py $APP_DIR/bot-status/disks.json
+UNIT
+        cat > "$dir/edge-smart.timer" << 'UNIT'
+[Unit]
+Description=Write disk health every 6 hours
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=6h
+AccuracySec=5min
+
+[Install]
+WantedBy=timers.target
+UNIT
+    else
+        if [[ -f "$dir/edge-smart.timer" ]]; then
+            systemctl disable --now edge-smart.timer &> /dev/null || true
+        fi
+        rm -f "$dir/edge-smart.service" "$dir/edge-smart.timer" "$APP_DIR/smart-report.py"
+    fi
+
+    chmod 644 "$dir"/edge-docker-*.service "$dir"/edge-docker-clean.timer
+    systemctl daemon-reload
+    systemctl enable --now edge-docker-firewall.service
+    systemctl enable --now edge-docker-clean.timer
+    if [[ "$smart" == "true" ]]; then
+        chmod 644 "$dir/edge-smart.service" "$dir/edge-smart.timer"
+        systemctl enable --now edge-smart.timer
+        systemctl start --no-block edge-smart.service || true # first report now, not in 3 minutes
+    fi
 }
 
 create_app_stack() {
@@ -878,7 +1030,7 @@ EOF
   # Frigate NVR
   #-----------------------------------------------------------------------------
   frigate:
-    image: ghcr.io/blakeblackshear/frigate:stable
+    image: __FRIGATE_IMAGE__
     container_name: frigate
     restart: unless-stopped
     logging: *default-logging
@@ -938,8 +1090,12 @@ EOF
             [[ "$TELEGRAM_REBOOT_ENABLED" == "true" ]] && printf '      - REQUESTS_DIR=/requests\n'
             cat << 'EOF'
     volumes:
+      # Only what /status and /diag read. Not the whole app dir: that holds
+      # camera logins (.cam), Home Assistant tokens and the MQTT password file.
       - ./telegram-bot:/app:ro
-      - .:/opt/edge-server:ro
+      - ./frigate:/opt/edge-server/frigate:ro
+      - ./docker-compose.yml:/opt/edge-server/docker-compose.yml:ro
+      - ./bot-status:/status:ro
       - __STORAGE_MOUNT__/frigate:/media/frigate:ro
 EOF
             [[ "$TELEGRAM_REBOOT_ENABLED" == "true" ]] && printf '      - ./bot-requests:/requests\n'
@@ -961,6 +1117,7 @@ EOF
 
     # Substitute storage mount path
     sed -i "s|__STORAGE_MOUNT__|${STORAGE_MOUNT}|g" "$APP_DIR/docker-compose.yml"
+    sed -i "s|__FRIGATE_IMAGE__|${FRIGATE_IMAGE}|g" "$APP_DIR/docker-compose.yml"
 
     # Without an Intel GPU the device mapping makes `docker compose up` fail
     # outright, so drop it (and VA-API below) on machines that lack it.
@@ -1210,6 +1367,15 @@ discover_cameras() {
 # SYSTEMD SERVICE
 #-------------------------------------------------------------------------------
 
+# Names of the containers this deployment runs
+stack_containers() {
+    local containers="frigate"
+    [[ "$INSTALL_MQTT" == "true" ]] && containers="$containers mosquitto"
+    [[ "$INSTALL_HOMEASSISTANT" == "true" ]] && containers="$containers homeassistant"
+    [[ "$INSTALL_TELEGRAM_BOT" == "true" ]] && containers="$containers telegram-bot"
+    echo "$containers"
+}
+
 create_systemd_service() {
     info "Creating systemd service for auto-start..."
 
@@ -1217,15 +1383,16 @@ create_systemd_service() {
 [Unit]
 Description=Edge Server Docker Compose Stack
 Documentation=https://docs.frigate.video
-After=network-online.target docker.service
-Wants=network-online.target
+After=network-online.target docker.service edge-docker-firewall.service
+Wants=network-online.target edge-docker-firewall.service
 Requires=docker.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=${APP_DIR}
-ExecStartPre=/usr/bin/docker compose pull --quiet
+# No "compose pull" here: after a reboot the stack must start without internet.
+# Images are pulled when you run the deploy script.
 ExecStart=/usr/bin/docker compose up -d --remove-orphans
 ExecStop=/usr/bin/docker compose down
 ExecReload=/usr/bin/docker compose up -d --remove-orphans
@@ -1302,10 +1469,8 @@ fi
 log "Health check passed - all containers running"
 EOF
 
-    local containers="frigate"
-    [[ "$INSTALL_MQTT" == "true" ]] && containers="$containers mosquitto"
-    [[ "$INSTALL_HOMEASSISTANT" == "true" ]] && containers="$containers homeassistant"
-    [[ "$INSTALL_TELEGRAM_BOT" == "true" ]] && containers="$containers telegram-bot"
+    local containers
+    containers=$(stack_containers)
     sed -i -e "s|__APP_DIR__|${APP_DIR}|" -e "s|__STORAGE_MOUNT__|${STORAGE_MOUNT}|" \
         -e "s|__CONTAINERS__|${containers}|" "$APP_DIR/health-check.sh"
     chmod +x "$APP_DIR/health-check.sh"
@@ -1465,6 +1630,7 @@ main() {
     discover_cameras
     create_systemd_service
     install_reboot_unit
+    install_host_helpers
     start_services
     install_victron
     install_nut_power

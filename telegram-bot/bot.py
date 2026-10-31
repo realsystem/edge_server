@@ -102,6 +102,12 @@ class Config:
     alert_free_percent: float = 15.0  # alert below this much free disk; 0 = off
     alert_interval: float = 300.0  # seconds between disk checks
     alert_repeat: float = 6 * 3600.0  # seconds between reminders while the disk stays low
+    watch: bool = True  # alert on Frigate down, camera offline, hot CPU, failing disk
+    alert_confirm: int = 2  # checks in a row before alerting (ignores restarts and blips)
+    alert_temp_c: float = 85.0  # CPU temperature alert level; 0 = off
+    alert_wear_percent: float = 80.0  # alert when an SSD reports this much of its life used
+    status_dir: Path = Path("/status")  # disk health written by the host (smart-report.py)
+    smart_max_age: float = 3 * 86400.0  # alert if that file is older than this
     totp_secret: str = ""  # base32; empty = /reboot is off
     requests_dir: Path = Path("/requests")  # shared with the host-side reboot watcher
     reboot_min_uptime: float = 600.0  # refuse to reboot a host that booted less than this ago
@@ -127,6 +133,15 @@ class Config:
         if not 0 <= percent <= 100:
             raise ValueError("ALERT_DISK_FREE_PERCENT must be between 0 and 100")
         totp_secret = normalize_secret(env.get("REBOOT_TOTP_SECRET", ""))
+        try:
+            temp = float(env.get("ALERT_TEMP_C", cls.alert_temp_c))
+            wear = float(env.get("ALERT_DISK_WEAR_PERCENT", cls.alert_wear_percent))
+            confirm = int(env.get("ALERT_CONFIRM", cls.alert_confirm))
+        except ValueError:
+            raise ValueError(
+                "ALERT_TEMP_C, ALERT_DISK_WEAR_PERCENT and ALERT_CONFIRM must be numbers"
+            ) from None
+        watch = env.get("ALERT_WATCH", "true").strip().lower() not in ("false", "0", "no", "off")
         return cls(
             token=token,
             allowed=frozenset(allowed),
@@ -143,6 +158,11 @@ class Config:
             alert_free_percent=percent,
             alert_interval=float(env.get("ALERT_INTERVAL", cls.alert_interval)),
             alert_repeat=float(env.get("ALERT_REPEAT_HOURS", cls.alert_repeat / 3600)) * 3600,
+            watch=watch,
+            alert_confirm=max(1, confirm),
+            alert_temp_c=temp,
+            alert_wear_percent=wear,
+            status_dir=Path(env.get("STATUS_DIR", str(cls.status_dir))),
             totp_secret=totp_secret,
             requests_dir=Path(env.get("REQUESTS_DIR", str(cls.requests_dir))),
         )
@@ -402,10 +422,17 @@ def disk_usage(path: Path) -> tuple[int, int] | None:
     return st.f_blocks * st.f_frsize, st.f_bavail * st.f_frsize
 
 
+def system_path(cfg: Config) -> Path:
+    """A path on the host's system disk. app_dir itself is only the container's own
+    filesystem; its frigate/ subfolder is a bind mount of the host's."""
+    frigate = cfg.app_dir / "frigate"
+    return frigate if frigate.exists() else cfg.app_dir
+
+
 def watched_disks(cfg: Config) -> list[tuple[str, Path]]:
     """Disks to watch, one entry per filesystem (recordings often share the system disk)."""
     groups: dict[int, tuple[list[str], Path]] = {}
-    for label, path in (("recordings", cfg.storage_path), ("system disk", cfg.app_dir)):
+    for label, path in (("recordings", cfg.storage_path), ("system disk", system_path(cfg))):
         try:
             device = os.stat(path).st_dev
         except OSError:
@@ -538,7 +565,7 @@ def build_status(cfg: Config, sleep: Callable[[float], None] = time.sleep) -> st
     if on_battery:
         problems.append("running on battery")
 
-    for label, path in (("recordings", cfg.storage_path), ("system disk", cfg.app_dir)):
+    for label, path in (("recordings", cfg.storage_path), ("system disk", system_path(cfg))):
         line, low = disk_line(label, path)
         host.append(line)
         if low:
@@ -566,6 +593,32 @@ class DiskState:
 
 
 @dataclass
+class Incident:
+    """One thing being watched that is currently wrong."""
+
+    label: str
+    strikes: int = 0
+    alerted: bool = False
+    last_alert: float = 0.0
+
+
+def disk_problems(disk: dict, wear_limit: float) -> list[str]:
+    """What is wrong with one drive, from smart-report.py's summary of it."""
+    problems = []
+    if disk.get("passed") is False:
+        problems.append("SMART health check FAILED - the drive is failing")
+    wear = disk.get("wear_used")
+    if isinstance(wear, (int, float)) and wear_limit > 0 and wear >= wear_limit:
+        problems.append(f"{wear:g}% of its rated life used (alert level {wear_limit:g}%)")
+    reallocated, pending = disk.get("reallocated") or 0, disk.get("pending") or 0
+    if reallocated or pending:
+        problems.append(f"bad sectors: {reallocated} reallocated, {pending} pending")
+    if disk.get("media_errors"):
+        problems.append(f"{disk['media_errors']} media errors")
+    return problems
+
+
+@dataclass
 class Bot:
     cfg: Config
     api: Telegram
@@ -579,6 +632,7 @@ class Bot:
     _failures: dict[int, int] = field(default_factory=dict)
     _locked_until: dict[int, float] = field(default_factory=dict)
     _reboot_timer: threading.Timer | None = None
+    _incidents: dict[str, Incident] = field(default_factory=dict)
 
     # -- sending ----------------------------------------------------------
 
@@ -691,8 +745,137 @@ class Bot:
                 )
         return messages
 
+    # -- watchers ---------------------------------------------------------
+    # Each check calls judge() with what it found. A problem must be seen
+    # ``alert_confirm`` times in a row before it is reported (a Frigate restart
+    # or a camera reboot is not an outage), is repeated every ``alert_repeat``
+    # seconds while it lasts, and a "back to normal" message ends it.
+
+    def judge(
+        self,
+        key: str,
+        label: str,
+        problem: str | None,
+        now: float,
+        confirm: int | None = None,
+    ) -> str | None:
+        needed = self.cfg.alert_confirm if confirm is None else confirm
+        incident = self._incidents.get(key)
+        if problem is None:
+            if incident is None:
+                return None
+            del self._incidents[key]
+            return f"✅ {label}: back to normal." if incident.alerted else None
+        if incident is None:
+            incident = self._incidents[key] = Incident(label)
+        incident.strikes += 1
+        if incident.strikes < needed:
+            return None
+        if incident.alerted and now - incident.last_alert < self.cfg.alert_repeat:
+            return None
+        reminder = " (reminder)" if incident.alerted else ""
+        incident.alerted = True
+        incident.last_alert = now
+        return f"⚠️ {problem}{reminder}"
+
+    def watch_frigate(self, now: float) -> list[str]:
+        cfg = self.cfg
+        try:
+            stats = json.loads(http_get(f"{cfg.frigate_url}/api/stats"))
+        except (OSError, ValueError, urllib.error.URLError):
+            message = self.judge(
+                "frigate",
+                "Frigate",
+                "Frigate is not responding. Recording has probably stopped. "
+                "If it does not recover by itself, reboot with /reboot.",
+                now,
+            )
+            return [message] if message else []
+        messages = [self.judge("frigate", "Frigate", None, now)]
+        disabled = disabled_cameras(cfg)
+        for name, camera in sorted((stats.get("cameras") or {}).items()):
+            offline = name not in disabled and float(camera.get("camera_fps") or 0) < 0.5
+            messages.append(
+                self.judge(
+                    f"camera:{name}",
+                    f"Camera {name}",
+                    (
+                        f"Camera {name} has no video (offline, unplugged or wrong login?). "
+                        "Nothing is being recorded from it."
+                        if offline
+                        else None
+                    ),
+                    now,
+                )
+            )
+        return [m for m in messages if m]
+
+    def watch_temperature(self, now: float) -> list[str]:
+        limit = self.cfg.alert_temp_c
+        temps = temperatures(self.cfg.sys)
+        if limit <= 0 or not temps:
+            return []
+        name, hottest = max(temps, key=lambda t: t[1])
+        if hottest >= limit:
+            problem = (
+                f"CPU temperature {hottest:.0f} °C ({name}), alert level {limit:g} °C. "
+                "Check fan, dust and airflow."
+            )
+        elif hottest < limit - 5:
+            problem = None
+        else:
+            return []  # in the hysteresis band: no change either way
+        message = self.judge("temperature", "CPU temperature", problem, now)
+        return [message] if message else []
+
+    def watch_disk_health(self, now: float) -> list[str]:
+        path = self.cfg.status_dir / "disks.json"
+        try:
+            report = json.loads(path.read_text())
+            generated = float(report["generated"])
+        except FileNotFoundError:
+            return []  # not installed (no smartmontools or no bot-status mount)
+        except (OSError, ValueError, KeyError, TypeError):
+            report, generated = {"error": "disks.json is unreadable"}, self.clock()
+        messages = []
+        age = self.clock() - generated
+        monitor_problem = None
+        if report.get("error"):
+            monitor_problem = f"Disk health monitor problem: {report['error']}."
+        elif age > self.cfg.smart_max_age:
+            monitor_problem = (
+                f"Disk health has not been checked for {human_duration(age)} "
+                "(systemctl status edge-smart.timer edge-smart.service)."
+            )
+        messages.append(self.judge("smart:monitor", "Disk health monitor", monitor_problem, now, 1))
+        for disk in report.get("disks") or []:
+            device = str(disk.get("device", "?"))
+            found = disk_problems(disk, self.cfg.alert_wear_percent)
+            title = f"{device} ({disk.get('model') or 'unknown model'})"
+            problem = None
+            if found:
+                problem = (
+                    f"Disk {title}: " + "; ".join(found) + ". Plan a replacement and keep "
+                    "a copy of the config (.cam, .telegram, frigate/config.yml)."
+                )
+            messages.append(self.judge(f"smart:{device}", f"Disk {title}", problem, now, 1))
+        return [m for m in messages if m]
+
+    def watch_messages(self, now: float | None = None) -> list[str]:
+        now = time.monotonic() if now is None else now
+        messages: list[str] = []
+        for check in (self.watch_frigate, self.watch_temperature, self.watch_disk_health):
+            try:
+                messages += check(now)
+            except Exception:  # noqa: BLE001 - one broken check must not hide the others
+                log.exception("%s failed", check.__name__)
+        return messages
+
     def send_alerts(self) -> None:
-        for text in self.disk_alert_messages():
+        messages = self.disk_alert_messages()
+        if self.cfg.watch:
+            messages += self.watch_messages()
+        for text in messages:
             for chat_id in sorted(self.cfg.allowed):  # private chats: chat id == user id
                 self.reply(chat_id, text)
 
@@ -976,12 +1159,13 @@ class Bot:
             threading.Thread(target=self.notify_after_reboot, daemon=True).start()
         if not self.cfg.allowed:
             log.warning("TELEGRAM_ALLOWED_IDS is empty: send /id to the bot to get your id")
-        if self.cfg.allowed and self.cfg.alert_free_percent > 0:
+        if self.cfg.allowed and (self.cfg.alert_free_percent > 0 or self.cfg.watch):
             threading.Thread(target=self.alert_loop, daemon=True).start()
             log.info(
-                "disk alerts on: below %g%% free, every %g s",
-                self.cfg.alert_free_percent,
+                "alerts on every %g s: disk below %g%% free, watchers %s",
                 self.cfg.alert_interval,
+                self.cfg.alert_free_percent,
+                "on" if self.cfg.watch else "off",
             )
         offset: int | None = None
         failures = 0

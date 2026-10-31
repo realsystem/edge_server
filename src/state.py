@@ -84,7 +84,6 @@ class StateMachine:
         Phase.REBOOT,
         Phase.SECRETS,
         Phase.DEPLOY_BASE,
-        Phase.DEPLOY_SECURITY,
         Phase.VERIFY,
         Phase.DONE,
     ]

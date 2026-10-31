@@ -40,7 +40,6 @@ class Bootstrap:
     SCRIPTS = [
         "initial-setup.sh",
         "deploy-edge-server.sh",
-        "deploy-security.sh",
         "secrets.sh",
         "discover-cameras.sh",
         "collect-diagnostics.sh",
@@ -538,10 +537,7 @@ class Bootstrap:
         start = self.state.start_phase(Phase.DEPLOY_BASE)
 
         if self.dry_run:
-            if self.deploy_type in ["base", "full"]:
-                self.progress.dry_run("Would run deploy-edge-server.sh")
-            if self.deploy_type == "security":
-                self.progress.dry_run("Would run deploy-security.sh")
+            self.progress.dry_run("Would run deploy-edge-server.sh")
             self.state.complete_phase(Phase.DEPLOY_BASE, PhaseStatus.SUCCESS, "Dry run", start)
             return True
 
@@ -560,35 +556,17 @@ class Bootstrap:
         if self.config.deploy.edge_storage_dir:
             deploy_env += f" EDGE_STORAGE_DIR={shlex.quote(self.config.deploy.edge_storage_dir)}"
 
-        # Deploy base stack ("full" = base stack, which already includes Frigate)
-        if self.deploy_type in ["base", "full"]:
-            if not self._run_deploy_script(
-                "deploy-edge-server.sh",
-                "base stack",
-                f"Deploying base stack ({self._stack_description()})...",
-                deploy_env,
-                self.config.timeouts.deployment_base,
-            ):
-                self.state.complete_phase(Phase.DEPLOY_BASE, PhaseStatus.FAILED, "Failed", start)
-                self._maybe_rollback()
-                return False
-
-        # Security-only stack (alternative layout; overlaps with the base stack)
-        if self.deploy_type == "security":
-            sec_start = self.state.start_phase(Phase.DEPLOY_SECURITY)
-            if not self._run_deploy_script(
-                "deploy-security.sh",
-                "security stack",
-                "Deploying security stack (Frigate NVR)...",
-                deploy_env,
-                self.config.timeouts.deployment_security,
-            ):
-                self.state.complete_phase(
-                    Phase.DEPLOY_SECURITY, PhaseStatus.FAILED, "Failed", sec_start
-                )
-                self._maybe_rollback()
-                return False
-            self.state.complete_phase(Phase.DEPLOY_SECURITY, PhaseStatus.SUCCESS, "OK", sec_start)
+        # One script deploys everything, Frigate included
+        if not self._run_deploy_script(
+            "deploy-edge-server.sh",
+            "base stack",
+            f"Deploying base stack ({self._stack_description()})...",
+            deploy_env,
+            self.config.timeouts.deployment_base,
+        ):
+            self.state.complete_phase(Phase.DEPLOY_BASE, PhaseStatus.FAILED, "Failed", start)
+            self._maybe_rollback()
+            return False
 
         self.state.complete_phase(Phase.DEPLOY_BASE, PhaseStatus.SUCCESS, "OK", start)
         self.progress.phase_summary()
@@ -690,8 +668,8 @@ class Bootstrap:
                 self.progress.warn(f"MQTT: {health.message}")
                 failed += 1
 
-        # Check Frigate (if security deployed)
-        if self.config.services.verify_frigate and self.deploy_type in ["security", "full"]:
+        # Check Frigate
+        if self.config.services.verify_frigate and self.deploy_type in ["base", "full"]:
             health = self._checker.check_frigate(
                 self.target,
                 self.config.services.frigate_port,
@@ -828,7 +806,7 @@ Examples:
     parser.add_argument("--config", type=Path, help="Config file path")
     parser.add_argument("--secrets-file", type=Path, help="Secrets file path")
     parser.add_argument(
-        "--deploy", choices=["base", "security", "full"], default="full", help="Deployment type"
+        "--deploy", choices=["base", "full"], default="full", help="Deployment type"
     )
     parser.add_argument("--user", help="SSH user (default: from config or current user)")
     parser.add_argument("--key", "-i", help="SSH private key file")

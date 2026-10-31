@@ -1,6 +1,7 @@
 """Tests for the non-dry-run bootstrap phases (with a mocked SSH client)."""
 
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -9,6 +10,8 @@ from bootstrap import Bootstrap, main, remote_path
 from config import Config
 from services import HealthStatus, ServiceHealth
 from ssh import SSHResult
+
+REPO = Path(__file__).resolve().parent.parent
 
 OK = SSHResult(0, "", "")
 FAIL = SSHResult(1, "boom output", "boom")
@@ -46,15 +49,15 @@ class TestRemotePath:
 
 
 class TestDeploymentPhase:
-    def test_security_deploy_runs_security_script(self):
-        # Used to raise NameError: deploy_env/secrets_pass were only defined
-        # inside the base-stack branch.
-        b = make(deploy_type="security")
+    def test_base_deploy_runs_the_one_deploy_script(self):
+        b = make(deploy_type="base")
         assert b._phase_deployment() is True
         cmds = commands(b)
-        assert len(cmds) == 1
-        assert "./deploy-security.sh" in cmds[0]
-        assert "deploy-edge-server.sh" not in cmds[0]
+        assert len(cmds) == 1 and "./deploy-edge-server.sh" in cmds[0]
+
+    def test_there_is_no_separate_security_deploy(self):
+        assert "deploy-security.sh" not in Bootstrap.SCRIPTS
+        assert not (REPO / "deploy-security.sh").exists()
 
     def test_full_deploy_runs_base_only(self):
         b = make(deploy_type="full")
