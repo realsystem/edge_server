@@ -610,6 +610,7 @@ class TestFrigateOnlyDefault:
                 {"INSTALL_MQTT": "true", "INSTALL_HOMEASSISTANT": "true"},
                 "CONTAINERS=(frigate mosquitto homeassistant)",
             ),
+            ({"INSTALL_TELEGRAM_BOT": "true"}, "CONTAINERS=(frigate telegram-bot)"),
         ],
     )
     def test_health_check_watches_installed_containers(self, stub_path, tmp_path, env, expected):
@@ -892,3 +893,210 @@ def test_hwaccel_enabled_only_on_request(stub_path, tmp_path, script, func, env)
     assert compose["services"]["frigate"]["devices"]
     cfg = yaml.safe_load((tmp_path / "app" / "frigate" / "config.yml").read_text())
     assert cfg["ffmpeg"]["hwaccel_args"] == "preset-vaapi"
+
+
+# --------------------------------------------------------------------------
+# Telegram bot
+# --------------------------------------------------------------------------
+
+BOT_TOKEN = "123456789:AAH" + "x" * 30
+
+
+class TestTelegramBotInDeploy:
+    def run(self, stub_path, tmp_path, body="prepare_telegram_bot", telegram=None, **env):
+        """Run with a .telegram file at tmp_path/.telegram (content from ``telegram``)."""
+        app = tmp_path / "app"
+        app.mkdir(exist_ok=True)
+        full_env = {
+            "EDGE_SERVER_DIR": str(app),
+            "EDGE_STORAGE_DIR": str(tmp_path / "storage"),
+            "TELEGRAM_CREDENTIALS_FILE": str(tmp_path / ".telegram"),
+            **env,
+        }
+        if telegram is not None:
+            (tmp_path / ".telegram").write_text(telegram)
+            (tmp_path / ".telegram").chmod(0o644)
+        result = run_sourced("deploy-edge-server.sh", body, stub_path, full_env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        return app, result
+
+    GOOD = f"TELEGRAM_BOT_TOKEN={BOT_TOKEN}\nTELEGRAM_ALLOWED_IDS=1001,2002\n"
+
+    @staticmethod
+    def compose(app):
+        return yaml.safe_load((app / "docker-compose.yml").read_text())
+
+    @pytest.fixture(autouse=True)
+    def _no_real_dotfile(self):
+        if (REPO / ".telegram").exists():
+            pytest.skip("a real .telegram exists in the repo checkout")
+
+    def test_skipped_without_file(self, stub_path, tmp_path):
+        app, result = self.run(
+            stub_path, tmp_path, body="prepare_telegram_bot; echo V=$INSTALL_TELEGRAM_BOT"
+        )
+        assert "skipping the Telegram bot" in result.stdout and "V=false" in result.stdout
+        assert not (app / "telegram-bot").exists()
+
+    def test_installs_files_privately_and_builds_image(self, stub_path, tmp_path):
+        body = "prepare_telegram_bot; echo V=$INSTALL_TELEGRAM_BOT"
+        app, result = self.run(stub_path, tmp_path, body=body, telegram=self.GOOD)
+        assert "V=true" in result.stdout
+        assert (app / "telegram-bot/bot.py").read_text() == (
+            REPO / "telegram-bot/bot.py"
+        ).read_text()
+        assert (app / "telegram-bot/Dockerfile").is_file()
+        script = app / "telegram-bot/collect-diagnostics.sh"
+        assert os.access(script, os.X_OK)
+        token_file = app / ".telegram"
+        assert token_file.read_text() == self.GOOD
+        assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+        assert (
+            f"docker build -q -t edge-telegram-bot:local {app}/telegram-bot"
+            in (stub_path / "log").read_text()
+        )
+
+    def test_compose_service_is_hardened_and_has_no_token(self, stub_path, tmp_path):
+        body = "prepare_telegram_bot; create_app_stack"
+        app, _ = self.run(stub_path, tmp_path, body=body, telegram=self.GOOD)
+        compose = self.compose(app)
+        bot = compose["services"]["telegram-bot"]
+        assert set(compose["services"]) == {"frigate", "telegram-bot"}
+        assert bot["image"] == "edge-telegram-bot:local" and bot["pull_policy"] == "never"
+        assert bot["read_only"] is True and bot["pid"] == "host" and bot["init"] is True
+        assert bot["cap_drop"] == ["ALL"] and "no-new-privileges:true" in bot["security_opt"]
+        assert bot["env_file"] == "./.telegram"
+        assert "ports" not in bot and "privileged" not in bot and "devices" not in bot
+        # host paths are mounted read-only
+        assert all(v.endswith(":ro") for v in bot["volumes"])
+        assert any(v.startswith(f"{tmp_path / 'storage'}/frigate:") for v in bot["volumes"])
+        assert BOT_TOKEN not in (app / "docker-compose.yml").read_text()
+
+    def test_no_bot_in_compose_by_default(self, stub_path, tmp_path):
+        app, _ = self.run(stub_path, tmp_path, body="create_app_stack")
+        assert set(self.compose(app)["services"]) == {"frigate"}
+
+    def test_disabled_by_flag(self, stub_path, tmp_path):
+        app, result = self.run(
+            stub_path, tmp_path, telegram=self.GOOD, INSTALL_TELEGRAM_BOT="false"
+        )
+        assert "disabled" in result.stdout
+        assert not (app / "telegram-bot").exists()
+
+    @pytest.mark.parametrize(
+        "content,message",
+        [
+            ("TELEGRAM_BOT_TOKEN=nope\nTELEGRAM_ALLOWED_IDS=1\n", "not a bot token"),
+            ("TELEGRAM_ALLOWED_IDS=1\n", "not a bot token"),
+            (f"TELEGRAM_BOT_TOKEN={BOT_TOKEN}\nTELEGRAM_ALLOWED_IDS=12,@bob\n", "numeric user ids"),
+        ],
+    )
+    def test_invalid_file_skips_bot_but_not_deploy(self, stub_path, tmp_path, content, message):
+        app, result = self.run(
+            stub_path,
+            tmp_path,
+            body="prepare_telegram_bot; echo V=$INSTALL_TELEGRAM_BOT",
+            telegram=content,
+        )
+        assert message in result.stdout and "V=false" in result.stdout
+        assert not (app / "telegram-bot").exists()
+        log = stub_path / "log"
+        assert not log.exists() or "docker build" not in log.read_text()
+
+    def test_empty_ids_warns_but_installs(self, stub_path, tmp_path):
+        content = f"TELEGRAM_BOT_TOKEN={BOT_TOKEN}\nTELEGRAM_ALLOWED_IDS=\n"
+        _, result = self.run(
+            stub_path,
+            tmp_path,
+            body="prepare_telegram_bot; echo V=$INSTALL_TELEGRAM_BOT",
+            telegram=content,
+        )
+        assert "Send /id" in result.stdout and "V=true" in result.stdout
+
+    def test_crlf_file_is_accepted(self, stub_path, tmp_path):
+        content = f"TELEGRAM_BOT_TOKEN={BOT_TOKEN}\r\nTELEGRAM_ALLOWED_IDS=1001\r\n"
+        _, result = self.run(
+            stub_path,
+            tmp_path,
+            body="prepare_telegram_bot; echo V=$INSTALL_TELEGRAM_BOT",
+            telegram=content,
+        )
+        assert "V=true" in result.stdout
+
+    def failing_build(self, stub_path, image_exists):
+        docker = stub_path / "docker"
+        docker.write_text(
+            "#!/usr/bin/env bash\n"
+            'echo "docker $*" >> "$STUB_LOG"\n'
+            '[[ "$1" == build ]] && exit 1\n'
+            f'[[ "$1 $2" == "image inspect" ]] && exit {0 if image_exists else 1}\n'
+            "exit 0\n"
+        )
+        docker.chmod(0o755)
+
+    def test_build_failure_skips_bot(self, stub_path, tmp_path):
+        self.failing_build(stub_path, image_exists=False)
+        _, result = self.run(
+            stub_path,
+            tmp_path,
+            body="prepare_telegram_bot; echo V=$INSTALL_TELEGRAM_BOT",
+            telegram=self.GOOD,
+        )
+        assert "Could not build" in result.stdout and "V=false" in result.stdout
+
+    def test_build_failure_keeps_existing_image(self, stub_path, tmp_path):
+        self.failing_build(stub_path, image_exists=True)
+        _, result = self.run(
+            stub_path,
+            tmp_path,
+            body="prepare_telegram_bot; echo V=$INSTALL_TELEGRAM_BOT",
+            telegram=self.GOOD,
+        )
+        assert "keeping the existing one" in result.stdout and "V=true" in result.stdout
+
+    def test_change_detection_on_redeploy(self, stub_path, tmp_path):
+        body = "prepare_telegram_bot; echo C1=$TELEGRAM_CHANGED; prepare_telegram_bot; echo C2=$TELEGRAM_CHANGED"
+        _, result = self.run(stub_path, tmp_path, body=body, telegram=self.GOOD)
+        assert "C1=true" in result.stdout and "C2=false" in result.stdout
+
+    def test_changed_token_is_detected(self, stub_path, tmp_path):
+        self.run(stub_path, tmp_path, telegram=self.GOOD)
+        new = self.GOOD.replace("1001,2002", "1001")
+        body = "prepare_telegram_bot; echo C=$TELEGRAM_CHANGED"
+        app, result = self.run(stub_path, tmp_path, body=body, telegram=new)
+        assert (
+            "C=true" in result.stdout
+            and "TELEGRAM_ALLOWED_IDS=1001\n" in (app / ".telegram").read_text()
+        )
+
+    def test_start_services_does_not_pull_the_local_image_and_recreates_bot(
+        self, stub_path, tmp_path
+    ):
+        docker = stub_path / "docker"
+        docker.write_text(
+            "#!/usr/bin/env bash\n"
+            'echo "docker $*" >> "$STUB_LOG"\n'
+            '[[ "$1 $2 $3" == "compose config --services" ]] && printf "frigate\\ntelegram-bot\\n"\n'
+            "exit 0\n"
+        )
+        docker.chmod(0o755)
+        (tmp_path / "app" / "frigate").mkdir(parents=True)
+        body = "prepare_telegram_bot; create_app_stack\nsleep() { :; }\nstart_services"
+        self.run(stub_path, tmp_path, body=body, telegram=self.GOOD)
+        log = (stub_path / "log").read_text()
+        assert "docker compose pull frigate\n" in log and "pull frigate telegram-bot" not in log
+        assert "docker compose up -d --force-recreate --no-deps telegram-bot" in log
+
+    def test_start_services_leaves_bot_alone_when_unchanged(self, stub_path, tmp_path):
+        (tmp_path / "app" / "frigate").mkdir(parents=True)
+        body = (
+            "prepare_telegram_bot; create_app_stack; TELEGRAM_CHANGED=false\n"
+            "sleep() { :; }\nstart_services"
+        )
+        self.run(stub_path, tmp_path, body=body, telegram=self.GOOD)
+        assert "force-recreate" not in (stub_path / "log").read_text()
+
+    def test_deploy_main_prepares_bot_before_compose(self):
+        text = (REPO / "deploy-edge-server.sh").read_text()
+        main_body = text[text.index("main() {") :]
+        assert main_body.index("prepare_telegram_bot") < main_body.index("create_app_stack")

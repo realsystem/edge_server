@@ -44,6 +44,8 @@ class Bootstrap:
         "secrets.sh",
         "discover-cameras.sh",
         "collect-diagnostics.sh",
+        "telegram-bot",  # Telegram bot (bot.py, Dockerfile)
+        ".telegram",  # Telegram bot token and allowed user ids, if present
         "plugins",  # deploy-edge-server.sh looks for plugins/ next to itself
         "tools",  # camera discovery
         ".cam",  # camera logins ("IP user:pass" per line), if present
@@ -283,7 +285,7 @@ class Bootstrap:
         # Copy scripts
         self.progress.info(f"Copying scripts to {self.target}:{self.REMOTE_DIR}...")
         self._remote.mkdir(self.REMOTE_DIR)
-        # Private: the copied files can include .cam (camera logins)
+        # Private: the copied files can include .cam (camera logins) and .telegram (bot token)
         self._remote.run(f"chmod 700 {self.REMOTE_DIR}")
         scripts = [self.script_dir / s for s in self.SCRIPTS if (self.script_dir / s).exists()]
         self.progress.info(f"  Scripts: {', '.join(s.name for s in scripts)}")
@@ -293,7 +295,8 @@ class Bootstrap:
             return False
         self._remote.run(
             f"chmod +x {self.REMOTE_DIR}/*.sh && "
-            f"if [ -f {self.REMOTE_DIR}/.cam ]; then chmod 600 {self.REMOTE_DIR}/.cam; fi"
+            f"if [ -f {self.REMOTE_DIR}/.cam ]; then chmod 600 {self.REMOTE_DIR}/.cam; fi && "
+            f"if [ -f {self.REMOTE_DIR}/.telegram ]; then chmod 600 {self.REMOTE_DIR}/.telegram; fi"
         )
         self.progress.ok(f"Copied {len(scripts)} scripts")
 

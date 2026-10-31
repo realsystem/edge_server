@@ -267,6 +267,17 @@ class TestPrerequisites:
         assert cmds[0] == "chmod 700 /var/tmp/edge-server-setup"
         assert "chmod 600 /var/tmp/edge-server-setup/.cam" in cmds[1]
 
+    def test_copies_telegram_bot_and_token_privately(self, tmp_path):
+        (tmp_path / ".telegram").write_text("TELEGRAM_BOT_TOKEN=x\n")
+        (tmp_path / "telegram-bot").mkdir()
+        b = make(script_dir=tmp_path)
+        b.ssh.copy_files.return_value = True
+        with patch("bootstrap.shutil.which", return_value="/usr/bin/x"):
+            assert b._phase_prerequisites() is True
+        copied = [p.name for p in b.ssh.copy_files.call_args.args[0]]
+        assert copied == ["telegram-bot", ".telegram"]
+        assert "chmod 600 /var/tmp/edge-server-setup/.telegram" in commands(b)[1]
+
     def test_missing_tool_fails_real_run(self):
         b = make()
         with patch("bootstrap.shutil.which", return_value=None):
