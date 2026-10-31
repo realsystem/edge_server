@@ -53,6 +53,8 @@ DRI_DEVICE="${DRI_DEVICE:-/dev/dri/renderD128}"  # overridable for tests
 INSTALL_TELEGRAM_BOT="${INSTALL_TELEGRAM_BOT:-auto}"
 TELEGRAM_IMAGE="edge-telegram-bot:local"
 TELEGRAM_CHANGED=false
+TELEGRAM_REBOOT_ENABLED=false  # /reboot: needs REBOOT_TOTP_SECRET in .telegram
+SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
 
 # MQTT credentials (only used when INSTALL_MQTT=true)
 MQTT_USER="${MQTT_USER:-admin}"
@@ -674,8 +676,9 @@ prepare_telegram_bot() {
         return 0
     fi
     INSTALL_TELEGRAM_BOT=false  # becomes true below once everything worked
+    TELEGRAM_REBOOT_ENABLED=false
 
-    local script_dir cred="" candidate token ids
+    local script_dir cred="" candidate token ids totp_secret
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     for candidate in "${TELEGRAM_CREDENTIALS_FILE:-}" "$script_dir/.telegram" "$APP_DIR/.telegram"; do
         if [[ -n "$candidate" && -f "$candidate" ]]; then
@@ -700,6 +703,12 @@ prepare_telegram_bot() {
         warn "TELEGRAM_ALLOWED_IDS is empty: nobody can use the bot yet. Send /id to it, then add your id to .telegram and redeploy"
     elif [[ ! "$ids" =~ $ids_re ]]; then
         warn "$cred: TELEGRAM_ALLOWED_IDS must be numeric user ids separated by commas - skipping the Telegram bot"
+        return 0
+    fi
+    # Optional authenticator secret for /reboot (base32; spaces, dashes and case ignored)
+    totp_secret=$(sed -n 's/^REBOOT_TOTP_SECRET=//p' "$cred" | tail -n 1 | tr -d '\r[:space:]=-' | tr '[:lower:]' '[:upper:]')
+    if [[ -n "$totp_secret" && ! "$totp_secret" =~ ^[A-Z2-7]{16,}$ ]]; then
+        warn "$cred: REBOOT_TOTP_SECRET must be base32 (A-Z, 2-7), 16+ characters - skipping the Telegram bot. Make one with: python3 telegram-bot/bot.py --totp-setup"
         return 0
     fi
     if [[ ! -f "$script_dir/telegram-bot/bot.py" || ! -f "$script_dir/telegram-bot/Dockerfile" \
@@ -732,6 +741,60 @@ prepare_telegram_bot() {
     else
         warn "Could not build the Telegram bot image (no network?) - skipping the Telegram bot"
     fi
+
+    if [[ "$INSTALL_TELEGRAM_BOT" == "true" && -n "$totp_secret" ]]; then
+        # Root-only drop box: the container writes a request file, a host systemd
+        # unit acts on it (see install_reboot_unit).
+        mkdir -p "$APP_DIR/bot-requests"
+        chmod 700 "$APP_DIR/bot-requests"
+        TELEGRAM_REBOOT_ENABLED=true
+    fi
+}
+
+# Host side of /reboot. The bot container only creates bot-requests/reboot; this
+# path unit notices it and reboots. It refuses within 10 minutes of boot, so a
+# repeated request can never become a reboot loop.
+install_reboot_unit() {
+    local dir="$SYSTEMD_DIR"
+    if [[ "$TELEGRAM_REBOOT_ENABLED" != "true" ]]; then
+        if [[ -f "$dir/edge-reboot.path" || -f "$dir/edge-reboot.service" ]]; then
+            systemctl disable --now edge-reboot.path &> /dev/null || true
+            rm -f "$dir/edge-reboot.path" "$dir/edge-reboot.service"
+            systemctl daemon-reload
+            info "Removed the reboot watcher (no REBOOT_TOTP_SECRET)"
+        fi
+        return 0
+    fi
+
+    info "Installing the Telegram /reboot watcher..."
+    mkdir -p "$dir"
+    cat > "$dir/edge-reboot.path" << UNIT
+[Unit]
+Description=Reboot request from the Telegram bot
+
+[Path]
+PathExists=$APP_DIR/bot-requests/reboot
+Unit=edge-reboot.service
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    cat > "$dir/edge-reboot.service" << UNIT
+[Unit]
+Description=Reboot the laptop on request from the Telegram bot
+
+[Service]
+Type=oneshot
+# Consume the request first, then refuse if the laptop booted under 10 minutes ago
+ExecStartPre=/bin/rm -f $APP_DIR/bot-requests/reboot
+ExecStartPre=/usr/bin/awk '{ exit !(\$\$1 > 600) }' /proc/uptime
+ExecStart=/usr/bin/systemctl reboot
+UNIT
+    chmod 644 "$dir/edge-reboot.path" "$dir/edge-reboot.service"
+    # A request left over from before must not reboot the machine the moment the watcher starts
+    rm -f "$APP_DIR/bot-requests/reboot"
+    systemctl daemon-reload
+    systemctl enable --now edge-reboot.path
 }
 
 create_app_stack() {
@@ -870,10 +933,17 @@ EOF
       - FRIGATE_URL=http://frigate:5000
       - EDGE_SERVER_DIR=/opt/edge-server
       - STORAGE_PATH=/media/frigate
+EOF
+            # /reboot: the one writable path, a drop box only root on the host can use
+            [[ "$TELEGRAM_REBOOT_ENABLED" == "true" ]] && printf '      - REQUESTS_DIR=/requests\n'
+            cat << 'EOF'
     volumes:
       - ./telegram-bot:/app:ro
       - .:/opt/edge-server:ro
       - __STORAGE_MOUNT__/frigate:/media/frigate:ro
+EOF
+            [[ "$TELEGRAM_REBOOT_ENABLED" == "true" ]] && printf '      - ./bot-requests:/requests\n'
+            cat << 'EOF'
     tmpfs:
       - /tmp
     mem_limit: 256m
@@ -1394,6 +1464,7 @@ main() {
     create_app_stack
     discover_cameras
     create_systemd_service
+    install_reboot_unit
     start_services
     install_victron
     install_nut_power

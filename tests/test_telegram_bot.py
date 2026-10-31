@@ -150,12 +150,13 @@ def make_bot(telegram, frigate, host, **overrides):
     return bot.Bot(cfg, bot.Telegram(TOKEN, telegram.url), sleep=lambda s: None)
 
 
-def message(user, text, date=None, chat=None):
+def message(user, text, date=None, chat=None, chat_type="private"):
     return {
         "update_id": 1,
         "message": {
+            "message_id": 77,
             "from": {"id": user},
-            "chat": {"id": chat or user},
+            "chat": {"id": chat or user, "type": chat_type},
             "text": text,
             "date": int(date or time.time()),
         },
@@ -686,3 +687,271 @@ class TestAlertConfig:
     def test_invalid_percent(self, value):
         with pytest.raises(ValueError, match="ALERT_DISK_FREE_PERCENT"):
             bot.Config.from_env({**self.ENV, "ALERT_DISK_FREE_PERCENT": value})
+
+
+# -------------------------------------------------------------------- reboot
+
+RFC_SECRET = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"  # RFC 6238 test key "12345678901234567890"
+NOW = 1_800_000_000.0
+
+
+class TestTotp:
+    @pytest.mark.parametrize(
+        "t, code",
+        [
+            (59, "287082"),
+            (1111111109, "081804"),
+            (1111111111, "050471"),
+            (1234567890, "005924"),
+            (2000000000, "279037"),
+            (20000000000, "353130"),
+        ],
+    )
+    def test_rfc6238_vectors(self, t, code):
+        assert bot.totp(RFC_SECRET, t // 30) == code
+
+    def test_window_allows_one_step_of_drift(self):
+        now = 1111111109
+        step = now // 30
+        for s in (step - 1, step, step + 1):
+            assert bot.verify_totp(RFC_SECRET, bot.totp(RFC_SECRET, s), now) == s
+        assert bot.verify_totp(RFC_SECRET, bot.totp(RFC_SECRET, step + 2), now) is None
+        assert bot.verify_totp(RFC_SECRET, bot.totp(RFC_SECRET, step - 2), now) is None
+
+    def test_a_step_works_only_once(self):
+        now = 1111111109
+        code = bot.totp(RFC_SECRET, now // 30)
+        step = bot.verify_totp(RFC_SECRET, code, now)
+        assert bot.verify_totp(RFC_SECRET, code, now, last_step=step) is None
+        # an older code than the last used one is refused too
+        older = bot.totp(RFC_SECRET, now // 30 - 1)
+        assert bot.verify_totp(RFC_SECRET, older, now, last_step=step) is None
+
+    def test_normalize_secret(self):
+        assert bot.normalize_secret("") == ""
+        assert bot.normalize_secret("  ") == ""
+        assert bot.normalize_secret("gezd gnbv-gy3t qojq gezd gnbv gy3t qojq") == RFC_SECRET
+        for bad in ("short", "GEZDGNBVGY3TQOJ1", "GEZDGNBVGY3TQOJQ!"):
+            with pytest.raises(ValueError, match="REBOOT_TOTP_SECRET"):
+                bot.normalize_secret(bad)
+
+    def test_config_reads_secret_and_rejects_bad_ones(self):
+        env = {"TELEGRAM_BOT_TOKEN": TOKEN}
+        assert bot.Config.from_env(env).totp_secret == ""
+        cfg = bot.Config.from_env(
+            {**env, "REBOOT_TOTP_SECRET": RFC_SECRET.lower(), "REQUESTS_DIR": "/r"}
+        )
+        assert cfg.totp_secret == RFC_SECRET and cfg.requests_dir == Path("/r")
+        with pytest.raises(ValueError):
+            bot.Config.from_env({**env, "REBOOT_TOTP_SECRET": "nope"})
+
+    def test_setup_prints_a_working_secret(self):
+        lines = []
+        assert bot.totp_setup(lines.append, rand=lambda n: bytes(range(n))) == 0
+        text = "\n".join(lines)
+        secret = text.split("REBOOT_TOTP_SECRET=")[1].split()[0]
+        assert bot.normalize_secret(secret) == secret and len(secret) == 32
+        assert "otpauth://totp/" in text and f"secret={secret}" in text
+        assert bot.totp(secret, int(time.time() // 30)) in text
+
+
+@pytest.fixture
+def reboot(telegram, frigate, host):
+    """A bot with /reboot on, a fake clock and an empty requests dir."""
+    requests = host / "requests"
+    requests.mkdir()
+    b = make_bot(
+        telegram,
+        frigate,
+        host,
+        totp_secret=RFC_SECRET,
+        requests_dir=requests,
+        reboot_wait=3600,
+    )
+    b.clock = lambda: NOW
+    b.sent_timers = []
+    return b
+
+
+def code_now(offset=0):
+    return bot.totp(RFC_SECRET, int(NOW // 30) + offset)
+
+
+def send(b, text, user=ALICE, **kw):
+    kw.setdefault("date", NOW)
+    b.handle_update(message(user, text, **kw))
+
+
+class TestReboot:
+    def test_success_requests_reboot_and_cleans_up(self, reboot, telegram):
+        send(reboot, f"/reboot {code_now()}")
+        req = reboot.cfg.requests_dir
+        assert (req / "reboot").exists()
+        marker = json.loads((req / "reboot-notify").read_text())
+        assert marker == {"chat_id": ALICE, "at": NOW}
+        assert (req / "totp-last-step").read_text() == str(int(NOW // 30))
+        assert telegram.sent("deleteMessage") == [{"chat_id": ALICE, "message_id": 77}]
+        assert "Rebooting now" in telegram.texts()[-1]
+        reboot._reboot_timer.cancel()
+
+    def test_replay_is_refused(self, reboot, telegram):
+        code = code_now()
+        send(reboot, f"/reboot {code}")
+        reboot._reboot_timer.cancel()
+        (reboot.cfg.requests_dir / "reboot").unlink()  # the host consumed the request
+        send(reboot, f"/reboot {code}")
+        assert "Wrong code" in telegram.texts()[-1]
+        assert not (reboot.cfg.requests_dir / "reboot").exists()
+
+    def test_pending_request_is_not_duplicated(self, reboot, telegram):
+        (reboot.cfg.requests_dir / "reboot").touch()
+        send(reboot, f"/reboot {code_now()}")
+        assert "already pending" in telegram.texts()[-1]
+        assert not (reboot.cfg.requests_dir / "totp-last-step").exists()
+
+    def test_wrong_codes_lock_the_user_out(self, reboot, telegram):
+        wrong = "000000" if code_now() != "000000" else "111111"
+        for n in (1, 2):
+            send(reboot, f"/reboot {wrong}")
+            assert f"Wrong code ({n}/3)" in telegram.texts()[-1]
+        send(reboot, f"/reboot {wrong}")
+        assert "Locked for 15 minutes" in telegram.texts()[-1]
+        send(reboot, f"/reboot {code_now()}")  # even the right code now
+        assert "Too many wrong codes" in telegram.texts()[-1]
+        assert not (reboot.cfg.requests_dir / "reboot").exists()
+        reboot.clock = lambda: NOW + 16 * 60
+        send(reboot, f"/reboot {code_now(32)}", date=NOW + 16 * 60)
+        assert (reboot.cfg.requests_dir / "reboot").exists()
+        reboot._reboot_timer.cancel()
+
+    def test_old_message_is_refused(self, reboot, telegram):
+        send(reboot, f"/reboot {code_now()}", date=NOW - 120)
+        assert "too old" in telegram.texts()[-1]
+        assert not (reboot.cfg.requests_dir / "reboot").exists()
+
+    def test_malformed_code_does_not_count_as_a_failure(self, reboot, telegram):
+        for _ in range(5):
+            send(reboot, "/reboot abc")
+        assert all("6 digits" in t for t in telegram.texts())
+        send(reboot, f"/reboot {code_now()}")
+        assert (reboot.cfg.requests_dir / "reboot").exists()
+        reboot._reboot_timer.cancel()
+
+    def test_no_argument_explains(self, reboot, telegram):
+        send(reboot, "/reboot")
+        assert "6-digit code" in telegram.texts()[-1]
+        assert not (reboot.cfg.requests_dir / "reboot").exists()
+
+    def test_recently_booted_host_is_not_rebooted(self, reboot, telegram, host):
+        (host / "proc" / "uptime").write_text("120.0 100.0\n")
+        send(reboot, f"/reboot {code_now()}")
+        assert "Not rebooting: uptime is" in telegram.texts()[-1]
+        assert not (reboot.cfg.requests_dir / "reboot").exists()
+
+    def test_unreadable_uptime_is_not_rebooted(self, reboot, telegram, host):
+        (host / "proc" / "uptime").unlink()
+        send(reboot, f"/reboot {code_now()}")
+        assert "uptime is unknown" in telegram.texts()[-1]
+
+    def test_group_chats_are_refused(self, reboot, telegram):
+        send(reboot, f"/reboot {code_now()}", chat=-500, chat_type="supergroup")
+        assert "private chat" in telegram.texts()[-1]
+        assert not (reboot.cfg.requests_dir / "reboot").exists()
+
+    def test_strangers_cannot_reboot(self, reboot, telegram):
+        send(reboot, f"/reboot {code_now()}", user=EVE)
+        assert telegram.texts() == []
+        assert not (reboot.cfg.requests_dir / "reboot").exists()
+
+    def test_not_configured(self, telegram, frigate, host):
+        b = make_bot(telegram, frigate, host)
+        send(b, "/reboot 123456")
+        assert "not set up" in telegram.texts()[-1]
+
+    def test_missing_requests_dir(self, reboot, telegram):
+        reboot.cfg.requests_dir = reboot.cfg.requests_dir / "gone"
+        send(reboot, f"/reboot {code_now()}")
+        assert "not set up" in telegram.texts()[-1]
+
+    def test_cannot_store_the_used_code(self, reboot, telegram, monkeypatch):
+        def boom(step):
+            raise OSError("read-only")
+
+        monkeypatch.setattr(reboot, "_save_last_step", boom)
+        send(reboot, f"/reboot {code_now()}")
+        assert "cannot write" in telegram.texts()[-1]
+        assert not (reboot.cfg.requests_dir / "reboot").exists()
+
+    def test_delete_failure_does_not_block_the_reboot(self, reboot, telegram):
+        telegram.routes["deleteMessage"] = (400, {"ok": False, "description": "can't delete"})
+        send(reboot, f"/reboot {code_now()}")
+        assert (reboot.cfg.requests_dir / "reboot").exists()
+        reboot._reboot_timer.cancel()
+
+    def test_help_and_menu_mention_reboot_only_when_enabled(self, reboot, telegram, frigate, host):
+        assert "/reboot" in reboot.help_text()
+        assert "reboot" in [c["command"] for c in reboot.commands()]
+        plain = make_bot(telegram, frigate, host)
+        assert "/reboot" not in plain.help_text()
+        assert "reboot" not in [c["command"] for c in plain.commands()]
+
+    def test_timer_reports_a_reboot_that_never_happened(self, reboot, telegram):
+        send(reboot, f"/reboot {code_now()}")
+        reboot._reboot_timer.cancel()
+        reboot._reboot_not_done(ALICE)
+        assert "did not reboot" in telegram.texts()[-1]
+        assert not (reboot.cfg.requests_dir / "reboot").exists()
+        assert not (reboot.cfg.requests_dir / "reboot-notify").exists()
+
+
+class TestAfterReboot:
+    def write_marker(self, b, at):
+        (b.cfg.requests_dir / "reboot-notify").write_text(json.dumps({"chat_id": ALICE, "at": at}))
+
+    def test_back_online_message(self, reboot, telegram, host):
+        (host / "proc" / "uptime").write_text("45.0 40.0\n")
+        self.write_marker(reboot, NOW - 100)
+        reboot.notify_after_reboot()
+        assert "Back online after reboot" in telegram.texts()[-1]
+        assert not (reboot.cfg.requests_dir / "reboot-notify").exists()
+
+    def test_bot_restart_without_reboot(self, reboot, telegram):
+        self.write_marker(reboot, NOW - 100)  # host uptime in the fixture is a day
+        reboot.notify_after_reboot()
+        assert "did not reboot" in telegram.texts()[-1]
+
+    def test_stale_marker_is_dropped_silently(self, reboot, telegram):
+        self.write_marker(reboot, NOW - 7200)
+        reboot.notify_after_reboot()
+        assert telegram.texts() == []
+        assert not (reboot.cfg.requests_dir / "reboot-notify").exists()
+
+    def test_no_marker_and_broken_marker(self, reboot, telegram):
+        reboot.notify_after_reboot()
+        (reboot.cfg.requests_dir / "reboot-notify").write_text("not json")
+        reboot.notify_after_reboot()
+        assert telegram.texts() == []
+
+    def test_retries_while_the_network_comes_up(self, reboot, telegram, host):
+        (host / "proc" / "uptime").write_text("45.0 40.0\n")
+        self.write_marker(reboot, NOW - 100)
+        telegram.routes["sendMessage"] = (502, {"ok": False, "description": "bad gateway"})
+        reboot.notify_after_reboot()
+        assert len(telegram.sent()) == 6  # gave up after six tries
+
+    def test_run_starts_the_notice_only_when_enabled(self, reboot, telegram, monkeypatch):
+        started = []
+        monkeypatch.setattr(reboot, "notify_after_reboot", lambda: started.append(1))
+        monkeypatch.setattr(reboot, "poll_once", lambda offset: (_ for _ in ()).throw(SystemExit))
+        with pytest.raises(SystemExit):
+            reboot.run()
+        time.sleep(0.2)
+        assert started == [1]
+        assert "reboot" in [c["command"] for c in telegram.sent("setMyCommands")[0]["commands"]]
+
+
+class TestMainTotpSetup:
+    def test_cli_prints_setup_without_a_token(self, monkeypatch, capsys):
+        monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+        assert bot.main(["--totp-setup"]) == 0
+        assert "REBOOT_TOTP_SECRET=" in capsys.readouterr().out
