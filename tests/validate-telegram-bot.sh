@@ -12,7 +12,7 @@
 #              this; the container has no CAP_DAC_OVERRIDE, so file owner matters)
 #===============================================================================
 
-set -euo pipefail
+set -Eeuo pipefail
 cd "$(dirname "$0")/.."
 REPO="$(pwd)"
 SUDO="${SUDO:-}"
@@ -20,12 +20,32 @@ SUDO="${SUDO:-}"
 WORK="$(mktemp -d)"
 APP="$WORK/app"
 cleanup() {
-    (cd "$APP" 2> /dev/null && docker compose down -v --timeout 5 > /dev/null 2>&1) || true
+    (cd "$APP" 2> /dev/null && $SUDO docker compose down -v --timeout 5 > /dev/null 2>&1) || true
     $SUDO rm -rf "$WORK"
 }
 trap cleanup EXIT
 
-fail() { echo "FAIL: $*" >&2; exit 1; }
+# In GitHub Actions the log is not readable through the API, so put the reason
+# (and the bot's own log) into an error annotation.
+annotate() {
+    [[ -n "${GITHUB_ACTIONS:-}" ]] || return 0
+    local extra msg
+    extra="$(
+        {
+            tail -n 12 "$WORK/gen.log" 2> /dev/null
+            docker logs --tail 12 telegram-bot 2>&1
+        } | sed ':a;N;$!ba;s/%/%25/g;s/\r//g;s/\n/%0A/g'
+    )"
+    msg="$1%0A${extra}"
+    echo "::error title=Telegram bot container check failed::${msg}"
+}
+fail() {
+    echo "FAIL: $*" >&2
+    annotate "$*"
+    trap - ERR
+    exit 1
+}
+trap 'annotate "line $LINENO: $BASH_COMMAND"' ERR
 
 # A made-up but well-formed token and a planted camera password
 TOKEN="123456789:AAH$(printf 'x%.0s' {1..30})"
@@ -44,7 +64,7 @@ env EDGE_SERVER_DIR="$APP" EDGE_STORAGE_DIR="$WORK/storage" \
         prepare_telegram_bot
         [[ "$INSTALL_TELEGRAM_BOT" == "true" ]] || { echo "bot was not enabled" >&2; exit 1; }
         create_app_stack
-    ' _ "$REPO/deploy-edge-server.sh" > /dev/null
+    ' _ "$REPO/deploy-edge-server.sh" > "$WORK/gen.log" 2>&1
 mkdir -p "$WORK/storage/frigate"
 
 # What a real server has: root-owned, private config and camera logins
@@ -61,10 +81,10 @@ chmod 600 "$APP/frigate/config.yml" "$APP/.cam"
 $SUDO chown -R root:root "$APP"
 
 echo "== compose file is valid"
-(cd "$APP" && docker compose config -q)
+(cd "$APP" && $SUDO docker compose config -q)  # reads the root-only .telegram
 
 echo "== start only the bot"
-(cd "$APP" && docker compose up -d --no-deps telegram-bot)
+(cd "$APP" && $SUDO docker compose up -d --no-deps telegram-bot)
 sleep 5
 state=$(docker inspect -f '{{.State.Status}}' telegram-bot)
 [[ "$state" == "running" ]] || { docker logs telegram-bot || true; fail "bot container is $state"; }
