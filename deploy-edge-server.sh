@@ -934,6 +934,8 @@ latest_release_tag() {
 #    slowly fill the disk.
 #  - edge-smart (every 6 h): disk health for the Telegram bot (it cannot read
 #    SMART from inside its locked-down container).
+#  - edge-snapshot (every 10 min): firewall rules, open ports, SSH settings and
+#    service state for /diag, for the same reason.
 install_host_helpers() {
     local dir="$SYSTEMD_DIR" script_dir containers
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1054,6 +1056,40 @@ UNIT
         rm -f "$dir/edge-smart.service" "$dir/edge-smart.timer" "$APP_DIR/smart-report.py"
     fi
 
+    local snapshot=false
+    if [[ "$INSTALL_TELEGRAM_BOT" == "true" && -f "$script_dir/telegram-bot/host-snapshot.sh" ]]; then
+        snapshot=true
+        install -m 755 "$script_dir/telegram-bot/host-snapshot.sh" "$APP_DIR/host-snapshot.sh"
+        mkdir -p "$APP_DIR/bot-status"
+        chmod 755 "$APP_DIR/bot-status"
+        cat > "$dir/edge-snapshot.service" << UNIT
+[Unit]
+Description=Write a network and firewall snapshot for the Telegram bot
+
+[Service]
+Type=oneshot
+Nice=19
+ExecStart=$APP_DIR/host-snapshot.sh $APP_DIR/bot-status/host-snapshot.txt
+UNIT
+        cat > "$dir/edge-snapshot.timer" << 'UNIT'
+[Unit]
+Description=Write the network and firewall snapshot every 10 minutes
+
+[Timer]
+OnBootSec=4min
+OnUnitActiveSec=10min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
+UNIT
+    else
+        if [[ -f "$dir/edge-snapshot.timer" ]]; then
+            systemctl disable --now edge-snapshot.timer &> /dev/null || true
+        fi
+        rm -f "$dir/edge-snapshot.service" "$dir/edge-snapshot.timer" "$APP_DIR/host-snapshot.sh"
+    fi
+
     chmod 644 "$dir"/edge-docker-*.service "$dir"/edge-docker-clean.timer
     systemctl daemon-reload
     systemctl enable --now edge-docker-firewall.service
@@ -1062,6 +1098,11 @@ UNIT
         chmod 644 "$dir/edge-smart.service" "$dir/edge-smart.timer"
         systemctl enable --now edge-smart.timer
         systemctl start --no-block edge-smart.service || true # first report now, not in 3 minutes
+    fi
+    if [[ "$snapshot" == "true" ]]; then
+        chmod 644 "$dir/edge-snapshot.service" "$dir/edge-snapshot.timer"
+        systemctl enable --now edge-snapshot.timer
+        systemctl start --no-block edge-snapshot.service || true
     fi
 }
 

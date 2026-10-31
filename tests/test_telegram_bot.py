@@ -419,6 +419,16 @@ class TestDiag:
         assert b"inference_speed=87.5" in doc  # from the fake Frigate API
         assert b"pw-secret1" not in doc and TOKEN.encode() not in doc
 
+    def test_report_includes_the_hosts_firewall_snapshot(self, telegram, frigate, host):
+        status = host / "status"
+        status.mkdir()
+        (status / "host-snapshot.txt").write_text("Host snapshot\n22/tcp ALLOW IN 192.168.0.0/16\n")
+        b = make_bot(telegram, frigate, host, status_dir=status)
+        self.run_diag(b)
+        (doc,) = telegram.sent("sendDocument")
+        assert b"Network, firewall and open ports (host)" in doc
+        assert b"from the host snapshot" in doc and b"22/tcp ALLOW IN 192.168.0.0/16" in doc
+
     def test_cooldown_and_busy(self, telegram, frigate, host):
         b = make_bot(telegram, frigate, host)
         self.run_diag(b)
