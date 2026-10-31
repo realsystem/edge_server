@@ -121,6 +121,16 @@ echo "== hardening is in effect"
 [[ -z "$(docker inspect -f '{{.HostConfig.PortBindings}}' telegram-bot | tr -d 'map[]')" ]] || fail "bot publishes ports"
 if docker exec telegram-bot sh -c 'touch /opt/edge-server/x 2>/dev/null'; then fail "app dir is writable"; fi
 
+echo "== the bot sees only what it needs"
+for secret in .cam .telegram ha-config mosquitto bot-requests; do
+    if docker exec telegram-bot test -e "/opt/edge-server/$secret"; then
+        fail "/opt/edge-server/$secret is visible inside the bot container"
+    fi
+done
+docker exec telegram-bot test -r /opt/edge-server/frigate/config.yml || fail "bot cannot read the Frigate config"
+docker exec telegram-bot test -d /status || fail "/status (disk health) is not mounted"
+if docker exec telegram-bot sh -c 'touch /status/x 2>/dev/null'; then fail "/status is writable"; fi
+
 echo "== the drop box is the one writable path"
 docker exec telegram-bot sh -c 'touch /requests/probe && rm /requests/probe' ||
     fail "the bot cannot write to /requests (needed for /reboot)"
