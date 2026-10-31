@@ -461,6 +461,24 @@ make nut-install
 make nut-status          # Check battery status
 ```
 
+### Uninstalling add-ons
+
+```bash
+sudo ./deploy-edge-server.sh --uninstall
+```
+
+Like the install, it asks about each add-on that is installed (Victron Smart
+Shunt, Renogy Rover, power loss monitor) and leaves the others alone. For the
+two Bluetooth add-ons it also asks whether to delete the saved configuration
+(device key, MQTT password); by default it is kept so a reinstall can reuse it.
+Shared packages (bluez, NUT) stay installed. The add-on's setting in
+`deploy.env` is switched off, so `--auto` / `/redeploy` does not bring it back.
+
+For scripted use, answer in advance with `VICTRON_UNINSTALL`, `RENOGY_UNINSTALL`,
+`NUT_POWER_UNINSTALL` (`true` removes, `false` keeps) and `REMOVE_ADDON_CONFIG`.
+Each plugin also has its own `plugins/<name>/uninstall.sh`. Home Assistant, MQTT
+and the Telegram bot are controlled by their `INSTALL_*` settings, not this option.
+
 ## Development
 
 ```bash

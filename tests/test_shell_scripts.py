@@ -1837,3 +1837,131 @@ class TestAutoRedeploy:
         )
         assert result.returncode == 0 and "not available" in result.stdout
         assert not (world.tmp / "units" / "edge-redeploy.path").exists()
+
+
+class TestAddonUninstall:
+    """deploy-edge-server.sh --uninstall: remove add-ons one by one, asking like install does."""
+
+    @pytest.fixture
+    def host(self, stub_path, tmp_path):
+        """A fake host with all three add-ons installed."""
+        systemd, opt, etc, app = (tmp_path / d for d in ("systemd", "opt", "etc", "app"))
+        for d in (systemd, opt, etc, app):
+            d.mkdir()
+        for name in ("victron-shunt", "renogy-rover"):
+            (systemd / f"{name}.service").write_text("[Unit]\n")
+            (opt / name).mkdir()
+            (opt / name / "run.py").write_text("x")
+            (etc / name).mkdir()
+            (etc / name / "config.yaml").write_text("key: secret\n")
+        (systemd / "battery-poller.service").write_text("[Unit]\n")
+        (app / "deploy.env").write_text(
+            "# Written by deploy-edge-server.sh for --auto. Environment variables win.\n"
+            "[[ -v TIMEZONE ]] || TIMEZONE=UTC\n"
+            "[[ -v VICTRON_INSTALL ]] || VICTRON_INSTALL=true\n"
+            "[[ -v VICTRON_ADDRESS ]] || VICTRON_ADDRESS=AA:BB\n"
+            "[[ -v VICTRON_KEY ]] || VICTRON_KEY=0123456789abcdef\n"
+            "[[ -v RENOGY_INSTALL ]] || RENOGY_INSTALL=true\n"
+            "[[ -v RENOGY_ADDRESS ]] || RENOGY_ADDRESS=CC:DD\n"
+            "[[ -v NUT_POWER_INSTALL ]] || NUT_POWER_INSTALL=true\n"
+        )
+        env = {
+            "SYSTEMD_DIR": str(systemd),
+            "OPT_DIR": str(opt),
+            "ETC_DIR": str(etc),
+            "EDGE_SERVER_DIR": str(app),
+        }
+        # never touch the real NUT files: the NUT plugin gets a recording fake
+        fake = tmp_path / "fake-nut"
+        fake.mkdir()
+        (fake / "uninstall.sh").write_text('#!/bin/bash\necho nut-uninstall-ran >> "$STUB_LOG"\n')
+        return systemd, opt, etc, app, fake, env
+
+    def run(self, host, stub_path, body, stdin=""):
+        systemd, opt, etc, app, fake, env = host
+        nut_fix = f'find_plugin_dir() {{ [[ "$1" == nut-power ]] && echo {fake} || echo {REPO}/plugins/"$1"; }}\n'
+        prelude = (
+            f"source {REPO / 'deploy-edge-server.sh'}\n"
+            'info() { echo "$*"; }; warn() { echo "$*"; }; success() { echo "$*"; }\n' + nut_fix
+        )
+        full_env = {"PATH": f"{stub_path}:{os.environ['PATH']}", "STUB_LOG": str(stub_path / "log")}
+        full_env.update(env)
+        return run_bash(prelude + body, env=full_env, input=stdin)
+
+    def test_asks_per_addon_and_only_removes_the_yes_ones(self, host, stub_path):
+        systemd, opt, etc, app, _, _ = host
+        # Victron: yes, keep config. Renogy: no. NUT: no.
+        result = self.run(host, stub_path, "uninstall_addons", "y\nn\nn\nn\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "=== Victron Smart Shunt monitor ===" in result.stdout
+        assert "=== Renogy Rover monitor ===" in result.stdout
+        assert not (systemd / "victron-shunt.service").exists()
+        assert not (opt / "victron-shunt").exists()
+        assert (etc / "victron-shunt" / "config.yaml").exists()  # kept by default
+        assert (systemd / "renogy-rover.service").exists()
+        assert (opt / "renogy-rover").exists()
+        assert (systemd / "battery-poller.service").exists()
+
+    def test_yes_to_config_removal_deletes_it(self, host, stub_path):
+        _, _, etc, _, _, _ = host
+        result = self.run(host, stub_path, "uninstall_addons", "y\ny\nn\nn\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not (etc / "victron-shunt").exists()
+        assert (etc / "renogy-rover").exists()
+
+    def test_environment_flags_skip_the_questions(self, host, stub_path):
+        systemd, opt, etc, _, _, _ = host
+        body = (
+            "VICTRON_UNINSTALL=false RENOGY_UNINSTALL=true NUT_POWER_UNINSTALL=true\n"
+            "REMOVE_ADDON_CONFIG=true\n"
+            "uninstall_addons </dev/null"
+        )
+        result = self.run(host, stub_path, body)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (systemd / "victron-shunt.service").exists()
+        assert not (systemd / "renogy-rover.service").exists()
+        assert not (etc / "renogy-rover").exists()
+        assert "nut-uninstall-ran" in (stub_path / "log").read_text()
+
+    def test_not_installed_is_skipped_without_asking(self, host, stub_path):
+        systemd = host[0]
+        for unit in systemd.iterdir():
+            unit.unlink()
+        result = self.run(host, stub_path, "uninstall_addons", "")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert result.stdout.count("not installed") == 3
+        assert "[y/N]" not in result.stdout + result.stderr
+
+    def test_uninstall_stops_auto_from_reinstalling(self, host, stub_path):
+        app = host[3]
+        result = self.run(host, stub_path, "uninstall_addons", "y\nn\nn\nn\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        text = (app / "deploy.env").read_text()
+        assert "[[ -v VICTRON_INSTALL ]] || VICTRON_INSTALL=false" in text
+        assert "VICTRON_INSTALL=true" not in text
+        assert "0123456789abcdef" not in text  # the device key is dropped
+        assert "[[ -v TIMEZONE ]] || TIMEZONE=UTC" in text  # others untouched
+        assert "RENOGY_INSTALL=true" in text  # declined: unchanged
+        assert stat.S_IMODE((app / "deploy.env").stat().st_mode) == 0o600
+        # and the saved file still loads
+        check = run_bash(f"set -e; source {app / 'deploy.env'}; echo $VICTRON_INSTALL")
+        assert check.stdout.strip() == "false", check.stderr
+
+    def test_refused_together_with_auto(self, stub_path, tmp_path):
+        for flag in ("--auto", "--auto-apply"):
+            result = run_bash(
+                f"source {REPO / 'deploy-edge-server.sh'}; main --uninstall {flag}",
+                env={"PATH": f"{stub_path}:{os.environ['PATH']}"},
+            )
+            assert result.returncode == 2
+            assert "cannot be combined" in result.stderr
+
+    def test_usage_mentions_uninstall(self):
+        result = run_bash(f"source {REPO / 'deploy-edge-server.sh'}; usage")
+        assert "--uninstall" in result.stdout
+
+    @pytest.mark.parametrize("plugin", ["victron-shunt", "renogy-rover", "nut-power"])
+    def test_every_plugin_has_a_valid_uninstall_script(self, plugin):
+        script = REPO / "plugins" / plugin / "uninstall.sh"
+        assert os.access(script, os.X_OK)
+        assert run_bash(f"bash -n {script}").returncode == 0
