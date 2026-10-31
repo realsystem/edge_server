@@ -220,11 +220,12 @@ next deploy); removing `.telegram` alone does not remove a running bot.
 
 #### Alerts you get without asking
 
-Every 5 minutes the bot checks the server and messages every user in
-`TELEGRAM_ALLOWED_IDS` when something is wrong. A problem must be seen twice in a row
-(about 10 minutes) before it is reported, so a Frigate restart or a camera reboot is
-not an outage. It repeats every 6 hours while the problem lasts and says so once when
-it is fixed.
+The bot checks the server every minute and messages every user in
+`TELEGRAM_ALLOWED_IDS` when something is wrong. A problem must be seen 3 checks in a row
+(about 2 minutes) before it is reported, so a Frigate restart or a camera reboot is
+not an outage. Cameras that go dark together (power cut, network switch down) get one
+message naming all of them. It repeats every 6 hours while the problem lasts and says
+so once when it is fixed. Disk space is checked every 5 minutes.
 
 | Alert | When | Setting in `.telegram` |
 |---|---|---|
@@ -237,8 +238,8 @@ it is fixed.
 
 Disk health comes from `edge-smart.timer` on the host (every 6 hours, `smartmontools`).
 The bot cannot read SMART itself because its container has no access to the disks.
-Other settings: `ALERT_CONFIRM=2` (checks in a row), `ALERT_INTERVAL=300`,
-`ALERT_REPEAT_HOURS=6`.
+Other settings: `ALERT_CONFIRM=3` (checks in a row), `ALERT_WATCH_INTERVAL=60`
+(seconds, at least 5), `ALERT_INTERVAL=300` (disk space), `ALERT_REPEAT_HOURS=6`.
 
 A silent bot can also mean a dead server. For that case use an outside "dead-man's
 switch" (a service that alerts you when your server stops pinging it, such as
