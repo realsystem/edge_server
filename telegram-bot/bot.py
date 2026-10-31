@@ -4,7 +4,13 @@
 Commands, for the users listed in TELEGRAM_ALLOWED_IDS:
   /status  quick health check: load, memory, disk, temperature, power, Frigate
   /diag    full diagnostics report (collect-diagnostics.sh), sent as a file
+  /testalert [percent]  send a simulated low-disk alert to you (to test delivery)
   /help    list the commands
+
+It also sends a message to every authorized user when the recordings or system
+disk drops below ALERT_DISK_FREE_PERCENT free (default 15, 0 turns it off),
+checked every ALERT_INTERVAL seconds (300), repeated every ALERT_REPEAT_HOURS
+(6) while the disk stays low, and again when it has recovered.
 Anyone can use /id to learn their own Telegram user id (needed for setup).
 Messages from anybody else are ignored.
 
@@ -17,6 +23,7 @@ Environment:
   FRIGATE_URL           default http://frigate:5000
   EDGE_SERVER_DIR       default /opt/edge-server (the stack directory)
   STORAGE_PATH          default /media/frigate (recordings, for the disk check)
+  ALERT_DISK_FREE_PERCENT, ALERT_INTERVAL, ALERT_REPEAT_HOURS  see above
 """
 
 from __future__ import annotations
@@ -46,6 +53,7 @@ TELEGRAM_TEXT_LIMIT = 3500  # the API allows 4096; leave room for <pre> markup
 COMMANDS = [
     {"command": "status", "description": "Quick health check"},
     {"command": "diag", "description": "Full diagnostics report (file)"},
+    {"command": "testalert", "description": "Send a test low-disk alert"},
     {"command": "id", "description": "Show your Telegram user id"},
     {"command": "help", "description": "List commands"},
 ]
@@ -54,6 +62,7 @@ HELP = (
     "Edge server bot\n"
     "/status - quick health check\n"
     "/diag - full diagnostics report (a file, takes about 15 s)\n"
+    "/testalert [percent] - simulate a low-disk alert, sent only to you\n"
     "/id - your Telegram user id"
 )
 
@@ -78,6 +87,9 @@ class Config:
     diag_interval: int = 3
     diag_cooldown: float = 30.0
     max_age: int = 300  # ignore commands older than this (sent while the bot was down)
+    alert_free_percent: float = 15.0  # alert below this much free disk; 0 = off
+    alert_interval: float = 300.0  # seconds between disk checks
+    alert_repeat: float = 6 * 3600.0  # seconds between reminders while the disk stays low
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Config:
@@ -92,6 +104,12 @@ class Config:
             if not item.isdigit():
                 raise ValueError(f"TELEGRAM_ALLOWED_IDS: {item!r} is not a numeric user id")
             allowed.add(int(item))
+        try:
+            percent = float(env.get("ALERT_DISK_FREE_PERCENT", cls.alert_free_percent))
+        except ValueError:
+            raise ValueError("ALERT_DISK_FREE_PERCENT must be a number") from None
+        if not 0 <= percent <= 100:
+            raise ValueError("ALERT_DISK_FREE_PERCENT must be between 0 and 100")
         return cls(
             token=token,
             allowed=frozenset(allowed),
@@ -105,6 +123,9 @@ class Config:
             diag_samples=int(env.get("DIAG_SAMPLES", cls.diag_samples)),
             diag_interval=int(env.get("DIAG_INTERVAL", cls.diag_interval)),
             diag_cooldown=float(env.get("DIAG_COOLDOWN", cls.diag_cooldown)),
+            alert_free_percent=percent,
+            alert_interval=float(env.get("ALERT_INTERVAL", cls.alert_interval)),
+            alert_repeat=float(env.get("ALERT_REPEAT_HOURS", cls.alert_repeat / 3600)) * 3600,
         )
 
 
@@ -288,6 +309,52 @@ def disk_line(label: str, path: Path) -> tuple[str, bool]:
     return f"{label}: {gib(free)} of {gib(total)} GB free ({pct_free:.0f}%)", pct_free < 10
 
 
+RECOVERY_MARGIN = 3.0  # percentage points above the alert level before "recovered"
+
+
+def disk_usage(path: Path) -> tuple[int, int] | None:
+    """(total, free) bytes for the filesystem holding ``path``."""
+    try:
+        st = os.statvfs(path)
+    except OSError:
+        return None
+    return st.f_blocks * st.f_frsize, st.f_bavail * st.f_frsize
+
+
+def watched_disks(cfg: Config) -> list[tuple[str, Path]]:
+    """Disks to watch, one entry per filesystem (recordings often share the system disk)."""
+    groups: dict[int, tuple[list[str], Path]] = {}
+    for label, path in (("recordings", cfg.storage_path), ("system disk", cfg.app_dir)):
+        try:
+            device = os.stat(path).st_dev
+        except OSError:
+            continue
+        labels, first = groups.setdefault(device, ([], path))
+        labels.append(label)
+    return [(" and ".join(labels), path) for labels, path in groups.values()]
+
+
+def format_disk_alert(
+    label: str,
+    free: int,
+    total: int,
+    threshold: float,
+    reminder: bool = False,
+    test: bool = False,
+) -> str:
+    pct = 100 * free / total if total else 0
+    head = "⚠️ Low disk space" + (" (reminder)" if reminder else "")
+    lines = [
+        *(["TEST - this is not a real alert", ""] if test else []),
+        head,
+        f"{label}: {gib(free)} of {gib(total)} GB free ({pct:.1f}%), alert level {threshold:g}%.",
+        "Frigate starts deleting the oldest recordings when about an hour of space is "
+        "left, whatever the retention settings.",
+        "Shorten the recording retention, lower the cameras' bitrate, or add storage.",
+    ]
+    return "\n".join(lines)
+
+
 def http_get(url: str, timeout: float = 5) -> bytes:
     with urllib.request.urlopen(url, timeout=timeout) as response:  # noqa: S310 - internal URL
         body: bytes = response.read()
@@ -394,6 +461,12 @@ def build_status(cfg: Config, sleep: Callable[[float], None] = time.sleep) -> st
 
 
 @dataclass
+class DiskState:
+    low: bool = False
+    last_alert: float = 0.0
+
+
+@dataclass
 class Bot:
     cfg: Config
     api: Telegram
@@ -401,6 +474,8 @@ class Bot:
     _diag_lock: threading.Lock = field(default_factory=threading.Lock)
     _diag_last: float = 0.0
     threads: list[threading.Thread] = field(default_factory=list)
+    _disk_state: dict[str, DiskState] = field(default_factory=dict)
+    stop: threading.Event = field(default_factory=threading.Event)
 
     # -- sending ----------------------------------------------------------
 
@@ -446,6 +521,86 @@ class Bot:
         finally:
             self._diag_last = time.monotonic()
             self._diag_lock.release()
+
+    def cmd_testalert(self, chat_id: int, args: list[str]) -> None:
+        """Send the low-disk alert with made-up numbers, to the requester only."""
+        try:
+            percent = float(args[0]) if args else 5.0
+            if not 0 <= percent <= 100:
+                raise ValueError
+        except ValueError:
+            self.reply(chat_id, "Usage: /testalert [free percent between 0 and 100]")
+            return
+        disks = watched_disks(self.cfg)
+        label, path = disks[0] if disks else ("recordings", self.cfg.storage_path)
+        usage = disk_usage(path)
+        total = usage[0] if usage and usage[0] else 500 * 2**30
+        threshold = self.cfg.alert_free_percent or 15.0
+        self.reply(
+            chat_id,
+            format_disk_alert(label, int(total * percent / 100), total, threshold, test=True),
+        )
+        lines = ["Real state:"]
+        for name, disk_path in disks:
+            real = disk_usage(disk_path)
+            if real and real[0]:
+                lines.append(
+                    f"  {name}: {gib(real[1])} of {gib(real[0])} GB free ({100 * real[1] / real[0]:.0f}%)"
+                )
+        if self.cfg.alert_free_percent > 0:
+            lines.append(
+                f"Alerts go to {len(self.cfg.allowed)} user(s) below "
+                f"{self.cfg.alert_free_percent:g}% free, checked every "
+                f"{self.cfg.alert_interval / 60:g} min."
+            )
+        else:
+            lines.append("Disk alerts are turned off (ALERT_DISK_FREE_PERCENT=0).")
+        self.reply(chat_id, "\n".join(lines))
+
+    # -- disk alerts ------------------------------------------------------
+
+    def disk_alert_messages(self, now: float | None = None) -> list[str]:
+        """Alerts due now. Alerts once on crossing the level, reminds every
+        ``alert_repeat`` seconds, and says so once when space is back."""
+        threshold = self.cfg.alert_free_percent
+        if threshold <= 0:
+            return []
+        now = time.monotonic() if now is None else now
+        messages: list[str] = []
+        for label, path in watched_disks(self.cfg):
+            usage = disk_usage(path)
+            if not usage or not usage[0]:
+                continue
+            total, free = usage
+            pct = 100 * free / total
+            state = self._disk_state.setdefault(label, DiskState())
+            if pct < threshold:
+                if not state.low or now - state.last_alert >= self.cfg.alert_repeat:
+                    messages.append(
+                        format_disk_alert(label, free, total, threshold, reminder=state.low)
+                    )
+                    state.last_alert = now
+                state.low = True
+            elif state.low and pct >= threshold + RECOVERY_MARGIN:
+                state.low = False
+                messages.append(
+                    f"✅ Disk space recovered: {label} {gib(free)} of {gib(total)} GB free ({pct:.0f}%)."
+                )
+        return messages
+
+    def send_alerts(self) -> None:
+        for text in self.disk_alert_messages():
+            for chat_id in sorted(self.cfg.allowed):  # private chats: chat id == user id
+                self.reply(chat_id, text)
+
+    def alert_loop(self) -> None:
+        while True:
+            try:
+                self.send_alerts()
+            except Exception:  # noqa: BLE001 - keep watching
+                log.exception("disk check failed")
+            if self.stop.wait(self.cfg.alert_interval):
+                return
 
     def _send_report(self, chat_id: int) -> None:
         name = time.strftime("edge-diagnostics-%Y%m%d-%H%M%S.txt")
@@ -502,6 +657,7 @@ class Bot:
             log.info("ignoring old command %r", text.split()[0])
             return
         command = text.split()[0].split("@")[0].lower()
+        args = text.split()[1:]
 
         if command == "/id":
             self.reply(chat_id, f"Your Telegram user id: {user_id}")
@@ -523,6 +679,8 @@ class Bot:
             thread = threading.Thread(target=self.cmd_diag, args=(chat_id,), daemon=True)
             thread.start()
             self.threads.append(thread)
+        elif command == "/testalert":
+            self.cmd_testalert(chat_id, args)
         else:
             self.reply(chat_id, HELP)
 
@@ -551,11 +709,18 @@ class Bot:
         except TelegramError as e:
             log.warning("could not register the command menu: %s", e)
         log.info(
-            "bot started; %d authorized user(s); commands: /status /diag /id /help",
+            "bot started; %d authorized user(s); commands: /status /diag /testalert /id /help",
             len(self.cfg.allowed),
         )
         if not self.cfg.allowed:
             log.warning("TELEGRAM_ALLOWED_IDS is empty: send /id to the bot to get your id")
+        if self.cfg.allowed and self.cfg.alert_free_percent > 0:
+            threading.Thread(target=self.alert_loop, daemon=True).start()
+            log.info(
+                "disk alerts on: below %g%% free, every %g s",
+                self.cfg.alert_free_percent,
+                self.cfg.alert_interval,
+            )
         offset: int | None = None
         failures = 0
         while True:

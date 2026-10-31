@@ -170,6 +170,7 @@ A small bot that runs next to Frigate and answers you in a Telegram chat:
 |---|---|
 | `/status` | One screen: load, CPU, memory, disk, temperature, AC/battery, Frigate detector speed and every camera's FPS, with a list of problems on top |
 | `/diag` | The full diagnostics report from `collect-diagnostics.sh`, sent as a file (about 15 s) |
+| `/testalert [percent]` | Sends you a simulated low-disk alert (default 5% free) plus the real disk state, so you can check delivery without filling a disk |
 | `/id` | Your Telegram user id (works for anyone; used for setup) |
 
 Setup:
@@ -186,6 +187,18 @@ Setup:
    ```
 3. Open your bot in Telegram, send `/id`, put the number it answers into
    `TELEGRAM_ALLOWED_IDS` (several ids: comma-separated) and run the deploy again.
+
+**Low-disk alerts.** Without being asked, the bot messages every user in
+`TELEGRAM_ALLOWED_IDS` when the recordings or system disk has less than 15% free,
+repeats the message every 6 hours while it stays low, and says so once when space is
+back (above the level plus 3 points). Recordings and the system disk are one
+alert when they share a filesystem. Tune it in `.telegram`:
+
+```
+ALERT_DISK_FREE_PERCENT=15   # 0 turns alerts off
+ALERT_INTERVAL=300           # seconds between checks
+ALERT_REPEAT_HOURS=6
+```
 
 How it is kept safe:
 
