@@ -50,7 +50,9 @@ trap 'annotate "line $LINENO: $BASH_COMMAND"' ERR
 # A made-up but well-formed token and a planted camera password
 TOKEN="123456789:AAH$(printf 'x%.0s' {1..30})"
 PASSWORD="s3cr3t-cam-pass"
-printf 'TELEGRAM_BOT_TOKEN=%s\nTELEGRAM_ALLOWED_IDS=1001\n' "$TOKEN" > "$WORK/.telegram"
+TOTP_SECRET="GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+printf 'TELEGRAM_BOT_TOKEN=%s\nTELEGRAM_ALLOWED_IDS=1001\nREBOOT_TOTP_SECRET=%s\n' \
+    "$TOKEN" "$TOTP_SECRET" > "$WORK/.telegram"
 mkdir -p "$APP/frigate"
 
 echo "== generate the stack with the deploy script (builds the image)"
@@ -63,6 +65,7 @@ env EDGE_SERVER_DIR="$APP" EDGE_STORAGE_DIR="$WORK/storage" \
         chown() { :; }
         prepare_telegram_bot
         [[ "$INSTALL_TELEGRAM_BOT" == "true" ]] || { echo "bot was not enabled" >&2; exit 1; }
+        [[ "$TELEGRAM_REBOOT_ENABLED" == "true" ]] || { echo "/reboot was not enabled" >&2; exit 1; }
         create_app_stack
     ' _ "$REPO/deploy-edge-server.sh" > "$WORK/gen.log" 2>&1
 mkdir -p "$WORK/storage/frigate"
@@ -89,6 +92,7 @@ sleep 5
 state=$(docker inspect -f '{{.State.Status}}' telegram-bot)
 [[ "$state" == "running" ]] || { docker logs telegram-bot || true; fail "bot container is $state"; }
 docker logs telegram-bot 2>&1 | grep -q "bot started" || { docker logs telegram-bot; fail "bot did not start"; }
+docker logs telegram-bot 2>&1 | grep -q "/reboot" || fail "bot did not enable /reboot"
 
 echo "== the container has what /diag needs"
 docker exec telegram-bot python3 /app/bot.py --check | tee /dev/stderr | grep -q "check ok" ||
@@ -107,6 +111,7 @@ grep -q "cameras:" "$report" || fail "report does not include the Frigate config
 grep -q "@192.168.1.20:554/main" "$report" || fail "camera host missing from the redacted config"
 if grep -q "$PASSWORD" "$report"; then fail "the camera password is in the report"; fi
 if grep -q "$TOKEN" "$report"; then fail "the bot token is in the report"; fi
+if grep -q "$TOTP_SECRET" "$report"; then fail "the reboot secret is in the report"; fi
 # pid: host - the process list shows the host, not just the container
 grep -qE 'dockerd|containerd|systemd|/sbin/init' "$report" || fail "host processes not visible (pid: host)"
 
@@ -115,5 +120,10 @@ echo "== hardening is in effect"
 [[ "$(docker inspect -f '{{.HostConfig.CapDrop}}' telegram-bot)" == "[ALL]" ]] || fail "capabilities not dropped"
 [[ -z "$(docker inspect -f '{{.HostConfig.PortBindings}}' telegram-bot | tr -d 'map[]')" ]] || fail "bot publishes ports"
 if docker exec telegram-bot sh -c 'touch /opt/edge-server/x 2>/dev/null'; then fail "app dir is writable"; fi
+
+echo "== the drop box is the one writable path"
+docker exec telegram-bot sh -c 'touch /requests/probe && rm /requests/probe' ||
+    fail "the bot cannot write to /requests (needed for /reboot)"
+if docker exec telegram-bot sh -c 'touch /app/x 2>/dev/null'; then fail "bot code dir is writable"; fi
 
 echo "Telegram bot container OK"

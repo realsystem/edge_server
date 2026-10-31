@@ -1059,6 +1059,123 @@ class TestTelegramBotInDeploy:
         _, result = self.run(stub_path, tmp_path, body=body, telegram=self.GOOD)
         assert "C1=true" in result.stdout and "C2=false" in result.stdout
 
+    # ---- /reboot (TOTP) ----
+
+    SECRET = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+    WITH_SECRET = GOOD + f"REBOOT_TOTP_SECRET={SECRET}\n"
+    REBOOT_BODY = "prepare_telegram_bot; echo R=$TELEGRAM_REBOOT_ENABLED"
+
+    def test_reboot_off_without_secret(self, stub_path, tmp_path):
+        app, result = self.run(stub_path, tmp_path, body=self.REBOOT_BODY, telegram=self.GOOD)
+        assert "R=false" in result.stdout
+        assert not (app / "bot-requests").exists()
+
+    def test_reboot_on_with_secret_makes_private_drop_box(self, stub_path, tmp_path):
+        app, result = self.run(
+            stub_path, tmp_path, body=self.REBOOT_BODY, telegram=self.WITH_SECRET
+        )
+        assert "R=true" in result.stdout
+        assert stat.S_IMODE((app / "bot-requests").stat().st_mode) == 0o700
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "gezd gnbv-gy3t qojq gezd gnbv gy3t qojq",
+            "gezdgnbvgy3tqojqgezdgnbvgy3tqojq====",
+        ],
+    )
+    def test_reboot_secret_is_normalized(self, stub_path, tmp_path, value):
+        _, result = self.run(
+            stub_path,
+            tmp_path,
+            body=self.REBOOT_BODY,
+            telegram=self.GOOD + f"REBOOT_TOTP_SECRET={value}\n",
+        )
+        assert "R=true" in result.stdout
+
+    @pytest.mark.parametrize("value", ["short", "GEZDGNBVGY3TQOJ1GEZDGNBV", "ABC!ABC!ABC!ABC!ABC!"])
+    def test_bad_secret_skips_the_bot(self, stub_path, tmp_path, value):
+        app, result = self.run(
+            stub_path,
+            tmp_path,
+            body="prepare_telegram_bot; echo V=$INSTALL_TELEGRAM_BOT R=$TELEGRAM_REBOOT_ENABLED",
+            telegram=self.GOOD + f"REBOOT_TOTP_SECRET={value}\n",
+        )
+        assert "REBOOT_TOTP_SECRET must be base32" in result.stdout
+        assert "V=false R=false" in result.stdout
+        assert not (app / "telegram-bot").exists()
+
+    def test_compose_gets_the_requests_mount_only_when_enabled(self, stub_path, tmp_path):
+        body = "prepare_telegram_bot; create_app_stack"
+        app, _ = self.run(stub_path, tmp_path, body=body, telegram=self.WITH_SECRET)
+        bot = self.compose(app)["services"]["telegram-bot"]
+        assert "./bot-requests:/requests" in bot["volumes"]
+        assert "REQUESTS_DIR=/requests" in bot["environment"]
+        rw = [v for v in bot["volumes"] if not v.endswith(":ro")]
+        assert rw == ["./bot-requests:/requests"]
+        assert bot["read_only"] is True and bot["cap_drop"] == ["ALL"]
+        assert self.SECRET not in (app / "docker-compose.yml").read_text()
+
+        other = tmp_path / "plain"
+        other.mkdir()
+        app2, _ = self.run(stub_path, other, body=body, telegram=self.GOOD)
+        bot2 = self.compose(app2)["services"]["telegram-bot"]
+        assert all(v.endswith(":ro") for v in bot2["volumes"])
+        assert not any("REQUESTS_DIR" in e for e in bot2["environment"])
+
+    def test_reboot_unit_files_and_systemctl_calls(self, stub_path, tmp_path):
+        units = tmp_path / "units"
+        body = "prepare_telegram_bot; install_reboot_unit"
+        app, _ = self.run(
+            stub_path, tmp_path, body=body, telegram=self.WITH_SECRET, SYSTEMD_DIR=str(units)
+        )
+        path_unit = (units / "edge-reboot.path").read_text()
+        service = (units / "edge-reboot.service").read_text()
+        assert f"PathExists={app}/bot-requests/reboot" in path_unit
+        assert "Unit=edge-reboot.service" in path_unit and "WantedBy=multi-user.target" in path_unit
+        assert "Type=oneshot" in service
+        assert f"ExecStartPre=/bin/rm -f {app}/bot-requests/reboot" in service
+        assert "$$1 > 600" in service  # systemd needs the doubled dollar
+        assert "ExecStart=/usr/bin/systemctl reboot" in service
+        log = (stub_path / "log").read_text()
+        assert "systemctl daemon-reload" in log
+        assert "systemctl enable --now edge-reboot.path" in log
+
+    def test_stale_request_is_removed_before_the_watcher_starts(self, stub_path, tmp_path):
+        units = tmp_path / "units"
+        app = tmp_path / "app"
+        (app / "bot-requests").mkdir(parents=True)
+        (app / "bot-requests" / "reboot").touch()
+        self.run(
+            stub_path,
+            tmp_path,
+            body="prepare_telegram_bot; install_reboot_unit",
+            telegram=self.WITH_SECRET,
+            SYSTEMD_DIR=str(units),
+        )
+        assert not (app / "bot-requests" / "reboot").exists()
+
+    def test_units_are_removed_when_reboot_is_turned_off(self, stub_path, tmp_path):
+        units = tmp_path / "units"
+        body = "prepare_telegram_bot; install_reboot_unit"
+        self.run(stub_path, tmp_path, body=body, telegram=self.WITH_SECRET, SYSTEMD_DIR=str(units))
+        assert (units / "edge-reboot.path").exists()
+        self.run(stub_path, tmp_path, body=body, telegram=self.GOOD, SYSTEMD_DIR=str(units))
+        assert not (units / "edge-reboot.path").exists()
+        assert not (units / "edge-reboot.service").exists()
+        assert "systemctl disable --now edge-reboot.path" in (stub_path / "log").read_text()
+
+    def test_no_units_written_when_never_enabled(self, stub_path, tmp_path):
+        units = tmp_path / "units"
+        self.run(
+            stub_path,
+            tmp_path,
+            body="prepare_telegram_bot; install_reboot_unit",
+            telegram=self.GOOD,
+            SYSTEMD_DIR=str(units),
+        )
+        assert not units.exists()
+
     def test_changed_token_is_detected(self, stub_path, tmp_path):
         self.run(stub_path, tmp_path, telegram=self.GOOD)
         new = self.GOOD.replace("1001,2002", "1001")

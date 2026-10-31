@@ -28,12 +28,16 @@ Environment:
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import html
 import json
 import logging
 import os
 import re
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
@@ -65,6 +69,14 @@ HELP = (
     "/testalert [percent] - simulate a low-disk alert, sent only to you\n"
     "/id - your Telegram user id"
 )
+REBOOT_COMMAND = {"command": "reboot", "description": "Reboot the laptop (authenticator code)"}
+REBOOT_HELP = "\n/reboot <code> - reboot the laptop; code from your authenticator app"
+
+TOTP_STEP = 30
+TOTP_FILE_AGE = 60  # a /reboot message older than this is refused
+REBOOT_MAX_FAILURES = 3
+REBOOT_LOCKOUT = 15 * 60.0
+REBOOT_NOTIFY_MAX_AGE = 30 * 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +102,10 @@ class Config:
     alert_free_percent: float = 15.0  # alert below this much free disk; 0 = off
     alert_interval: float = 300.0  # seconds between disk checks
     alert_repeat: float = 6 * 3600.0  # seconds between reminders while the disk stays low
+    totp_secret: str = ""  # base32; empty = /reboot is off
+    requests_dir: Path = Path("/requests")  # shared with the host-side reboot watcher
+    reboot_min_uptime: float = 600.0  # refuse to reboot a host that booted less than this ago
+    reboot_wait: float = 150.0  # seconds to wait for the host to go down before reporting failure
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Config:
@@ -110,6 +126,7 @@ class Config:
             raise ValueError("ALERT_DISK_FREE_PERCENT must be a number") from None
         if not 0 <= percent <= 100:
             raise ValueError("ALERT_DISK_FREE_PERCENT must be between 0 and 100")
+        totp_secret = normalize_secret(env.get("REBOOT_TOTP_SECRET", ""))
         return cls(
             token=token,
             allowed=frozenset(allowed),
@@ -126,7 +143,71 @@ class Config:
             alert_free_percent=percent,
             alert_interval=float(env.get("ALERT_INTERVAL", cls.alert_interval)),
             alert_repeat=float(env.get("ALERT_REPEAT_HOURS", cls.alert_repeat / 3600)) * 3600,
+            totp_secret=totp_secret,
+            requests_dir=Path(env.get("REQUESTS_DIR", str(cls.requests_dir))),
         )
+
+
+# ---------------------------------------------------------------------------
+# TOTP (RFC 6238: HMAC-SHA1, 30 s steps, 6 digits - what authenticator apps use)
+# ---------------------------------------------------------------------------
+
+
+def normalize_secret(raw: str) -> str:
+    """Clean up a base32 secret as typed by a person; "" means not configured."""
+    secret = re.sub(r"[\s-]+", "", raw).upper().rstrip("=")
+    if not secret:
+        return ""
+    if not re.fullmatch(r"[A-Z2-7]{16,}", secret):
+        raise ValueError("REBOOT_TOTP_SECRET must be base32 (A-Z, 2-7), at least 16 characters")
+    try:
+        base64.b32decode(secret + "=" * (-len(secret) % 8))
+    except ValueError:
+        raise ValueError("REBOOT_TOTP_SECRET is not valid base32") from None
+    return secret
+
+
+def totp(secret: str, step: int, digits: int = 6) -> str:
+    key = base64.b32decode(secret + "=" * (-len(secret) % 8))
+    mac = hmac.new(key, struct.pack(">Q", step), hashlib.sha1).digest()
+    offset = mac[-1] & 0x0F
+    number = struct.unpack(">I", mac[offset : offset + 4])[0] & 0x7FFFFFFF
+    return f"{number % 10**digits:0{digits}d}"
+
+
+def verify_totp(
+    secret: str, code: str, now: float, last_step: int = 0, window: int = 1
+) -> int | None:
+    """Return the time step the code belongs to, or None.
+
+    Steps at or before last_step are refused, so a code works once even if it is
+    seen again (replay). window allows for clock drift of +-window steps.
+    """
+    base = int(now // TOTP_STEP)
+    accepted = None
+    for step in range(base - window, base + window + 1):
+        # no early exit: every candidate is compared in constant time
+        if hmac.compare_digest(totp(secret, step), code) and step > last_step:
+            accepted = step
+    return accepted
+
+
+def totp_setup(
+    out: Callable[[str], None] = print, rand: Callable[[int], bytes] = os.urandom
+) -> int:
+    secret = base64.b32encode(rand(20)).decode()
+    uri = f"otpauth://totp/Edge%20server:reboot?secret={secret}&issuer=Edge%20server"
+    out("Add this to your authenticator app (Google Authenticator, Aegis, 2FAS, ...):")
+    out(f"  secret: {secret}")
+    out(f"  or open this link / make a QR code from it: {uri}")
+    out("")
+    out("Then put this line in .telegram on the server and redeploy:")
+    out(f"  REBOOT_TOTP_SECRET={secret}")
+    out("")
+    out(
+        f"The app should now show the code {totp(secret, int(time.time() // TOTP_STEP))} (it changes every 30 s)."
+    )
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -494,6 +575,10 @@ class Bot:
     threads: list[threading.Thread] = field(default_factory=list)
     _disk_state: dict[str, DiskState] = field(default_factory=dict)
     stop: threading.Event = field(default_factory=threading.Event)
+    clock: Callable[[], float] = time.time
+    _failures: dict[int, int] = field(default_factory=dict)
+    _locked_until: dict[int, float] = field(default_factory=dict)
+    _reboot_timer: threading.Timer | None = None
 
     # -- sending ----------------------------------------------------------
 
@@ -620,6 +705,160 @@ class Bot:
             if self.stop.wait(self.cfg.alert_interval):
                 return
 
+    # -- reboot -----------------------------------------------------------
+    # The container can only drop a file into requests_dir. A systemd path unit
+    # on the host notices it and reboots; nothing here can run commands on the host.
+
+    def commands(self) -> list[dict]:
+        return COMMANDS + [REBOOT_COMMAND] if self.cfg.totp_secret else COMMANDS
+
+    def help_text(self) -> str:
+        return HELP + (REBOOT_HELP if self.cfg.totp_secret else "")
+
+    def uptime(self) -> float | None:
+        text = read_text(self.cfg.proc / "uptime")
+        try:
+            return float((text or "").split()[0])
+        except (IndexError, ValueError):
+            return None
+
+    def _step_file(self) -> Path:
+        return self.cfg.requests_dir / "totp-last-step"
+
+    def _load_last_step(self) -> int:
+        try:
+            return int(self._step_file().read_text().strip())
+        except (OSError, ValueError):
+            return 0
+
+    def _save_last_step(self, step: int) -> None:
+        tmp = self._step_file().with_suffix(".tmp")
+        tmp.write_text(str(step))
+        os.replace(tmp, self._step_file())
+
+    def cmd_reboot(self, chat_id: int, user_id: int, message: dict, args: list[str]) -> None:
+        cfg = self.cfg
+        if not cfg.totp_secret or not cfg.requests_dir.is_dir():
+            self.reply(
+                chat_id,
+                "Reboot is not set up. Run 'python3 telegram-bot/bot.py --totp-setup' on the "
+                "server, put REBOOT_TOTP_SECRET in .telegram and redeploy.",
+            )
+            return
+        if (message.get("chat") or {}).get("type") != "private":
+            self.reply(chat_id, "Use /reboot in a private chat with the bot, not in a group.")
+            return
+        if not args:
+            self.reply(
+                chat_id, "Send /reboot followed by the 6-digit code from your authenticator app."
+            )
+            return
+        now = self.clock()
+        if now < self._locked_until.get(user_id, 0.0):
+            wait = int(self._locked_until[user_id] - now) // 60 + 1
+            self.reply(chat_id, f"Too many wrong codes. Try again in about {wait} min.")
+            return
+        if now - float(message.get("date") or 0) > TOTP_FILE_AGE:
+            self.reply(chat_id, "That message is too old. Send /reboot with a fresh code.")
+            return
+        code = args[0]
+        if not re.fullmatch(r"\d{6}", code):
+            self.reply(chat_id, "The code is 6 digits: /reboot 123456")
+            return
+        up = self.uptime()
+        if up is None or up < cfg.reboot_min_uptime:
+            shown = "unknown" if up is None else human_duration(up)
+            self.reply(
+                chat_id,
+                f"Not rebooting: uptime is {shown}. The laptop must have been up for "
+                f"{human_duration(cfg.reboot_min_uptime)} (protects against reboot loops).",
+            )
+            return
+        request = cfg.requests_dir / "reboot"
+        if request.exists():
+            self.reply(chat_id, "A reboot is already pending.")
+            return
+
+        step = verify_totp(cfg.totp_secret, code, now, self._load_last_step())
+        if step is None:
+            failures = self._failures.get(user_id, 0) + 1
+            if failures >= REBOOT_MAX_FAILURES:
+                self._failures.pop(user_id, None)
+                self._locked_until[user_id] = now + REBOOT_LOCKOUT
+                log.warning("reboot: user %s locked out after %d wrong codes", user_id, failures)
+                self.reply(chat_id, "Wrong code. Locked for 15 minutes.")
+            else:
+                self._failures[user_id] = failures
+                log.warning("reboot: wrong code from user %s (%d)", user_id, failures)
+                self.reply(chat_id, f"Wrong code ({failures}/{REBOOT_MAX_FAILURES}).")
+            return
+        self._failures.pop(user_id, None)
+
+        try:
+            self._save_last_step(step)  # before acting: this is what stops a replay
+        except OSError as e:
+            log.error("reboot refused: cannot store the used code: %s", e)
+            self.reply(chat_id, "Not rebooting: cannot write the requests folder.")
+            return
+        try:
+            self.api.call(
+                "deleteMessage", {"chat_id": chat_id, "message_id": message.get("message_id")}
+            )
+        except TelegramError as e:
+            log.info("could not delete the code message: %s", e)
+        marker = cfg.requests_dir / "reboot-notify"
+        try:
+            marker.write_text(json.dumps({"chat_id": chat_id, "at": now}))
+            self.reply(chat_id, "Code accepted. Rebooting now; I will message you when I am back.")
+            fd = os.open(request, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            os.close(fd)
+        except FileExistsError:
+            self.reply(chat_id, "A reboot is already pending.")
+            return
+        except OSError as e:
+            log.error("reboot request failed: %s", e)
+            marker.unlink(missing_ok=True)
+            self.reply(chat_id, f"Could not request the reboot: {e}")
+            return
+        log.warning("reboot requested by user id %s", user_id)
+        timer = threading.Timer(cfg.reboot_wait, self._reboot_not_done, args=(chat_id,))
+        timer.daemon = True
+        self._reboot_timer = timer
+        timer.start()
+
+    def _reboot_not_done(self, chat_id: int) -> None:
+        for name in ("reboot", "reboot-notify"):
+            (self.cfg.requests_dir / name).unlink(missing_ok=True)
+        self.reply(
+            chat_id,
+            "The laptop did not reboot. On the server check: systemctl status edge-reboot.path "
+            "edge-reboot.service (it also refuses within 10 minutes of boot).",
+        )
+
+    def notify_after_reboot(self) -> None:
+        marker = self.cfg.requests_dir / "reboot-notify"
+        try:
+            data = json.loads(marker.read_text())
+            chat_id = int(data["chat_id"])
+            age = self.clock() - float(data["at"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return
+        marker.unlink(missing_ok=True)
+        if age > REBOOT_NOTIFY_MAX_AGE:
+            return
+        up = self.uptime()
+        if up is not None and up < age:
+            text = f"Back online after reboot (uptime {human_duration(up)})."
+        else:
+            text = "The bot restarted but the laptop did not reboot."
+        for _ in range(6):  # the network may still be coming up
+            try:
+                self.api.call("sendMessage", {"chat_id": chat_id, "text": text})
+                return
+            except TelegramError as e:
+                log.info("reboot notice not sent yet: %s", e)
+                self.sleep(10)
+
     def _send_report(self, chat_id: int) -> None:
         name = time.strftime("edge-diagnostics-%Y%m%d-%H%M%S.txt")
         env = {k: v for k, v in os.environ.items() if k != "TELEGRAM_BOT_TOKEN"}
@@ -671,7 +910,7 @@ class Bot:
         chat_id = (message.get("chat") or {}).get("id")
         if not isinstance(user_id, int) or not isinstance(chat_id, int):
             return
-        if time.time() - float(message.get("date") or 0) > self.cfg.max_age:
+        if self.clock() - float(message.get("date") or 0) > self.cfg.max_age:
             log.info("ignoring old command %r", text.split()[0])
             return
         command = text.split()[0].split("@")[0].lower()
@@ -699,8 +938,10 @@ class Bot:
             self.threads.append(thread)
         elif command == "/testalert":
             self.cmd_testalert(chat_id, args)
+        elif command == "/reboot":
+            self.cmd_reboot(chat_id, user_id, message, args)
         else:
-            self.reply(chat_id, HELP)
+            self.reply(chat_id, self.help_text())
 
     def handle_update(self, update: dict) -> None:
         try:
@@ -723,13 +964,16 @@ class Bot:
 
     def run(self) -> None:
         try:
-            self.api.call("setMyCommands", {"commands": COMMANDS})
+            self.api.call("setMyCommands", {"commands": self.commands()})
         except TelegramError as e:
             log.warning("could not register the command menu: %s", e)
         log.info(
-            "bot started; %d authorized user(s); commands: /status /diag /testalert /id /help",
+            "bot started; %d authorized user(s); commands: /status /diag /testalert /id /help%s",
             len(self.cfg.allowed),
+            " /reboot" if self.cfg.totp_secret else "",
         )
+        if self.cfg.totp_secret:
+            threading.Thread(target=self.notify_after_reboot, daemon=True).start()
         if not self.cfg.allowed:
             log.warning("TELEGRAM_ALLOWED_IDS is empty: send /id to the bot to get your id")
         if self.cfg.allowed and self.cfg.alert_free_percent > 0:
@@ -770,6 +1014,8 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout
     )
+    if "--totp-setup" in argv:
+        return totp_setup()
     try:
         cfg = Config.from_env()
     except ValueError as e:

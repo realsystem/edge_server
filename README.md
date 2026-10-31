@@ -171,6 +171,7 @@ A small bot that runs next to Frigate and answers you in a Telegram chat:
 | `/status` | One screen: load, CPU, memory, disk, temperature, AC/battery, Frigate detector speed and every camera's FPS, with a list of problems on top |
 | `/diag` | The full diagnostics report from `collect-diagnostics.sh`, sent as a file (about 15 s) |
 | `/testalert [percent]` | Sends you a simulated low-disk alert (default 5% free) plus the real disk state, so you can check delivery without filling a disk |
+| `/reboot <code>` | Reboots the laptop; needs a code from your authenticator app (off until set up, see below) |
 | `/id` | Your Telegram user id (works for anyone; used for setup) |
 
 Setup:
@@ -216,6 +217,38 @@ How it is kept safe:
 
 Turn it off with `INSTALL_TELEGRAM_BOT=false` (the container is removed on the
 next deploy); removing `.telegram` alone does not remove a running bot.
+
+#### Reboot from Telegram (`/reboot`)
+
+Off by default. A stolen phone or hijacked Telegram account must not be enough to
+reboot the server, so the command needs a one-time code from an authenticator app
+(TOTP, the same 6-digit codes as for 2-factor logins):
+
+1. On any computer with Python: `python3 telegram-bot/bot.py --totp-setup`. It prints
+   a secret, an `otpauth://` link and the code the app should show.
+2. Add the secret to your authenticator app (Google Authenticator, Aegis, 2FAS, ...)
+   by typing it in, or make a QR code from the link.
+3. Put `REBOOT_TOTP_SECRET=<secret>` into `.telegram` on the server and run the deploy.
+4. In a private chat with the bot send `/reboot 123456` (the current code). The bot
+   deletes your message, answers "Rebooting now", and messages you when it is back.
+
+Safeguards:
+
+- Only listed user ids, only in a private chat, and the message must be under a minute old.
+- A code works once (replays are refused, even after a restart) and drifts by at most
+  one 30-second step. Three wrong codes lock that user out for 15 minutes.
+- No reboot loops: a laptop that booted less than 10 minutes ago is not rebooted, and
+  Telegram re-delivering an old command does nothing because of the age and replay checks.
+- The bot container still has no power over the host. It can only create a file in
+  `bot-requests/` (a root-only folder); a systemd unit (`edge-reboot.path`) on the host
+  sees the file and runs `systemctl reboot`. Look at it with
+  `systemctl status edge-reboot.path edge-reboot.service`.
+- Remove `REBOOT_TOTP_SECRET` from `.telegram` and redeploy to switch it off again; the
+  deploy removes the systemd units.
+
+Keep the secret like a password. Anyone who has it can generate valid codes (but
+still needs to be one of the listed Telegram users). Test it once while you are
+sitting at the laptop.
 
 ### Performance diagnostics
 
