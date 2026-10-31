@@ -1308,6 +1308,8 @@ class Bot:
         env.update(
             EDGE_SERVER_DIR=str(self.cfg.app_dir),
             FRIGATE_URL=self.cfg.frigate_url,
+            HOST_SNAPSHOT=str(self.cfg.status_dir / "host-snapshot.txt"),
+            HOST_SNAPSHOT_LIVE="false",  # the container sees no host firewall: use the host's file
             SAMPLES=str(self.cfg.diag_samples),
             INTERVAL=str(self.cfg.diag_interval),
         )

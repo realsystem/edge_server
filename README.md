@@ -169,7 +169,7 @@ A small bot that runs next to Frigate and answers you in a Telegram chat:
 | Command | Answer |
 |---|---|
 | `/status` | One screen: load, CPU, memory, disk (free space, plus a separate `storage /mnt/storage` line with used space), temperature, AC/battery, Frigate detector speed and every camera's FPS, with a list of problems on top |
-| `/diag` | The full diagnostics report from `collect-diagnostics.sh`, sent as a file (about 15 s) |
+| `/diag` | The full diagnostics report from `collect-diagnostics.sh`, sent as a file (about 15 s): hardware, load, Docker, Frigate, config, and the host's **firewall rules, open ports**, SSH settings and service state |
 | `/testalert [percent]` | Sends you a simulated low-disk alert (default 5% free) plus the real disk state, so you can check delivery without filling a disk |
 | `/reboot <code>` | Reboots the laptop; needs a code from your authenticator app (off until set up, see below) |
 | `/redeploy <code>` | Deploys the newest **release tag** (`vX.Y`) from GitHub, same authenticator code (see below) |
@@ -239,6 +239,17 @@ so once when it is fixed. Disk space is checked every 5 minutes.
 
 Disk health comes from `edge-smart.timer` on the host (every 6 hours, `smartmontools`).
 The bot cannot read SMART itself because its container has no access to the disks.
+
+`/diag` also contains a **Network, firewall and open ports (host)** section: listening
+ports with the owning process (`ss -tulpn`), UFW status, the iptables filter and NAT
+tables (including Docker's `DOCKER-USER` chain with packet counters), IPv6 rules, the
+nftables ruleset, published Docker ports, interfaces and routes, Tailscale status,
+effective SSH settings (port, root login, password login), fail2ban, recent logins,
+failed units, timers, pending reboot, recent system errors and recent UFW blocks.
+The bot's container cannot see any of that, so `edge-snapshot.timer` on the host writes
+it to `/opt/edge-server/bot-status/host-snapshot.txt` every 10 minutes (read-only
+commands only) and `/diag` states how old the data is. `sudo ./collect-diagnostics.sh`
+on the server collects it live.
 Other settings: `ALERT_CONFIRM=3` (checks in a row), `ALERT_WATCH_INTERVAL=60`
 (seconds, at least 5), `ALERT_INTERVAL=300` (disk space), `ALERT_REPEAT_HOURS=6`.
 

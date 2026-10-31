@@ -17,6 +17,11 @@
 #   EDGE_SERVER_DIR  default /opt/edge-server
 #   FRIGATE_URL      default http://127.0.0.1:5000 (unauthenticated API port)
 #   SAMPLES, INTERVAL  load samples to take and seconds between them (3, 5)
+#   HOST_SNAPSHOT    host network/firewall snapshot written by host-snapshot.sh,
+#                    used when the host tools are not available (inside the bot's
+#                    container). default $EDGE_SERVER_DIR/bot-status/host-snapshot.txt
+#   HOST_SNAPSHOT_LIVE  "false" = never collect live, only use that file (the bot
+#                    sets this); default: collect live when iptables is installed
 #===============================================================================
 
 set -uo pipefail
@@ -27,6 +32,8 @@ FRIGATE_CONTAINER="${FRIGATE_CONTAINER:-frigate}"
 SAMPLES="${SAMPLES:-3}"
 INTERVAL="${INTERVAL:-5}"
 OUT="${1:-./edge-diagnostics-$(date +%Y%m%d-%H%M%S).txt}"
+HOST_SNAPSHOT="${HOST_SNAPSHOT:-$APP_DIR/bot-status/host-snapshot.txt}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 section() { printf '\n===== %s =====\n' "$1"; }
 
@@ -83,6 +90,29 @@ for password in sorted(passwords, key=len, reverse=True):
     text = text.replace(password, "***")
 open(report, "w").write(text)
 PY
+}
+
+# Firewall rules, open ports, SSH settings, services. Collected live when the host
+# tools are here (run with sudo on the server); otherwise from the snapshot the
+# host writes every 10 minutes, because the bot's container cannot see the host's
+# network or firewall.
+host_network_section() {
+    section "Network, firewall and open ports (host)"
+    local live=""
+    for f in "$SCRIPT_DIR/host-snapshot.sh" "$SCRIPT_DIR/telegram-bot/host-snapshot.sh" "$APP_DIR/host-snapshot.sh"; do
+        [[ -x "$f" ]] && live="$f" && break
+    done
+    if [[ -n "$live" && "${HOST_SNAPSHOT_LIVE:-auto}" != "false" ]] && command -v iptables > /dev/null 2>&1; then
+        echo "(collected now)"
+        "$live"
+    elif [[ -r "$HOST_SNAPSHOT" ]]; then
+        local age=$(($(date +%s) - $(stat -c %Y "$HOST_SNAPSHOT" 2> /dev/null || echo 0)))
+        echo "(from the host snapshot, $((age / 60)) minutes old)"
+        cat "$HOST_SNAPSHOT"
+    else
+        echo "(not available: no host tools here and no $HOST_SNAPSHOT."
+        echo " Run the deploy script to install the snapshot timer, or run this script with sudo on the server.)"
+    fi
 }
 
 report() {
@@ -195,6 +225,8 @@ PY
     else
         echo "(curl not installed)"
     fi
+
+    host_network_section
 
     section "Frigate config (comments removed)"
     if [[ -r "$APP_DIR/frigate/config.yml" ]]; then

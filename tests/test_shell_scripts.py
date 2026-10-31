@@ -1406,6 +1406,33 @@ class TestUnattendedHardening:
         assert not (app / "smart-report.py").exists()
         assert "systemctl disable --now edge-smart.timer" in (stub_path / "log").read_text()
 
+    # ---- network / firewall snapshot for /diag ----
+
+    def test_snapshot_timer_with_the_bot(self, stub_path, tmp_path):
+        app, units, _ = self.install_helpers(stub_path, tmp_path)
+        assert (app / "host-snapshot.sh").read_text() == (
+            REPO / "telegram-bot/host-snapshot.sh"
+        ).read_text()
+        assert os.access(app / "host-snapshot.sh", os.X_OK)
+        service = (units / "edge-snapshot.service").read_text()
+        assert f"ExecStart={app}/host-snapshot.sh {app}/bot-status/host-snapshot.txt" in service
+        assert "OnUnitActiveSec=10min" in (units / "edge-snapshot.timer").read_text()
+        log = (stub_path / "log").read_text()
+        assert "systemctl enable --now edge-snapshot.timer" in log
+        assert "systemctl start --no-block edge-snapshot.service" in log
+
+    def test_snapshot_units_removed_when_bot_is_turned_off(self, stub_path, tmp_path):
+        app, units, _ = self.install_helpers(stub_path, tmp_path)
+        self.run(
+            stub_path,
+            tmp_path,
+            "prepare_telegram_bot; install_host_helpers",
+            INSTALL_TELEGRAM_BOT="false",
+        )
+        assert not (units / "edge-snapshot.timer").exists()
+        assert not (app / "host-snapshot.sh").exists()
+        assert "systemctl disable --now edge-snapshot.timer" in (stub_path / "log").read_text()
+
     def test_smartmontools_is_installed(self):
         assert "smartmontools" in (REPO / "deploy-edge-server.sh").read_text()
 

@@ -137,3 +137,61 @@ def test_missing_tools_and_unreadable_config_do_not_abort(tmp_path):
     assert result.returncode == 0, result.stderr
     text = out.read_text()
     assert "cannot read" in text and "unreachable" in text
+
+
+def run_report(tmp_path, script_dir, **env):
+    """Run a copy of collect-diagnostics.sh that has no host-snapshot.sh next to it."""
+    script_dir.mkdir(exist_ok=True)
+    copy = script_dir / "collect-diagnostics.sh"
+    shutil.copy(SCRIPT, copy)
+    app = tmp_path / "app2"
+    app.mkdir(exist_ok=True)
+    out = tmp_path / "r2.txt"
+    result = subprocess.run(
+        ["bash", str(copy), str(out)],
+        env={
+            **os.environ,
+            "EDGE_SERVER_DIR": str(app),
+            "FRIGATE_URL": "http://127.0.0.1:1",
+            "SAMPLES": "1",
+            "INTERVAL": "1",
+            "FRIGATE_CONTAINER": "no-such-container",
+            **env,
+        },
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    return out.read_text()
+
+
+def test_report_has_the_network_and_firewall_section(report):
+    out, _ = report
+    text = out.read_text()
+    assert "===== Network, firewall and open ports (host)" in text
+    assert "--- Listening ports" in text and "--- Firewall: UFW" in text
+
+
+def test_report_uses_the_host_snapshot_when_host_tools_are_missing(tmp_path):
+    snapshot = tmp_path / "host-snapshot.txt"
+    snapshot.write_text(
+        "Host snapshot\n22/tcp ALLOW IN 192.168.0.0/16\nssh_password=" + OTHER_SECRET + "\n"
+    )
+    # like inside the bot's container: no live collection
+    text = run_report(
+        tmp_path, tmp_path / "bot", HOST_SNAPSHOT=str(snapshot), HOST_SNAPSHOT_LIVE="false"
+    )
+    assert "from the host snapshot" in text
+    assert "22/tcp ALLOW IN 192.168.0.0/16" in text
+    assert OTHER_SECRET not in text  # the usual redaction still applies
+
+
+def test_report_says_so_when_there_is_no_network_data(tmp_path):
+    text = run_report(
+        tmp_path,
+        tmp_path / "bot",
+        HOST_SNAPSHOT=str(tmp_path / "missing"),
+        HOST_SNAPSHOT_LIVE="false",
+    )
+    assert "not available" in text and "snapshot timer" in text
