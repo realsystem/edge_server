@@ -7,7 +7,8 @@
 #
 # Components: Frigate NVR, Tailscale
 #   optional: Home Assistant (INSTALL_HOMEASSISTANT=true),
-#             Mosquitto MQTT (INSTALL_MQTT=true)
+#             Mosquitto MQTT (INSTALL_MQTT=true),
+#             Telegram bot (installed when a .telegram file exists)
 #===============================================================================
 
 set -euo pipefail
@@ -46,6 +47,12 @@ INSTALL_MQTT="${INSTALL_MQTT:-false}"
 # camera streams (e.g. H.264 profile 100) and software decoding always works.
 ENABLE_HWACCEL="${ENABLE_HWACCEL:-false}"
 DRI_DEVICE="${DRI_DEVICE:-/dev/dri/renderD128}"  # overridable for tests
+
+# Telegram bot (/status, /diag): "auto" installs it when a .telegram file with
+# the bot token exists (see README); "false" never installs it.
+INSTALL_TELEGRAM_BOT="${INSTALL_TELEGRAM_BOT:-auto}"
+TELEGRAM_IMAGE="edge-telegram-bot:local"
+TELEGRAM_CHANGED=false
 
 # MQTT credentials (only used when INSTALL_MQTT=true)
 MQTT_USER="${MQTT_USER:-admin}"
@@ -647,6 +654,86 @@ repair_frigate_config() {
     fi
 }
 
+# Copy SRC to DST (mode MODE) if it differs; remember that something changed.
+install_if_changed() {
+    local src="$1" dst="$2" mode="$3"
+    if [[ -f "$dst" ]] && cmp -s "$src" "$dst"; then
+        chmod "$mode" "$dst"
+        return 0
+    fi
+    install -m "$mode" "$src" "$dst"
+    TELEGRAM_CHANGED=true
+}
+
+# Telegram bot: needs a .telegram file with TELEGRAM_BOT_TOKEN (and
+# TELEGRAM_ALLOWED_IDS). Sets INSTALL_TELEGRAM_BOT to true only if everything
+# is in place, so a missing or wrong token never stops the rest of the deploy.
+prepare_telegram_bot() {
+    if [[ "$INSTALL_TELEGRAM_BOT" == "false" ]]; then
+        info "Telegram bot disabled (INSTALL_TELEGRAM_BOT=false)"
+        return 0
+    fi
+    INSTALL_TELEGRAM_BOT=false  # becomes true below once everything worked
+
+    local script_dir cred="" candidate token ids
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    for candidate in "${TELEGRAM_CREDENTIALS_FILE:-}" "$script_dir/.telegram" "$APP_DIR/.telegram"; do
+        if [[ -n "$candidate" && -f "$candidate" ]]; then
+            cred="$candidate"
+            break
+        fi
+    done
+    if [[ -z "$cred" ]]; then
+        info "No .telegram file - skipping the Telegram bot"
+        return 0
+    fi
+
+    # Read the two values without executing the file
+    token=$(sed -n 's/^TELEGRAM_BOT_TOKEN=//p' "$cred" | tail -n 1 | tr -d '\r[:space:]')
+    ids=$(sed -n 's/^TELEGRAM_ALLOWED_IDS=//p' "$cred" | tail -n 1 | tr -d '\r')
+    local token_re='^[0-9]{5,}:[A-Za-z0-9_-]{20,}$' ids_re='^[0-9]+([, ]+[0-9]+)*$'
+    if [[ ! "$token" =~ $token_re ]]; then
+        warn "$cred: TELEGRAM_BOT_TOKEN is missing or not a bot token (123456:ABC...) - skipping the Telegram bot"
+        return 0
+    fi
+    if [[ -z "${ids//[[:space:]]/}" ]]; then
+        warn "TELEGRAM_ALLOWED_IDS is empty: nobody can use the bot yet. Send /id to it, then add your id to .telegram and redeploy"
+    elif [[ ! "$ids" =~ $ids_re ]]; then
+        warn "$cred: TELEGRAM_ALLOWED_IDS must be numeric user ids separated by commas - skipping the Telegram bot"
+        return 0
+    fi
+    if [[ ! -f "$script_dir/telegram-bot/bot.py" || ! -f "$script_dir/telegram-bot/Dockerfile" \
+        || ! -f "$script_dir/collect-diagnostics.sh" ]]; then
+        warn "telegram-bot/ or collect-diagnostics.sh missing next to the script - skipping the Telegram bot"
+        return 0
+    fi
+
+    info "Installing the Telegram bot..."
+    TELEGRAM_CHANGED=false
+    mkdir -p "$APP_DIR/telegram-bot"
+    chmod 755 "$APP_DIR" "$APP_DIR/telegram-bot"
+    install_if_changed "$script_dir/telegram-bot/bot.py" "$APP_DIR/telegram-bot/bot.py" 644
+    install_if_changed "$script_dir/telegram-bot/Dockerfile" "$APP_DIR/telegram-bot/Dockerfile" 644
+    install_if_changed "$script_dir/collect-diagnostics.sh" "$APP_DIR/telegram-bot/collect-diagnostics.sh" 755
+    # The token is a secret: root-only, and never written into the compose file
+    if [[ "$cred" == "$APP_DIR/.telegram" ]]; then
+        chmod 600 "$APP_DIR/.telegram"
+    else
+        install_if_changed "$cred" "$APP_DIR/.telegram" 600
+    fi
+
+    # Only OS tools go into the image (the bot code is mounted), so this is
+    # quick after the first build.
+    if docker build -q -t "$TELEGRAM_IMAGE" "$APP_DIR/telegram-bot" > /dev/null; then
+        INSTALL_TELEGRAM_BOT=true
+    elif docker image inspect "$TELEGRAM_IMAGE" &> /dev/null; then
+        warn "Could not rebuild the Telegram bot image - keeping the existing one"
+        INSTALL_TELEGRAM_BOT=true
+    else
+        warn "Could not build the Telegram bot image (no network?) - skipping the Telegram bot"
+    fi
+}
+
 create_app_stack() {
     info "Creating application stack at $APP_DIR..."
 
@@ -745,6 +832,41 @@ EOF
 EOF
         if [[ "$INSTALL_MQTT" == "true" ]]; then
             printf '    depends_on:\n      - mosquitto\n'
+        fi
+        if [[ "$INSTALL_TELEGRAM_BOT" == "true" ]]; then
+            cat << 'EOF'
+
+  #-----------------------------------------------------------------------------
+  # Telegram bot (/status, /diag). Outbound HTTPS only; no ports. Read-only
+  # view of the host (pid: host, /proc, /sys) for the diagnostics report.
+  #-----------------------------------------------------------------------------
+  telegram-bot:
+    image: edge-telegram-bot:local
+    pull_policy: never
+    container_name: telegram-bot
+    restart: unless-stopped
+    init: true
+    pid: host
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    env_file: ./.telegram
+    environment:
+      - TZ=${TIMEZONE:-America/Los_Angeles}
+      - FRIGATE_URL=http://frigate:5000
+      - EDGE_SERVER_DIR=/opt/edge-server
+      - STORAGE_PATH=/media/frigate
+    volumes:
+      - ./telegram-bot:/app:ro
+      - .:/opt/edge-server:ro
+      - __STORAGE_MOUNT__/frigate:/media/frigate:ro
+    tmpfs:
+      - /tmp
+    mem_limit: 256m
+    pids_limit: 128
+EOF
         fi
         cat << 'EOF'
 
@@ -1101,6 +1223,7 @@ EOF
     local containers="frigate"
     [[ "$INSTALL_MQTT" == "true" ]] && containers="$containers mosquitto"
     [[ "$INSTALL_HOMEASSISTANT" == "true" ]] && containers="$containers homeassistant"
+    [[ "$INSTALL_TELEGRAM_BOT" == "true" ]] && containers="$containers telegram-bot"
     sed -i -e "s|__APP_DIR__|${APP_DIR}|" -e "s|__STORAGE_MOUNT__|${STORAGE_MOUNT}|" \
         -e "s|__CONTAINERS__|${containers}|" "$APP_DIR/health-check.sh"
     chmod +x "$APP_DIR/health-check.sh"
@@ -1122,8 +1245,10 @@ start_services() {
 
     cd "$APP_DIR"
 
-    # Pull images
-    docker compose pull
+    # Pull images (the Telegram bot image is built locally, there is nothing to pull)
+    local -a pullable
+    mapfile -t pullable < <(docker compose config --services | grep -vx telegram-bot || true)
+    docker compose pull "${pullable[@]}"
 
     # Start stack. --remove-orphans stops and removes services that were
     # turned off (e.g. Home Assistant/Mosquitto); their data stays on disk.
@@ -1137,6 +1262,13 @@ start_services() {
             info "Frigate config changed - restarting Frigate"
             docker compose restart frigate
         fi
+    fi
+
+    # The bot code is mounted and its token comes from .telegram: recreate it
+    # when either changed
+    if [[ "$INSTALL_TELEGRAM_BOT" == "true" && "$TELEGRAM_CHANGED" == "true" ]]; then
+        info "Telegram bot files changed - recreating the bot"
+        docker compose up -d --force-recreate --no-deps telegram-bot
     fi
 
     # Wait for containers to start
@@ -1167,6 +1299,7 @@ show_summary() {
     echo "Access URLs (replace with Tailscale IP for remote access):"
     echo "  - Frigate NVR:    http://${ip_addr}:5000"
     [[ "$INSTALL_HOMEASSISTANT" == "true" ]] && echo "  - Home Assistant: http://${ip_addr}:8123"
+    [[ "$INSTALL_TELEGRAM_BOT" == "true" ]] && echo "  - Telegram bot:   send /status or /diag to your bot"
     if [[ "$INSTALL_MQTT" == "true" ]]; then
         echo "  - MQTT Broker:    mqtt://${ip_addr}:1883"
         echo
@@ -1198,7 +1331,7 @@ show_summary() {
     fi
     echo
     echo "Next Steps:"
-    echo "  - Cameras: put camera logins in ${APP_DIR}/.cam ("IP user:pass" per line) and run"
+    echo "  - Cameras: put camera logins in ${APP_DIR}/.cam (\"IP user:pass\" per line) and run"
     echo "    sudo ./discover-cameras.sh, or edit ${APP_DIR}/frigate/config.yml"
     if [[ "$INSTALL_HOMEASSISTANT" == "true" ]]; then
         echo "  - Complete Home Assistant onboarding at http://${ip_addr}:8123"
@@ -1245,6 +1378,7 @@ main() {
     install_tailscale
     configure_firewall
     configure_storage
+    prepare_telegram_bot
     create_app_stack
     discover_cameras
     create_systemd_service

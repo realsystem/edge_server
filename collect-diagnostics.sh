@@ -153,7 +153,7 @@ report() {
     fi
 
     section "Busiest processes (full command lines: shows what ffmpeg is doing)"
-    run ps -eo pid,pcpu,pmem,etimes,nlwp,args --sort=-pcpu -ww
+    run ps -eo pid,pcpu,pmem,etimes,nlwp,args --sort=-pcpu -ww | head -n 31
 
     section "Docker"
     run docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'

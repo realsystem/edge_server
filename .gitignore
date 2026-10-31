@@ -44,3 +44,9 @@ tests/ha-integration/mosquitto/log/
 # Local secrets / config
 /bootstrap.cfg
 *.secrets.env
+
+# Telegram bot token (secret)
+.telegram
+
+# Diagnostics reports (private IPs, config)
+edge-diagnostics-*.txt

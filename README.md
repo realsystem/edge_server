@@ -162,6 +162,48 @@ trace to stderr (also `CAM_DEBUG=1`): which logins were loaded, who answered
 discovery, each ONVIF call with its HTTP status and the camera's fault text,
 and the camera's clock. Passwords are never printed, only their length.
 
+### Telegram bot (`/status`, `/diag`)
+
+A small bot that runs next to Frigate and answers you in a Telegram chat:
+
+| Command | Answer |
+|---|---|
+| `/status` | One screen: load, CPU, memory, disk, temperature, AC/battery, Frigate detector speed and every camera's FPS, with a list of problems on top |
+| `/diag` | The full diagnostics report from `collect-diagnostics.sh`, sent as a file (about 15 s) |
+| `/id` | Your Telegram user id (works for anyone; used for setup) |
+
+Setup:
+
+1. In Telegram, talk to **@BotFather**, send `/newbot` and copy the token it gives you.
+2. On the server, create `.telegram` next to the scripts (this is not committed to git):
+   ```bash
+   cat > .telegram << 'EOF'
+   TELEGRAM_BOT_TOKEN=123456789:your-token-from-botfather
+   TELEGRAM_ALLOWED_IDS=
+   EOF
+   chmod 600 .telegram
+   sudo ./deploy-edge-server.sh
+   ```
+3. Open your bot in Telegram, send `/id`, put the number it answers into
+   `TELEGRAM_ALLOWED_IDS` (several ids: comma-separated) and run the deploy again.
+
+How it is kept safe:
+
+- **Only the listed user ids get answers.** Everyone else is ignored (a stranger can
+  only learn their own id). Authorization is by the sender, not the chat.
+- **No open port.** The bot polls Telegram, so the server only makes outbound HTTPS
+  requests. The token stays in `.telegram` (mode 600), never in the compose file.
+- **Locked-down container.** Read-only filesystem, all capabilities dropped,
+  read-only mounts. It sees the host's processes (`pid: host`) so `/diag` can
+  list what is using the CPU, but it has **no access to the Docker socket**, so
+  the report has no `docker stats` section.
+- **Reports leave your network.** `/diag` goes through Telegram's servers.
+  Passwords are removed, but it lists private camera IPs and your Frigate config;
+  use it only in a private chat with the bot.
+
+Turn it off with `INSTALL_TELEGRAM_BOT=false` (the container is removed on the
+next deploy); removing `.telegram` alone does not remove a running bot.
+
 ### Performance diagnostics
 
 If the server is slow or the CPU is pegged, collect a report (hardware, power and
