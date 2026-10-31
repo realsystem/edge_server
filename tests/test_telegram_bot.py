@@ -463,7 +463,13 @@ class TestPolling:
             b.run()
         assert delays == [2, 4, 8]
         (commands,) = telegram.sent("setMyCommands")
-        assert {c["command"] for c in commands["commands"]} == {"status", "diag", "id", "help"}
+        assert {c["command"] for c in commands["commands"]} == {
+            "status",
+            "diag",
+            "testalert",
+            "id",
+            "help",
+        }
 
 
 # ---------------------------------------------------------------------- main
@@ -485,3 +491,198 @@ class TestMain:
         monkeypatch.setenv("DIAG_SCRIPT", str(REPO / "collect-diagnostics.sh"))
         monkeypatch.setattr(bot, "check_environment", lambda cfg: [])
         assert bot.main(["--check"]) == 0
+
+
+# --------------------------------------------------------------- disk alerts
+
+
+def fake_usage(monkeypatch, pct, total=100 * 2**30):
+    """Make every watched disk report ``pct`` percent free (mutable via the list)."""
+    state = [pct]
+    monkeypatch.setattr(bot, "disk_usage", lambda path: (total, int(total * state[0] / 100)))
+    return state
+
+
+class TestDiskAlerts:
+    def test_alert_once_remind_then_recover(self, telegram, frigate, host, monkeypatch):
+        b = make_bot(telegram, frigate, host)
+        pct = fake_usage(monkeypatch, 50)
+        assert b.disk_alert_messages(now=0) == []
+
+        pct[0] = 10  # crosses the 15% level
+        (alert,) = b.disk_alert_messages(now=1000)
+        assert "Low disk space" in alert and "10.0%" in alert and "alert level 15%" in alert
+        assert "reminder" not in alert and "oldest recordings" in alert
+
+        assert b.disk_alert_messages(now=1300) == []  # no repeat every 5 minutes
+        (reminder,) = b.disk_alert_messages(now=1000 + b.cfg.alert_repeat)
+        assert "(reminder)" in reminder
+
+        pct[0] = 16  # above the level but not clearly recovered: stay quiet
+        assert b.disk_alert_messages(now=1000 + b.cfg.alert_repeat + 1) == []
+        pct[0] = 25
+        (ok,) = b.disk_alert_messages(now=1000 + b.cfg.alert_repeat + 2)
+        assert "recovered" in ok and "25%" in ok
+        assert b.disk_alert_messages(now=1000 + b.cfg.alert_repeat + 3) == []
+
+    def test_alerts_again_after_recovery(self, telegram, frigate, host, monkeypatch):
+        b = make_bot(telegram, frigate, host)
+        pct = fake_usage(monkeypatch, 5)
+        assert len(b.disk_alert_messages(now=0)) == 1
+        pct[0] = 60
+        assert "recovered" in b.disk_alert_messages(now=1)[0]
+        pct[0] = 5
+        assert "Low disk space" in b.disk_alert_messages(now=2)[0]
+
+    def test_turned_off_with_zero(self, telegram, frigate, host, monkeypatch):
+        b = make_bot(telegram, frigate, host, alert_free_percent=0.0)
+        fake_usage(monkeypatch, 1)
+        assert b.disk_alert_messages(now=0) == []
+
+    def test_unreadable_disk_is_ignored(self, telegram, frigate, host, monkeypatch):
+        b = make_bot(telegram, frigate, host)
+        monkeypatch.setattr(bot, "disk_usage", lambda path: None)
+        assert b.disk_alert_messages(now=0) == []
+
+    def test_one_alert_per_filesystem(self, telegram, frigate, host, monkeypatch):
+        # recordings and the app dir are on the same filesystem here (both under tmp_path)
+        b = make_bot(telegram, frigate, host)
+        fake_usage(monkeypatch, 5)
+        (alert,) = b.disk_alert_messages(now=0)
+        assert alert.count("Low disk space") == 1
+        assert "recordings and system disk" in alert
+
+    def test_sent_to_every_authorized_user(self, telegram, frigate, host, monkeypatch):
+        b = make_bot(telegram, frigate, host)
+        b.cfg.allowed = frozenset({ALICE, 2002})
+        fake_usage(monkeypatch, 5)
+        b.send_alerts()
+        assert sorted(p["chat_id"] for p in telegram.sent()) == [ALICE, 2002]
+        assert all("Low disk space" in t for t in telegram.texts())
+
+    def test_loop_sends_and_stops(self, telegram, frigate, host, monkeypatch):
+        b = make_bot(
+            telegram,
+            frigate,
+            host,
+        )
+        b.cfg.alert_interval = 0.01
+        fake_usage(monkeypatch, 5)
+        thread = threading.Thread(target=b.alert_loop, daemon=True)
+        thread.start()
+        deadline = time.time() + 5
+        while not telegram.texts() and time.time() < deadline:
+            time.sleep(0.02)
+        b.stop.set()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert len(telegram.texts()) == 1  # alerted once, not on every check
+
+    def test_loop_survives_errors(self, telegram, frigate, host, monkeypatch):
+        b = make_bot(telegram, frigate, host)
+        b.cfg.alert_interval = 0.01
+        calls = []
+
+        def boom():
+            calls.append(1)
+            if len(calls) >= 3:
+                b.stop.set()
+            raise RuntimeError("disk exploded")
+
+        monkeypatch.setattr(b, "send_alerts", boom)
+        b.alert_loop()
+        assert len(calls) == 3
+
+    def test_run_starts_the_loop_only_when_useful(self, telegram, frigate, host, monkeypatch):
+        started = []
+        real_start = threading.Thread.start
+
+        def tracking_start(self):
+            if getattr(self._target, "__name__", "") == "alert_loop":
+                started.append("alert_loop")  # do not really run it
+            else:
+                real_start(self)  # the fake HTTP servers need real threads
+
+        monkeypatch.setattr(threading.Thread, "start", tracking_start)
+        for allowed, percent, expected in [
+            (frozenset({ALICE}), 15.0, ["alert_loop"]),
+            (frozenset(), 15.0, []),
+            (frozenset({ALICE}), 0.0, []),
+        ]:
+            started.clear()
+            b = make_bot(telegram, frigate, host, alert_free_percent=percent)
+            b.cfg.allowed = allowed
+            b.sleep = lambda s: (_ for _ in ()).throw(KeyboardInterrupt)
+            telegram.routes["getUpdates"] = (500, {"ok": False})
+            with pytest.raises(KeyboardInterrupt):
+                b.run()
+            assert started == expected
+
+
+class TestTestAlertCommand:
+    def test_simulates_alert_for_requester_only(self, telegram, frigate, host):
+        b = make_bot(telegram, frigate, host)
+        b.cfg.allowed = frozenset({ALICE, 2002})
+        b.handle_update(message(ALICE, "/testalert"))
+        first, second = telegram.sent()
+        assert first["chat_id"] == second["chat_id"] == ALICE  # not sent to the other user
+        assert "TEST - this is not a real alert" in first["text"]
+        assert "Low disk space" in first["text"] and "5.0%" in first["text"]
+        assert "Real state:" in second["text"] and "Alerts go to 2 user(s)" in second["text"]
+
+    def test_custom_percent(self, telegram, frigate, host):
+        b = make_bot(telegram, frigate, host)
+        b.handle_update(message(ALICE, "/testalert 2.5"))
+        assert "2.5%" in telegram.texts()[0]
+
+    @pytest.mark.parametrize("arg", ["abc", "-1", "101"])
+    def test_bad_argument(self, telegram, frigate, host, arg):
+        b = make_bot(telegram, frigate, host)
+        b.handle_update(message(ALICE, f"/testalert {arg}"))
+        assert telegram.texts() == ["Usage: /testalert [free percent between 0 and 100]"]
+
+    def test_says_when_alerts_are_off(self, telegram, frigate, host):
+        b = make_bot(telegram, frigate, host, alert_free_percent=0.0)
+        b.handle_update(message(ALICE, "/testalert"))
+        assert "turned off" in telegram.texts()[1]
+
+    def test_strangers_cannot_trigger_it(self, telegram, frigate, host):
+        b = make_bot(telegram, frigate, host)
+        b.handle_update(message(EVE, "/testalert"))
+        assert telegram.calls == []
+
+    def test_listed_in_help(self, telegram, frigate, host):
+        b = make_bot(telegram, frigate, host)
+        b.handle_update(message(ALICE, "/help"))
+        assert "/testalert" in telegram.texts()[0]
+
+
+class TestAlertConfig:
+    ENV = {"TELEGRAM_BOT_TOKEN": TOKEN}
+
+    def test_defaults(self):
+        cfg = bot.Config.from_env(self.ENV)
+        assert (cfg.alert_free_percent, cfg.alert_interval, cfg.alert_repeat) == (
+            15.0,
+            300.0,
+            21600.0,
+        )
+
+    def test_from_env(self):
+        env = {
+            **self.ENV,
+            "ALERT_DISK_FREE_PERCENT": "20",
+            "ALERT_INTERVAL": "60",
+            "ALERT_REPEAT_HOURS": "1",
+        }
+        cfg = bot.Config.from_env(env)
+        assert (cfg.alert_free_percent, cfg.alert_interval, cfg.alert_repeat) == (
+            20.0,
+            60.0,
+            3600.0,
+        )
+
+    @pytest.mark.parametrize("value", ["lots", "-1", "101"])
+    def test_invalid_percent(self, value):
+        with pytest.raises(ValueError, match="ALERT_DISK_FREE_PERCENT"):
+            bot.Config.from_env({**self.ENV, "ALERT_DISK_FREE_PERCENT": value})
