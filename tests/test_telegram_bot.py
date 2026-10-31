@@ -96,6 +96,7 @@ def frigate():
         {
             "/api/version": (200, b"0.16.0"),
             "/api/stats": (200, FRIGATE_STATS),
+            "/api/config": (200, {"cameras": {"front": {"enabled": True}}}),
         }
     )
     yield s
@@ -293,6 +294,26 @@ class TestStatus:
         )
         text = bot.build_status(make_bot(telegram, frigate, host).cfg, lambda s: None)
         assert "1 problem(s)" in text and "gate: no video" in text and "gate: NO VIDEO" in text
+
+    def test_disabled_camera_is_not_a_problem(self, telegram, frigate, host):
+        # e.g. the placeholder camera in the generated config: enabled: false, 0 fps
+        frigate.routes["/api/stats"] = (
+            200,
+            {"cameras": {"front": {"camera_fps": 5}, "placeholder": {"camera_fps": 0.0}}},
+        )
+        frigate.routes["/api/config"] = (
+            200,
+            {"cameras": {"front": {"enabled": True}, "placeholder": {"enabled": False}}},
+        )
+        text = bot.build_status(make_bot(telegram, frigate, host).cfg, lambda s: None)
+        assert "Edge server: OK" in text and "placeholder: disabled" in text
+        assert "NO VIDEO" not in text
+
+    def test_unknown_config_still_flags_dead_camera(self, telegram, frigate, host):
+        frigate.routes["/api/stats"] = (200, {"cameras": {"gate": {"camera_fps": 0.0}}})
+        del frigate.routes["/api/config"]  # 404: cannot tell, so assume it should be running
+        text = bot.build_status(make_bot(telegram, frigate, host).cfg, lambda s: None)
+        assert "gate: no video" in text
 
     def test_slow_detector_is_a_problem(self, telegram, frigate, host):
         stats = {"cameras": {"gate": {"camera_fps": 5, "skipped_fps": 2.5}}}

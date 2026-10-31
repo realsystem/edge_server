@@ -294,6 +294,20 @@ def http_get(url: str, timeout: float = 5) -> bytes:
         return body
 
 
+def disabled_cameras(cfg: Config) -> set[str]:
+    """Cameras switched off in the Frigate config (they report 0 fps by design)."""
+    try:
+        config = json.loads(http_get(f"{cfg.frigate_url}/api/config"))
+    except (OSError, ValueError, urllib.error.URLError):
+        return set()
+    cameras = config.get("cameras") if isinstance(config, dict) else None
+    return {
+        name
+        for name, camera in (cameras or {}).items()
+        if isinstance(camera, dict) and camera.get("enabled") is False
+    }
+
+
 def frigate_status(cfg: Config) -> tuple[list[str], list[str]]:
     """Lines about Frigate and a list of problems."""
     try:
@@ -311,7 +325,11 @@ def frigate_status(cfg: Config) -> tuple[list[str], list[str]]:
         lines.append(
             f"  detector {name}: {speed} ms" if speed is not None else f"  detector {name}"
         )
+    disabled = disabled_cameras(cfg)
     for name, c in sorted((stats.get("cameras") or {}).items()):
+        if name in disabled:
+            lines.append(f"  {name}: disabled")
+            continue
         fps = float(c.get("camera_fps") or 0)
         detect = float(c.get("detection_fps") or 0)
         skipped = float(c.get("skipped_fps") or 0)
