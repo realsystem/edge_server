@@ -3,7 +3,8 @@
 # Edge Server Deployment Script
 # Idempotent, production-grade provisioning for Ubuntu Server
 #
-# Usage: sudo ./deploy-edge-server.sh
+# Usage: sudo ./deploy-edge-server.sh           deploy or update by hand
+#        sudo ./deploy-edge-server.sh --auto    unattended update, see below
 #
 # Components: Frigate NVR, Tailscale
 #   optional: Home Assistant (INSTALL_HOMEASSISTANT=true),
@@ -13,6 +14,24 @@
 
 set -euo pipefail
 IFS=$'\n\t'
+
+# --auto: redeploy without anyone present (the Telegram bot's /redeploy runs this).
+#   1. fetch the newest code from GitHub (REDEPLOY_REPO / REDEPLOY_BRANCH) into
+#      $APP_DIR/source and require green CI on it
+#   2. deploy it with the settings saved by the last manual deploy ($APP_DIR/deploy.env)
+#   3. check that every container and Frigate come up; if not, go back to the
+#      previous version and deploy that
+#   4. write the outcome to $APP_DIR/bot-requests/redeploy-result for the bot
+# Settings saved by a manual run become the defaults for --auto. This has to be
+# read before the defaults below are assigned; environment variables still win.
+SETTINGS_FILE="${EDGE_SERVER_DIR:-/opt/edge-server}/deploy.env"
+for _arg in "$@"; do
+    if [[ "$_arg" == "--auto" || "$_arg" == "--auto-apply" ]] && [[ -r "$SETTINGS_FILE" ]]; then
+        # shellcheck source=/dev/null
+        source "$SETTINGS_FILE"
+        break
+    fi
+done
 
 #-------------------------------------------------------------------------------
 # CONFIGURATION - Edit these variables before running
@@ -32,6 +51,7 @@ STORAGE_MOUNT="${EDGE_STORAGE_DIR:-/mnt/storage}"
 
 # Application directory
 APP_DIR="${EDGE_SERVER_DIR:-/opt/edge-server}"
+SOURCE_DIR="$APP_DIR/source"  # checkout that --auto updates and deploys from
 
 # Local subnet for firewall rules (CIDR notation)
 LOCAL_SUBNET="${LOCAL_SUBNET:-192.168.0.0/16}"
@@ -51,6 +71,7 @@ DRI_DEVICE="${DRI_DEVICE:-/dev/dri/renderD128}"  # overridable for tests
 # Telegram bot (/status, /diag): "auto" installs it when a .telegram file with
 # the bot token exists (see README); "false" never installs it.
 INSTALL_TELEGRAM_BOT="${INSTALL_TELEGRAM_BOT:-auto}"
+INSTALL_TELEGRAM_BOT_REQUEST="$INSTALL_TELEGRAM_BOT"  # prepare_telegram_bot may switch it off
 TELEGRAM_IMAGE="edge-telegram-bot:local"
 TELEGRAM_CHANGED=false
 TELEGRAM_REBOOT_ENABLED=false  # /reboot: needs REBOOT_TOTP_SECRET in .telegram
@@ -60,6 +81,15 @@ SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
 # so a new upstream release never arrives unattended. To upgrade, change this
 # and run the deploy script again.
 FRIGATE_IMAGE="${FRIGATE_IMAGE:-ghcr.io/blakeblackshear/frigate:0.18.2}"
+
+# Where --auto gets new code, and whether the new commit must have passed CI
+# (GitHub check runs) first. VERIFY_TIMEOUT: seconds to wait for the stack to come up.
+REDEPLOY_REPO="${REDEPLOY_REPO:-https://github.com/realsystem/edge_server.git}"
+REDEPLOY_BRANCH="${REDEPLOY_BRANCH:-main}"
+REDEPLOY_REQUIRE_CI="${REDEPLOY_REQUIRE_CI:-true}"
+VERIFY_TIMEOUT="${VERIFY_TIMEOUT:-300}"
+REDEPLOY_LOCK_FILE="${REDEPLOY_LOCK_FILE:-/run/lock/edge-redeploy.lock}"
+ROLLED_BACK=false
 
 # MQTT credentials (only used when INSTALL_MQTT=true)
 MQTT_USER="${MQTT_USER:-admin}"
@@ -808,6 +838,68 @@ UNIT
     rm -f "$APP_DIR/bot-requests/reboot"
     systemctl daemon-reload
     systemctl enable --now edge-reboot.path
+}
+
+# Host side of /redeploy: a path unit that runs "deploy-edge-server.sh --auto"
+# when the bot drops bot-requests/redeploy. Needs the source checkout.
+install_auto_redeploy() {
+    local dir="$SYSTEMD_DIR"
+    if [[ "$TELEGRAM_REBOOT_ENABLED" != "true" ]]; then
+        if [[ -f "$dir/edge-redeploy.path" || -f "$dir/edge-redeploy.service" ]]; then
+            systemctl disable --now edge-redeploy.path &> /dev/null || true
+            rm -f "$dir/edge-redeploy.path" "$dir/edge-redeploy.service"
+            systemctl daemon-reload
+            info "Removed the redeploy watcher (no REBOOT_TOTP_SECRET)"
+        fi
+        return 0
+    fi
+    if ! ensure_source_checkout; then
+        warn "Could not get $REDEPLOY_REPO - /redeploy is not available (the rest is unaffected)"
+        return 0
+    fi
+
+    info "Installing the Telegram /redeploy watcher..."
+    mkdir -p "$dir"
+    cat > "$dir/edge-redeploy.path" << UNIT
+[Unit]
+Description=Redeploy request from the Telegram bot
+
+[Path]
+PathExists=$APP_DIR/bot-requests/redeploy
+Unit=edge-redeploy.service
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    cat > "$dir/edge-redeploy.service" << UNIT
+[Unit]
+Description=Update from GitHub and redeploy (requested from the Telegram bot)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=EDGE_SERVER_DIR=$APP_DIR
+TimeoutStartSec=2400
+# Consume the request first so it can never loop
+ExecStartPre=/bin/rm -f $APP_DIR/bot-requests/redeploy
+ExecStart=$SOURCE_DIR/deploy-edge-server.sh --auto
+UNIT
+    chmod 644 "$dir/edge-redeploy.path" "$dir/edge-redeploy.service"
+    rm -f "$APP_DIR/bot-requests/redeploy"
+    systemctl daemon-reload
+    systemctl enable --now edge-redeploy.path
+}
+
+# The checkout --auto deploys from. Created by the first manual deploy.
+ensure_source_checkout() {
+    if [[ -d "$SOURCE_DIR/.git" ]]; then
+        git -C "$SOURCE_DIR" remote set-url origin "$REDEPLOY_REPO"
+        return 0
+    fi
+    rm -rf "$SOURCE_DIR"
+    git clone --quiet --depth 50 --branch "$REDEPLOY_BRANCH" "$REDEPLOY_REPO" "$SOURCE_DIR" \
+        && [[ -f "$SOURCE_DIR/deploy-edge-server.sh" ]]
 }
 
 # Host-side helpers, each a small script plus a systemd unit:
@@ -1597,7 +1689,287 @@ show_summary() {
 # MAIN
 #-------------------------------------------------------------------------------
 
+#-------------------------------------------------------------------------------
+# SETTINGS SAVED FOR --auto
+#-------------------------------------------------------------------------------
+
+# Everything a later --auto run needs to repeat this deployment. Not the
+# Tailscale key (already authenticated). The file is root-only: it holds the
+# MQTT password and BLE keys.
+SAVED_SETTINGS=(
+    INSTALL_HOMEASSISTANT INSTALL_MQTT MQTT_USER MQTT_PASS ENABLE_HWACCEL DRI_DEVICE
+    LOCAL_SUBNET TIMEZONE EXTERNAL_DRIVE_UUID FRIGATE_IMAGE
+    NUT_POWER_INSTALL NUT_SHUTDOWN_DELAY NUT_LOW_BATTERY
+    VICTRON_INSTALL VICTRON_ADDRESS VICTRON_KEY RENOGY_INSTALL RENOGY_ADDRESS
+    REDEPLOY_REPO REDEPLOY_BRANCH
+)
+
+save_settings() {
+    local tmp name
+    mkdir -p "$APP_DIR"
+    tmp=$(umask 077 && mktemp "$SETTINGS_FILE.XXXXXX")
+    {
+        echo "# Written by deploy-edge-server.sh for --auto. Environment variables win."
+        for name in "${SAVED_SETTINGS[@]}"; do
+            printf '[[ -v %s ]] || %s=%q\n' "$name" "$name" "${!name:-}"
+        done
+        printf '[[ -v INSTALL_TELEGRAM_BOT ]] || INSTALL_TELEGRAM_BOT=%q\n' "$INSTALL_TELEGRAM_BOT_REQUEST"
+        printf '[[ -v EDGE_STORAGE_DIR ]] || EDGE_STORAGE_DIR=%q\n' "$STORAGE_MOUNT"
+    } > "$tmp"
+    chmod 600 "$tmp"
+    mv "$tmp" "$SETTINGS_FILE"
+}
+
+#-------------------------------------------------------------------------------
+# AUTOMATIC REDEPLOY (--auto)
+#-------------------------------------------------------------------------------
+
+# Tell the Telegram bot how it went. Plain text only: it ends up inside JSON.
+write_redeploy_result() {
+    local status="$1" from="${2:-}" to="${3:-}" detail="${4:-}" dir="$APP_DIR/bot-requests" tmp
+    [[ -d "$dir" ]] || return 0
+    from=${from//[^0-9a-f]/}
+    to=${to//[^0-9a-f]/}
+    detail=${detail//[^[:alnum:] .,:;()_\/-]/ }
+    tmp=$(mktemp "$dir/.redeploy-result.XXXXXX")
+    printf '{"status": "%s", "from": "%s", "to": "%s", "detail": "%s", "at": %s}\n' \
+        "$status" "$from" "$to" "$detail" "$(date +%s)" > "$tmp"
+    chmod 644 "$tmp"
+    mv "$tmp" "$dir/redeploy-result"
+}
+
+# State of the GitHub check runs of a commit: success, pending, failure, none or unreachable
+ci_state() {
+    local sha="$1" url slug json
+    url=$(git -C "$SOURCE_DIR" config --get remote.origin.url 2> /dev/null) || url=""
+    slug=${url#https://github.com/}
+    slug=${slug#git@github.com:}
+    slug=${slug%.git}
+    [[ "$slug" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || {
+        echo "unsupported"
+        return 0
+    }
+    if ! json=$(curl -fsS -m 20 -H 'Accept: application/vnd.github+json' \
+        "https://api.github.com/repos/$slug/commits/$sha/check-runs?per_page=100" 2> /dev/null); then
+        echo "unreachable"
+        return 0
+    fi
+    python3 -c '
+import json, sys
+try:
+    runs = json.load(sys.stdin)["check_runs"]
+except (ValueError, KeyError, TypeError):
+    print("unreachable")
+    raise SystemExit
+if not runs:
+    print("none")
+elif any(r.get("status") != "completed" for r in runs):
+    print("pending")
+elif any(r.get("conclusion") not in ("success", "skipped", "neutral") for r in runs):
+    print("failure")
+else:
+    print("success")
+' <<< "$json"
+}
+
+# Copy of what a rollback or a mistake would need, newest five kept
+backup_for_redeploy() {
+    local dir="$APP_DIR/backups" stamp
+    stamp=$(date +%Y%m%d-%H%M%S)
+    mkdir -p "$dir"
+    chmod 700 "$dir"
+    (cd "$APP_DIR" && tar -czf "$dir/redeploy-$stamp.tgz" --ignore-failed-read \
+        docker-compose.yml frigate/config.yml .cam .telegram deploy.env 2> /dev/null) \
+        || warn "Could not back up the configuration"
+    chmod 600 "$dir"/redeploy-*.tgz 2> /dev/null || true
+    # shellcheck disable=SC2012
+    ls -1t "$dir"/redeploy-*.tgz 2> /dev/null | tail -n +6 | xargs -r rm -f
+}
+
+# True once every container runs and Frigate answers, false after VERIFY_TIMEOUT seconds
+verify_stack() {
+    local -a names
+    local name ok deadline=$((SECONDS + VERIFY_TIMEOUT))
+    IFS=' ' read -ra names <<< "$(stack_containers)"
+    while ((SECONDS < deadline)); do
+        ok=true
+        for name in "${names[@]}"; do
+            [[ "$(docker inspect -f '{{.State.Status}}' "$name" 2> /dev/null)" == "running" ]] || ok=false
+        done
+        if [[ "$ok" == "true" ]] && curl -fs -m 5 http://127.0.0.1:5000/api/version > /dev/null 2>&1; then
+            return 0
+        fi
+        sleep "${VERIFY_POLL:-5}"
+    done
+    return 1
+}
+
+# One redeploy at a time, across the exec into the new version
+take_redeploy_lock() {
+    [[ -n "${REDEPLOY_LOCKED:-}" ]] && return 0
+    mkdir -p "$(dirname "$REDEPLOY_LOCK_FILE")"
+    exec 9> "$REDEPLOY_LOCK_FILE"
+    flock -n 9 || return 1
+    export REDEPLOY_LOCKED=1
+}
+
+# Phase 1: fetch, gate, back up, then hand over to the freshly fetched script
+auto_update() {
+    local prev new state
+    if ! take_redeploy_lock; then
+        write_redeploy_result refused "" "" "another deploy is already running"
+        fatal "Another deploy is running"
+    fi
+    if [[ ! -r "$SETTINGS_FILE" ]]; then
+        write_redeploy_result refused "" "" "no saved settings - run deploy-edge-server.sh by hand once"
+        fatal "No $SETTINGS_FILE: run the deploy script by hand once first"
+    fi
+    if [[ ! -d "$SOURCE_DIR/.git" ]]; then
+        write_redeploy_result refused "" "" "no source checkout - run deploy-edge-server.sh by hand once"
+        fatal "No source checkout at $SOURCE_DIR: run the deploy script by hand once first"
+    fi
+
+    prev=$(git -C "$SOURCE_DIR" rev-parse HEAD)
+    info "Fetching $REDEPLOY_BRANCH from $REDEPLOY_REPO..."
+    git -C "$SOURCE_DIR" remote set-url origin "$REDEPLOY_REPO"
+    if ! GIT_TERMINAL_PROMPT=0 timeout 180 git -C "$SOURCE_DIR" fetch --quiet origin "$REDEPLOY_BRANCH"; then
+        write_redeploy_result refused "$prev" "" "cannot fetch from GitHub"
+        fatal "git fetch failed"
+    fi
+    new=$(git -C "$SOURCE_DIR" rev-parse FETCH_HEAD)
+    info "Current ${prev:0:7}, available ${new:0:7}"
+
+    if [[ "$new" != "$prev" && "$REDEPLOY_REQUIRE_CI" == "true" ]]; then
+        state=$(ci_state "$new")
+        info "CI on ${new:0:7}: $state"
+        if [[ "$state" != "success" ]]; then
+            local why
+            case "$state" in
+                pending) why="CI is still running on the new version, try again in a few minutes" ;;
+                failure) why="CI failed on the new version" ;;
+                none) why="no CI results for the new version yet" ;;
+                *) why="cannot check CI on GitHub ($state)" ;;
+            esac
+            write_redeploy_result refused "$prev" "$new" "$why"
+            fatal "Not deploying ${new:0:7}: $why"
+        fi
+    fi
+
+    backup_for_redeploy
+    git -C "$SOURCE_DIR" reset --quiet --hard "$new"
+    info "Handing over to ${new:0:7}"
+    # exec: this process must not read another byte of a script that was just replaced
+    REDEPLOY_FROM="$prev" REDEPLOY_TO="$new" exec "$SOURCE_DIR/deploy-edge-server.sh" --auto-apply
+}
+
+# Phase 2: deploy what is checked out, verify it, fall back to the previous version if it fails
+auto_apply() {
+    local from="${REDEPLOY_FROM:-}" to="${REDEPLOY_TO:-}" head rc=0 detail=""
+    take_redeploy_lock || fatal "Another deploy is running"
+    head=$(git -C "$SOURCE_DIR" rev-parse HEAD 2> /dev/null || echo "")
+    [[ -n "$from" ]] || from="$head"
+    [[ -n "$to" ]] || to="$head"
+    info "Auto deploy of ${head:0:7} (from ${from:0:7})"
+
+    set +e
+    (
+        set -e
+        run_deploy
+    )
+    rc=$?
+    set -e
+    if ((rc != 0)); then
+        detail="the deploy script failed (exit $rc)"
+    elif ! verify_stack; then
+        detail="the containers or Frigate did not come up within ${VERIFY_TIMEOUT} seconds"
+    fi
+
+    if [[ -z "$detail" ]]; then
+        if [[ "$ROLLED_BACK" == "true" ]]; then
+            write_redeploy_result rolled_back "$from" "$to" "${REDEPLOY_DETAIL:-the update failed}"
+            fatal "Rolled back to ${from:0:7} (the update to ${to:0:7} failed)"
+        fi
+        write_redeploy_result ok "$from" "$to" ""
+        success "Auto deploy of ${to:0:7} finished"
+        return 0
+    fi
+
+    error "Auto deploy failed: $detail"
+    if [[ "$ROLLED_BACK" != "true" && "$from" != "$to" ]]; then
+        warn "Rolling back to ${from:0:7}"
+        git -C "$SOURCE_DIR" reset --quiet --hard "$from"
+        REDEPLOY_FROM="$from" REDEPLOY_TO="$to" REDEPLOY_DETAIL="$detail" \
+            exec "$SOURCE_DIR/deploy-edge-server.sh" --auto-apply --rolled-back
+    fi
+    write_redeploy_result failed "$from" "$to" "$detail"
+    exit 1
+}
+
+#-------------------------------------------------------------------------------
+# MAIN
+#-------------------------------------------------------------------------------
+
+usage() {
+    cat << 'EOF'
+Usage: sudo ./deploy-edge-server.sh [--auto]
+
+  (no option)  deploy or update this server, asking questions where needed
+  --auto       unattended: fetch the newest code from GitHub, require green CI,
+               deploy it with the settings of the last manual run, check that
+               everything comes up and roll back if not. The Telegram bot's
+               /redeploy command runs this.
+  -h, --help   this text
+EOF
+}
+
+run_deploy() {
+    info "Starting deployment at $(date)"
+    info "Log file: $LOG_FILE"
+
+    preflight_checks
+    configure_system
+    install_packages
+    install_docker
+    install_tailscale
+    configure_firewall
+    configure_storage
+    prepare_telegram_bot
+    create_app_stack
+    discover_cameras
+    create_systemd_service
+    install_reboot_unit
+    install_auto_redeploy
+    install_host_helpers
+    start_services
+    install_victron
+    install_nut_power
+    install_renogy
+    save_settings
+    show_summary
+
+    info "Deployment completed successfully at $(date)"
+}
+
 main() {
+    local mode=manual
+    while (($# > 0)); do
+        case "$1" in
+            --auto) mode=auto ;;
+            --auto-apply) mode=apply ;;
+            --rolled-back) ROLLED_BACK=true ;;
+            -h | --help)
+                usage
+                return 0
+                ;;
+            *)
+                echo "Unknown option: $1" >&2
+                usage >&2
+                return 2
+                ;;
+        esac
+        shift
+    done
+
     echo
     echo "=============================================================================="
     echo "Edge Server Deployment Script"
@@ -1615,32 +1987,22 @@ main() {
     touch "$LOG_FILE"
     chmod 644 "$LOG_FILE"
 
-    info "Starting deployment at $(date)"
-    info "Log file: $LOG_FILE"
-
-    preflight_checks
-    configure_system
-    install_packages
-    install_docker
-    install_tailscale
-    configure_firewall
-    configure_storage
-    prepare_telegram_bot
-    create_app_stack
-    discover_cameras
-    create_systemd_service
-    install_reboot_unit
-    install_host_helpers
-    start_services
-    install_victron
-    install_nut_power
-    install_renogy
-    show_summary
-
-    info "Deployment completed successfully at $(date)"
+    case "$mode" in
+        manual) run_deploy ;;
+        auto)
+            BATCH_MODE=true
+            auto_update
+            ;;
+        apply)
+            BATCH_MODE=true
+            auto_apply
+            ;;
+    esac
 }
 
 # Only run when executed, so tests can `source` this file and call functions.
+# "exit" matters: a later --auto replaces this file while bash may still be reading it.
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     main "$@"
+    exit $?
 fi

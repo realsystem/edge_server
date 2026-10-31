@@ -5,6 +5,7 @@ and individual functions are exercised against a temporary directory, with
 system tools such as docker/systemctl/chown replaced by stubs on PATH.
 """
 
+import json
 import os
 import shutil
 import stat
@@ -636,7 +637,7 @@ class TestDiscoverCamerasInDeploy:
 
     def test_deploy_main_runs_discovery_before_start(self):
         text = (REPO / "deploy-edge-server.sh").read_text()
-        main_body = text[text.index("main() {") :]
+        main_body = text[text.index("run_deploy() {") :]
         assert main_body.index("discover_cameras") < main_body.index("start_services")
 
 
@@ -1142,7 +1143,7 @@ class TestTelegramBotInDeploy:
 
     def test_deploy_main_prepares_bot_before_compose(self):
         text = (REPO / "deploy-edge-server.sh").read_text()
-        main_body = text[text.index("main() {") :]
+        main_body = text[text.index("run_deploy() {") :]
         assert main_body.index("prepare_telegram_bot") < main_body.index("create_app_stack")
 
 
@@ -1406,3 +1407,433 @@ class TestUnattendedHardening:
 
     def test_smartmontools_is_installed(self):
         assert "smartmontools" in (REPO / "deploy-edge-server.sh").read_text()
+
+
+# --------------------------------------------------------------------------
+# deploy-edge-server.sh --auto (the Telegram bot's /redeploy)
+# --------------------------------------------------------------------------
+
+FAKE_DEPLOY = """#!/usr/bin/env bash
+echo "APPLY from=${REDEPLOY_FROM:-} to=${REDEPLOY_TO:-} detail=${REDEPLOY_DETAIL:-} args=$*" >> "$STUB_LOG"
+"""
+
+
+def git(cwd, *args):
+    return subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+class TestAutoRedeploy:
+    @pytest.fixture
+    def world(self, stub_path, tmp_path):
+        """A bare "GitHub" repo, a checkout of it at app/source, and saved settings."""
+        origin, work = tmp_path / "origin.git", tmp_path / "work"
+        git(tmp_path, "init", "--bare", "-b", "main", str(origin))
+        git(tmp_path, "clone", "-q", str(origin), str(work))
+        (work / "deploy-edge-server.sh").write_text(FAKE_DEPLOY)
+        (work / "deploy-edge-server.sh").chmod(0o755)
+        git(work, "add", "-A")
+        git(work, "commit", "-qm", "one")
+        git(work, "push", "-q", "origin", "HEAD:main")
+        app = tmp_path / "app"
+        (app / "bot-requests").mkdir(parents=True)
+        git(tmp_path, "clone", "-q", str(origin), str(app / "source"))
+        (app / "deploy.env").write_text("INSTALL_MQTT=true\n")
+        (app / "frigate").mkdir()
+        (app / "frigate" / "config.yml").write_text("cameras: {}\n")
+        (app / "docker-compose.yml").write_text("services: {}\n")
+
+        class World:
+            pass
+
+        w = World()
+        w.origin, w.work, w.app, w.tmp, w.stub = origin, work, app, tmp_path, stub_path
+        w.head = lambda: git(app / "source", "rev-parse", "HEAD")
+
+        def push(msg="two"):
+            (work / "VERSION").write_text(msg)
+            git(work, "add", "-A")
+            git(work, "commit", "-qm", msg)
+            git(work, "push", "-q", "origin", "HEAD:main")
+            return git(work, "rev-parse", "HEAD")
+
+        w.push = push
+        w.log = lambda: (stub_path / "log").read_text() if (stub_path / "log").exists() else ""
+        w.result = lambda: (
+            json.loads((app / "bot-requests" / "redeploy-result").read_text())
+            if (app / "bot-requests" / "redeploy-result").exists()
+            else None
+        )
+        return w
+
+    def run(self, w, body, **env):
+        full_env = {
+            "EDGE_SERVER_DIR": str(w.app),
+            "EDGE_STORAGE_DIR": str(w.tmp / "storage"),
+            "SYSTEMD_DIR": str(w.tmp / "units"),
+            "REDEPLOY_REPO": str(w.origin),
+            "REDEPLOY_LOCK_FILE": str(w.tmp / "lock"),
+            "REDEPLOY_REQUIRE_CI": "false",
+            "VERIFY_TIMEOUT": "1",
+            "VERIFY_POLL": "0.1",
+            **env,
+        }
+        return run_sourced("deploy-edge-server.sh", body, w.stub, full_env)
+
+    def set_ci(self, w, state):
+        """curl stub that answers the check-runs request."""
+        runs = {
+            "success": [{"status": "completed", "conclusion": "success"}] * 3,
+            "pending": [
+                {"status": "completed", "conclusion": "success"},
+                {"status": "in_progress", "conclusion": None},
+            ],
+            "failure": [
+                {"status": "completed", "conclusion": "success"},
+                {"status": "completed", "conclusion": "failure"},
+            ],
+            "none": [],
+        }
+        body = w.tmp / "ci.json"
+        body.write_text(json.dumps({"check_runs": runs.get(state, [])}))
+        curl = w.stub / "curl"
+        if state == "unreachable":
+            curl.write_text("#!/usr/bin/env bash\nexit 22\n")
+        else:
+            curl.write_text(f'#!/usr/bin/env bash\necho "curl $*" >> "$STUB_LOG"\ncat {body}\n')
+        curl.chmod(0o755)
+
+    # ---- command line ----
+
+    def test_help_and_unknown_option(self, world):
+        ok = self.run(world, "main --help")
+        assert ok.returncode == 0 and "--auto" in ok.stdout and "rolls back" not in ok.stdout
+        bad = self.run(world, "main --bogus")
+        assert bad.returncode == 2 and "Unknown option: --bogus" in bad.stderr
+
+    def test_run_deploy_order(self):
+        text = (REPO / "deploy-edge-server.sh").read_text()
+        body = text[text.index("run_deploy() {") : text.index("main() {")]
+        order = [
+            body.index(step)
+            for step in (
+                "install_reboot_unit",
+                "install_auto_redeploy",
+                "install_host_helpers",
+                "start_services",
+                "save_settings",
+                "show_summary",
+            )
+        ]
+        assert order == sorted(order)
+
+    # ---- saved settings ----
+
+    def test_settings_roundtrip_and_precedence(self, world):
+        (world.app / "deploy.env").unlink()
+        secret = "p w$\"x'y"
+        first = self.run(
+            world,
+            'INSTALL_MQTT=true; MQTT_PASS="$SECRET"; INSTALL_TELEGRAM_BOT=false; '
+            "TAILSCALE_AUTH_KEY=tskey-abc; save_settings",
+            SECRET=secret,
+        )
+        assert first.returncode == 0, first.stderr
+        saved = world.app / "deploy.env"
+        assert stat.S_IMODE(saved.stat().st_mode) == 0o600
+        text = saved.read_text()
+        assert "tskey" not in text
+        assert "INSTALL_TELEGRAM_BOT=auto" in text  # what was asked for, not what prepare decided
+
+        probe = 'echo "MQTT=$INSTALL_MQTT PASS=$MQTT_PASS BOT=$INSTALL_TELEGRAM_BOT"'
+        auto = run_bash(
+            f"source {REPO / 'deploy-edge-server.sh'} --auto; {probe}",
+            env={"EDGE_SERVER_DIR": str(world.app), "PATH": os.environ["PATH"]},
+        )
+        assert auto.stdout.strip().endswith(f"MQTT=true PASS={secret} BOT=auto")
+        override = run_bash(
+            f"source {REPO / 'deploy-edge-server.sh'} --auto; {probe}",
+            env={
+                "EDGE_SERVER_DIR": str(world.app),
+                "PATH": os.environ["PATH"],
+                "INSTALL_MQTT": "false",
+            },
+        )
+        assert "MQTT=false" in override.stdout
+        manual = run_bash(
+            f"source {REPO / 'deploy-edge-server.sh'}; {probe}",
+            env={"EDGE_SERVER_DIR": str(world.app), "PATH": os.environ["PATH"]},
+        )
+        assert "MQTT=false PASS= " in manual.stdout  # settings are only used by --auto
+
+    # ---- result file ----
+
+    def test_result_file_is_valid_json_and_plain_text(self, world):
+        body = (
+            'write_redeploy_result rolled_back "abc123;rm" "DEF456" '
+            "'it \"broke\"; $(whoami) `id` \\ done'"
+        )
+        assert self.run(world, body).returncode == 0
+        result = world.result()
+        assert result["status"] == "rolled_back" and result["from"] == "abc123"
+        assert result["to"] == "456"  # only hex digits survive
+        assert '"' not in result["detail"] and "$(" not in result["detail"]
+        assert result["at"] > 1_700_000_000
+        assert not list((world.app / "bot-requests").glob(".redeploy-result.*"))
+
+    def test_no_result_without_the_drop_box(self, world):
+        (world.app / "bot-requests").rmdir()
+        assert self.run(world, "write_redeploy_result ok a b ''").returncode == 0
+
+    # ---- CI gate ----
+
+    @pytest.mark.parametrize("state", ["success", "pending", "failure", "none", "unreachable"])
+    def test_ci_state(self, world, state):
+        self.set_ci(world, state)
+        git(
+            world.app / "source",
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/acme/widgets.git",
+        )
+        result = self.run(
+            world, "ci_state abc123", REDEPLOY_REPO="https://github.com/acme/widgets.git"
+        )
+        assert result.stdout.strip().splitlines()[-1] == state
+        if state != "unreachable":
+            assert "api.github.com/repos/acme/widgets/commits/abc123/check-runs" in world.log()
+
+    def test_ci_state_for_a_remote_that_is_not_github(self, world):
+        assert self.run(world, "ci_state abc123").stdout.strip().endswith("unsupported")
+
+    # ---- backup ----
+
+    def test_backup_keeps_the_newest_five(self, world):
+        (world.app / ".telegram").write_text("TELEGRAM_BOT_TOKEN=x\n")
+        backups = world.app / "backups"
+        backups.mkdir()
+        for n in range(6):
+            old = backups / f"redeploy-2020010{n}-000000.tgz"
+            old.write_text("old")
+            os.utime(old, (1_500_000_000 + n, 1_500_000_000 + n))
+        assert self.run(world, "backup_for_redeploy").returncode == 0
+        files = sorted(backups.glob("redeploy-*.tgz"))
+        assert len(files) == 5
+        newest = max(files, key=lambda f: f.stat().st_mtime)
+        assert stat.S_IMODE(newest.stat().st_mode) == 0o600
+        names = subprocess.run(
+            ["tar", "-tzf", str(newest)], capture_output=True, text=True, check=True
+        ).stdout.split()
+        assert {"docker-compose.yml", "frigate/config.yml", ".telegram", "deploy.env"} <= set(names)
+        assert stat.S_IMODE(backups.stat().st_mode) == 0o700
+
+    # ---- verify ----
+
+    def docker_status(self, world, status):
+        docker = world.stub / "docker"
+        docker.write_text(f'#!/usr/bin/env bash\n[[ "$1" == inspect ]] && echo {status}\nexit 0\n')
+        docker.chmod(0o755)
+
+    def test_verify_stack(self, world):
+        curl = world.stub / "curl"
+        curl.write_text("#!/usr/bin/env bash\nexit 0\n")
+        curl.chmod(0o755)
+        self.docker_status(world, "running")
+        assert self.run(world, "verify_stack").returncode == 0
+        self.docker_status(world, "restarting")
+        assert self.run(world, "verify_stack").returncode == 1
+        self.docker_status(world, "running")
+        curl.write_text("#!/usr/bin/env bash\nexit 7\n")  # Frigate does not answer
+        assert self.run(world, "verify_stack").returncode == 1
+
+    # ---- phase 1: fetch, gate, hand over ----
+
+    def test_update_hands_over_to_the_new_code(self, world):
+        before = world.head()
+        new = world.push()
+        result = self.run(world, "auto_update")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert world.head() == new != before
+        assert f"APPLY from={before} to={new} detail= args=--auto-apply" in world.log()
+        assert world.result() is None
+        assert list((world.app / "backups").glob("redeploy-*.tgz"))
+
+    @staticmethod
+    def github_env(world):
+        """The remote looks like GitHub (so the CI gate can name it); git fetches from the local repo."""
+        url = "https://github.com/acme/widgets.git"
+        return {
+            "REDEPLOY_REPO": url,
+            "REDEPLOY_REQUIRE_CI": "true",
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": f"url.{world.origin}.insteadOf",
+            "GIT_CONFIG_VALUE_0": url,
+        }
+
+    def test_update_refuses_when_ci_is_not_green(self, world):
+        before = world.head()
+        new = world.push()
+        env = self.github_env(world)
+        for state, words in [
+            ("pending", "still running"),
+            ("failure", "CI failed"),
+            ("none", "no CI results"),
+            ("unreachable", "cannot check CI"),
+        ]:
+            self.set_ci(world, state)
+            (world.stub / "log").write_text("")
+            result = self.run(world, "auto_update", **env)
+            assert result.returncode == 1, state
+            assert world.head() == before and "APPLY" not in world.log()
+            assert world.result()["status"] == "refused" and words in world.result()["detail"]
+            assert world.result()["to"] == new
+        self.set_ci(world, "success")
+        (world.stub / "log").write_text("")
+        ok = self.run(world, "auto_update", **env)
+        assert ok.returncode == 0, ok.stdout + ok.stderr
+        assert world.head() == new
+        assert f"commits/{new}/check-runs" in world.log()
+
+    def test_same_commit_skips_the_ci_check_but_still_redeploys(self, world):
+        self.set_ci(world, "failure")  # would block a new commit
+        result = self.run(world, "auto_update", **self.github_env(world))
+        assert result.returncode == 0, result.stdout + result.stderr
+        head = world.head()
+        assert f"APPLY from={head} to={head}" in world.log()
+        assert "check-runs" not in world.log()
+
+    def test_unreachable_github_is_refused(self, world):
+        shutil.rmtree(world.origin)
+        result = self.run(world, "auto_update")
+        assert result.returncode == 1
+        assert "cannot fetch" in world.result()["detail"]
+
+    def test_refused_without_settings_or_checkout(self, world):
+        (world.app / "deploy.env").unlink()
+        assert self.run(world, "auto_update").returncode == 1
+        assert "by hand once" in world.result()["detail"]
+        (world.app / "deploy.env").write_text("")
+        shutil.rmtree(world.app / "source")
+        assert self.run(world, "auto_update").returncode == 1
+        assert "no source checkout" in world.result()["detail"]
+        assert "APPLY" not in world.log()
+
+    def test_only_one_redeploy_at_a_time(self, world):
+        import fcntl
+
+        with open(world.tmp / "lock", "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            result = self.run(world, "auto_update")
+        assert result.returncode == 1
+        assert "already running" in world.result()["detail"]
+
+    # ---- phase 2: deploy, verify, roll back ----
+
+    def apply(self, world, run_rc=0, verify_rc=0, **env):
+        body = (
+            f'run_deploy() {{ echo RUN >> "$STUB_LOG"; return {run_rc}; }}\n'
+            f"verify_stack() {{ return {verify_rc}; }}\n"
+            "auto_apply"
+        )
+        return self.run(world, body, **env)
+
+    def test_successful_apply(self, world):
+        head = world.head()
+        result = self.apply(world, REDEPLOY_FROM="a" * 40, REDEPLOY_TO=head)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert world.result()["status"] == "ok"
+        assert world.result()["from"] == "a" * 40 and world.result()["to"] == head
+        assert "RUN" in world.log()
+
+    @pytest.mark.parametrize(
+        "run_rc,verify_rc,words", [(1, 0, "failed (exit 1)"), (0, 1, "did not come up")]
+    )
+    def test_failed_apply_rolls_back_to_the_previous_version(self, world, run_rc, verify_rc, words):
+        old = world.head()
+        new = world.push()
+        git(world.app / "source", "pull", "-q", "origin", "main")
+        assert world.head() == new
+        result = self.apply(world, run_rc, verify_rc, REDEPLOY_FROM=old, REDEPLOY_TO=new)
+        assert result.returncode == 0, result.stdout + result.stderr  # replaced by the exec'd stub
+        assert world.head() == old  # code is back on the previous version
+        log = world.log()
+        assert f"APPLY from={old} to={new}" in log and words in log
+        assert log.rstrip().endswith("args=--auto-apply --rolled-back")
+        assert world.result() is None  # the rolled-back run reports
+
+    def test_rolled_back_run_reports_and_fails(self, world):
+        old = world.head()
+        result = self.run(
+            world,
+            "run_deploy() { return 0; }\nverify_stack() { return 0; }\n"
+            "ROLLED_BACK=true; auto_apply",
+            REDEPLOY_FROM=old,
+            REDEPLOY_TO="b" * 40,
+            REDEPLOY_DETAIL="the containers or Frigate did not come up",
+        )
+        assert result.returncode == 1
+        r = world.result()
+        assert r["status"] == "rolled_back" and r["from"] == old and r["to"] == "b" * 40
+        assert "did not come up" in r["detail"]
+
+    def test_failed_rollback_is_reported_as_failed(self, world):
+        old = world.head()
+        result = self.run(
+            world,
+            "run_deploy() { return 3; }\nverify_stack() { return 0; }\nROLLED_BACK=true; auto_apply",
+            REDEPLOY_FROM=old,
+            REDEPLOY_TO="b" * 40,
+        )
+        assert result.returncode == 1
+        assert world.result()["status"] == "failed" and "exit 3" in world.result()["detail"]
+
+    def test_failure_without_a_new_version_has_nothing_to_roll_back_to(self, world):
+        head = world.head()
+        result = self.apply(world, run_rc=1, REDEPLOY_FROM=head, REDEPLOY_TO=head)
+        assert result.returncode == 1
+        assert world.result()["status"] == "failed"
+        assert "APPLY" not in world.log()
+
+    # ---- units ----
+
+    def test_redeploy_units_and_checkout(self, world):
+        shutil.rmtree(world.app / "source")
+        result = self.run(world, "TELEGRAM_REBOOT_ENABLED=true; install_auto_redeploy")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (world.app / "source" / ".git").is_dir()
+        units = world.tmp / "units"
+        path_unit = (units / "edge-redeploy.path").read_text()
+        service = (units / "edge-redeploy.service").read_text()
+        assert f"PathExists={world.app}/bot-requests/redeploy" in path_unit
+        assert f"ExecStart={world.app}/source/deploy-edge-server.sh --auto" in service
+        assert f"ExecStartPre=/bin/rm -f {world.app}/bot-requests/redeploy" in service
+        assert f"Environment=EDGE_SERVER_DIR={world.app}" in service and "Type=oneshot" in service
+        assert "systemctl enable --now edge-redeploy.path" in world.log()
+
+    def test_stale_request_is_removed_when_the_watcher_starts(self, world):
+        (world.app / "bot-requests" / "redeploy").touch()
+        self.run(world, "TELEGRAM_REBOOT_ENABLED=true; install_auto_redeploy")
+        assert not (world.app / "bot-requests" / "redeploy").exists()
+
+    def test_units_removed_when_totp_is_off(self, world):
+        self.run(world, "TELEGRAM_REBOOT_ENABLED=true; install_auto_redeploy")
+        assert (world.tmp / "units" / "edge-redeploy.path").exists()
+        self.run(world, "TELEGRAM_REBOOT_ENABLED=false; install_auto_redeploy")
+        assert not (world.tmp / "units" / "edge-redeploy.path").exists()
+        assert not (world.tmp / "units" / "edge-redeploy.service").exists()
+
+    def test_unreachable_repo_only_skips_redeploy(self, world):
+        shutil.rmtree(world.app / "source")
+        result = self.run(
+            world,
+            "TELEGRAM_REBOOT_ENABLED=true; install_auto_redeploy",
+            REDEPLOY_REPO=str(world.tmp / "nowhere.git"),
+        )
+        assert result.returncode == 0 and "not available" in result.stdout
+        assert not (world.tmp / "units" / "edge-redeploy.path").exists()
