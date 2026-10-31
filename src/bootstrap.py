@@ -43,6 +43,7 @@ class Bootstrap:
         "deploy-security.sh",
         "secrets.sh",
         "discover-cameras.sh",
+        "collect-diagnostics.sh",
         "plugins",  # deploy-edge-server.sh looks for plugins/ next to itself
         "tools",  # camera discovery
         ".cam",  # camera logins ("IP user:pass" per line), if present
