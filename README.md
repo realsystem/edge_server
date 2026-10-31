@@ -162,6 +162,19 @@ trace to stderr (also `CAM_DEBUG=1`): which logins were loaded, who answered
 discovery, each ONVIF call with its HTTP status and the camera's fault text,
 and the camera's clock. Passwords are never printed, only their length.
 
+### Performance diagnostics
+
+If the server is slow or the CPU is pegged, collect a report (hardware, power and
+thermal state, load, what each `ffmpeg` is doing, Frigate's detector speed and
+per-camera FPS, the Frigate config) with:
+
+```bash
+sudo ./collect-diagnostics.sh        # about 25 seconds; writes edge-diagnostics-<time>.txt
+```
+
+Camera and other passwords are removed from the report, but it lists private IPs
+and your config, so read it before sharing.
+
 ### Updating an existing server
 
 Re-running the deploy script updates images, compose file, firewall and
