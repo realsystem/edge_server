@@ -251,6 +251,12 @@ Hardware video decoding (Intel VA-API) is **off by default**, because it fails
 on some GPUs and camera streams. Frigate decodes in software, which always works.
 To try it, deploy with `ENABLE_HWACCEL=true` (needs `/dev/dri/renderD128`).
 
+Container logs are rotated (10 MB x 3 files per container); Docker keeps them
+forever otherwise. Containers started before this setting have unbounded logs:
+the next deploy recreates them (Frigate restarts once) and the old log goes with
+the old container. To see their size first:
+`sudo du -sh /var/lib/docker/containers/*/*-json.log`.
+
 ## 6. Post-Deployment
 
 | Service | URL |
