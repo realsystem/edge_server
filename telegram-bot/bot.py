@@ -71,6 +71,12 @@ HELP = (
 )
 REBOOT_COMMAND = {"command": "reboot", "description": "Reboot the laptop (authenticator code)"}
 REBOOT_HELP = "\n/reboot <code> - reboot the laptop; code from your authenticator app"
+REDEPLOY_COMMAND = {
+    "command": "redeploy",
+    "description": "Update from GitHub and redeploy (authenticator code)",
+}
+REDEPLOY_HELP = "\n/redeploy <code> - update from GitHub main and redeploy; same authenticator code"
+REDEPLOY_RESULT_MAX_AGE = 30 * 60.0
 
 TOTP_STEP = 30
 TOTP_FILE_AGE = 60  # a /reboot message older than this is refused
@@ -112,6 +118,9 @@ class Config:
     totp_secret: str = ""  # base32; empty = /reboot is off
     requests_dir: Path = Path("/requests")  # shared with the host-side reboot watcher
     reboot_min_uptime: float = 600.0  # refuse to reboot a host that booted less than this ago
+    redeploy_poll: float = 5.0  # seconds between looks for the redeploy result
+    redeploy_start_wait: float = 120.0  # the host must pick the request up within this
+    redeploy_max_wait: float = 2700.0  # give up waiting for a result after this
     reboot_wait: float = 150.0  # seconds to wait for the host to go down before reporting failure
 
     @classmethod
@@ -620,6 +629,28 @@ def no_video_message(names: list[str], reminder: bool = False) -> str:
     )
 
 
+def format_redeploy_result(data: dict) -> str:
+    """The outcome written by deploy-edge-server.sh --auto."""
+    status = data.get("status")
+    old, new = str(data.get("from") or "?")[:7], str(data.get("to") or "?")[:7]
+    detail = str(data.get("detail") or "").strip()
+    if status == "ok":
+        if old == new:
+            return f"✅ Redeployed. Already on the latest version ({new}); settings re-applied."
+        return f"✅ Redeployed: updated {old} → {new}. All containers are running."
+    if status == "rolled_back":
+        return (
+            f"⚠️ The update to {new} failed ({detail or 'unknown reason'}). Rolled back to "
+            f"{old}; the stack is running on the old version."
+        )
+    if status == "refused":
+        return f"Redeploy not started: {detail or 'unknown reason'}."
+    return (
+        f"❌ Redeploy failed ({detail or 'unknown reason'}) and the rollback did not work either. "
+        "The server may be half-updated; see /var/log/edge-server-deploy.log."
+    )
+
+
 def disk_problems(disk: dict, wear_limit: float) -> list[str]:
     """What is wrong with one drive, from smart-report.py's summary of it."""
     problems = []
@@ -941,10 +972,12 @@ class Bot:
     # on the host notices it and reboots; nothing here can run commands on the host.
 
     def commands(self) -> list[dict]:
-        return COMMANDS + [REBOOT_COMMAND] if self.cfg.totp_secret else COMMANDS
+        if not self.cfg.totp_secret:
+            return COMMANDS
+        return COMMANDS + [REBOOT_COMMAND, REDEPLOY_COMMAND]
 
     def help_text(self) -> str:
-        return HELP + (REBOOT_HELP if self.cfg.totp_secret else "")
+        return HELP + (REBOOT_HELP + REDEPLOY_HELP if self.cfg.totp_secret else "")
 
     def uptime(self) -> float | None:
         text = read_text(self.cfg.proc / "uptime")
@@ -967,48 +1000,53 @@ class Bot:
         tmp.write_text(str(step))
         os.replace(tmp, self._step_file())
 
-    def cmd_reboot(self, chat_id: int, user_id: int, message: dict, args: list[str]) -> None:
+    def _totp_gate(
+        self,
+        chat_id: int,
+        user_id: int,
+        message: dict,
+        args: list[str],
+        command: str,
+        precheck: Callable[[], str | None],
+    ) -> float | None:
+        """Everything that must be true before a dangerous command acts. Returns the
+        time the code was accepted, or None after having told the user why not.
+
+        The same authenticator code, replay record and lockout serve /reboot and
+        /redeploy, so a code used for one cannot be used for the other."""
         cfg = self.cfg
         if not cfg.totp_secret or not cfg.requests_dir.is_dir():
             self.reply(
                 chat_id,
-                "Reboot is not set up. Run 'python3 telegram-bot/bot.py --totp-setup' on the "
-                "server, put REBOOT_TOTP_SECRET in .telegram and redeploy.",
+                f"/{command} is not set up. Run 'python3 telegram-bot/bot.py --totp-setup' on "
+                "the server, put REBOOT_TOTP_SECRET in .telegram and redeploy.",
             )
-            return
+            return None
         if (message.get("chat") or {}).get("type") != "private":
-            self.reply(chat_id, "Use /reboot in a private chat with the bot, not in a group.")
-            return
+            self.reply(chat_id, f"Use /{command} in a private chat with the bot, not in a group.")
+            return None
         if not args:
             self.reply(
-                chat_id, "Send /reboot followed by the 6-digit code from your authenticator app."
+                chat_id,
+                f"Send /{command} followed by the 6-digit code from your authenticator app.",
             )
-            return
+            return None
         now = self.clock()
         if now < self._locked_until.get(user_id, 0.0):
             wait = int(self._locked_until[user_id] - now) // 60 + 1
             self.reply(chat_id, f"Too many wrong codes. Try again in about {wait} min.")
-            return
+            return None
         if now - float(message.get("date") or 0) > TOTP_FILE_AGE:
-            self.reply(chat_id, "That message is too old. Send /reboot with a fresh code.")
-            return
+            self.reply(chat_id, f"That message is too old. Send /{command} with a fresh code.")
+            return None
         code = args[0]
         if not re.fullmatch(r"\d{6}", code):
-            self.reply(chat_id, "The code is 6 digits: /reboot 123456")
-            return
-        up = self.uptime()
-        if up is None or up < cfg.reboot_min_uptime:
-            shown = "unknown" if up is None else human_duration(up)
-            self.reply(
-                chat_id,
-                f"Not rebooting: uptime is {shown}. The laptop must have been up for "
-                f"{human_duration(cfg.reboot_min_uptime)} (protects against reboot loops).",
-            )
-            return
-        request = cfg.requests_dir / "reboot"
-        if request.exists():
-            self.reply(chat_id, "A reboot is already pending.")
-            return
+            self.reply(chat_id, f"The code is 6 digits: /{command} 123456")
+            return None
+        refusal = precheck()
+        if refusal:
+            self.reply(chat_id, refusal)
+            return None
 
         step = verify_totp(cfg.totp_secret, code, now, self._load_last_step())
         if step is None:
@@ -1016,33 +1054,58 @@ class Bot:
             if failures >= REBOOT_MAX_FAILURES:
                 self._failures.pop(user_id, None)
                 self._locked_until[user_id] = now + REBOOT_LOCKOUT
-                log.warning("reboot: user %s locked out after %d wrong codes", user_id, failures)
+                log.warning(
+                    "%s: user %s locked out after %d wrong codes", command, user_id, failures
+                )
                 self.reply(chat_id, "Wrong code. Locked for 15 minutes.")
             else:
                 self._failures[user_id] = failures
-                log.warning("reboot: wrong code from user %s (%d)", user_id, failures)
+                log.warning("%s: wrong code from user %s (%d)", command, user_id, failures)
                 self.reply(chat_id, f"Wrong code ({failures}/{REBOOT_MAX_FAILURES}).")
-            return
+            return None
         self._failures.pop(user_id, None)
 
         try:
             self._save_last_step(step)  # before acting: this is what stops a replay
         except OSError as e:
-            log.error("reboot refused: cannot store the used code: %s", e)
-            self.reply(chat_id, "Not rebooting: cannot write the requests folder.")
-            return
+            log.error("%s refused: cannot store the used code: %s", command, e)
+            self.reply(chat_id, "Not proceeding: cannot write the requests folder.")
+            return None
         try:
             self.api.call(
                 "deleteMessage", {"chat_id": chat_id, "message_id": message.get("message_id")}
             )
         except TelegramError as e:
             log.info("could not delete the code message: %s", e)
+        return now
+
+    def _create_request(self, name: str) -> None:
+        fd = os.open(self.cfg.requests_dir / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(fd)
+
+    def cmd_reboot(self, chat_id: int, user_id: int, message: dict, args: list[str]) -> None:
+        cfg = self.cfg
+
+        def precheck() -> str | None:
+            up = self.uptime()
+            if up is None or up < cfg.reboot_min_uptime:
+                shown = "unknown" if up is None else human_duration(up)
+                return (
+                    f"Not rebooting: uptime is {shown}. The laptop must have been up for "
+                    f"{human_duration(cfg.reboot_min_uptime)} (protects against reboot loops)."
+                )
+            if (cfg.requests_dir / "reboot").exists():
+                return "A reboot is already pending."
+            return None
+
+        now = self._totp_gate(chat_id, user_id, message, args, "reboot", precheck)
+        if now is None:
+            return
         marker = cfg.requests_dir / "reboot-notify"
         try:
             marker.write_text(json.dumps({"chat_id": chat_id, "at": now}))
             self.reply(chat_id, "Code accepted. Rebooting now; I will message you when I am back.")
-            fd = os.open(request, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            os.close(fd)
+            self._create_request("reboot")
         except FileExistsError:
             self.reply(chat_id, "A reboot is already pending.")
             return
@@ -1056,6 +1119,134 @@ class Bot:
         timer.daemon = True
         self._reboot_timer = timer
         timer.start()
+
+    # -- redeploy ---------------------------------------------------------
+    # Same drop box as /reboot. The host unit edge-redeploy.path runs
+    # "deploy-edge-server.sh --auto" (fetch GitHub main, require green CI, deploy,
+    # verify, roll back on failure) and writes redeploy-result when done. The bot
+    # may be recreated during the deploy, so a new instance resumes waiting.
+
+    def _redeploy_in_progress(self) -> bool:
+        if (self.cfg.requests_dir / "redeploy").exists():
+            return True
+        try:
+            at = float(json.loads((self.cfg.requests_dir / "redeploy-notify").read_text())["at"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+        return self.clock() - at < self.cfg.redeploy_max_wait
+
+    def cmd_redeploy(self, chat_id: int, user_id: int, message: dict, args: list[str]) -> None:
+        cfg = self.cfg
+
+        def precheck() -> str | None:
+            if self._redeploy_in_progress():
+                return "A redeploy is already in progress. I will message you when it is done."
+            if (cfg.requests_dir / "reboot").exists():
+                return "A reboot is pending; try again after it."
+            return None
+
+        now = self._totp_gate(chat_id, user_id, message, args, "redeploy", precheck)
+        if now is None:
+            return
+        marker = cfg.requests_dir / "redeploy-notify"
+        (cfg.requests_dir / "redeploy-result").unlink(missing_ok=True)  # an old one
+        try:
+            marker.write_text(json.dumps({"chat_id": chat_id, "at": now}))
+            self._create_request("redeploy")
+        except FileExistsError:
+            self.reply(chat_id, "A redeploy is already in progress.")
+            return
+        except OSError as e:
+            log.error("redeploy request failed: %s", e)
+            marker.unlink(missing_ok=True)
+            self.reply(chat_id, f"Could not request the redeploy: {e}")
+            return
+        log.warning("redeploy requested by user id %s", user_id)
+        self.reply(
+            chat_id,
+            "Code accepted. Updating from GitHub main and redeploying; this can take several "
+            "minutes (images, checks, restart). It rolls back by itself if the new version does not "
+            "come up. I will message you with the outcome.",
+        )
+        self._start_redeploy_watch(chat_id)
+
+    def _start_redeploy_watch(self, chat_id: int | None) -> None:
+        thread = threading.Thread(target=self._watch_redeploy, args=(chat_id,), daemon=True)
+        thread.start()
+        self.threads.append(thread)
+
+    def _watch_redeploy(self, chat_id: int | None) -> None:
+        cfg = self.cfg
+        request = cfg.requests_dir / "redeploy"
+        start_polls = int(cfg.redeploy_start_wait / cfg.redeploy_poll)
+        for i in range(int(cfg.redeploy_max_wait / cfg.redeploy_poll)):
+            if self.deliver_redeploy_result():
+                return
+            if i >= start_polls and request.exists():
+                request.unlink(missing_ok=True)
+                (cfg.requests_dir / "redeploy-notify").unlink(missing_ok=True)
+                self._tell(
+                    chat_id,
+                    "The redeploy did not start. On the server check: "
+                    "systemctl status edge-redeploy.path edge-redeploy.service",
+                )
+                return
+            self.sleep(cfg.redeploy_poll)
+        (cfg.requests_dir / "redeploy-notify").unlink(missing_ok=True)
+        self._tell(
+            chat_id,
+            "No redeploy result after "
+            f"{human_duration(cfg.redeploy_max_wait)}. Check /var/log/edge-server-deploy.log.",
+        )
+
+    def _tell(self, chat_id: int | None, text: str) -> None:
+        for target in [chat_id] if chat_id else sorted(self.cfg.allowed):
+            self.reply(target, text)
+
+    def deliver_redeploy_result(self) -> bool:
+        """Send the host's redeploy outcome, once. True if there was one."""
+        cfg = self.cfg
+        result = cfg.requests_dir / "redeploy-result"
+        claimed = result.with_name("redeploy-result.claimed")
+        try:
+            os.rename(result, claimed)  # whoever renames it first reports it
+        except OSError:
+            return False
+        try:
+            data = json.loads(claimed.read_text())
+        except (OSError, ValueError):
+            data = {}
+        claimed.unlink(missing_ok=True)
+        chat_id: int | None = None
+        marker = cfg.requests_dir / "redeploy-notify"
+        try:
+            chat_id = int(json.loads(marker.read_text())["chat_id"])
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        marker.unlink(missing_ok=True)
+        try:
+            age = self.clock() - float(data.get("at") or 0)
+        except (TypeError, ValueError):
+            age = 0.0
+        if data.get("at") and age > REDEPLOY_RESULT_MAX_AGE:
+            return True  # a leftover from long ago
+        self._tell(chat_id, format_redeploy_result(data))
+        return True
+
+    def resume_redeploy(self) -> None:
+        """At start-up: report a finished redeploy, or keep waiting for a running one
+        (the deploy recreates this container when the bot's files changed)."""
+        if self.deliver_redeploy_result():
+            return
+        if self._redeploy_in_progress():
+            chat_id = None
+            try:
+                chat_id = int(
+                    json.loads((self.cfg.requests_dir / "redeploy-notify").read_text())["chat_id"]
+                )
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+            self._start_redeploy_watch(chat_id)
 
     def _reboot_not_done(self, chat_id: int) -> None:
         for name in ("reboot", "reboot-notify"):
@@ -1171,6 +1362,8 @@ class Bot:
             self.cmd_testalert(chat_id, args)
         elif command == "/reboot":
             self.cmd_reboot(chat_id, user_id, message, args)
+        elif command == "/redeploy":
+            self.cmd_redeploy(chat_id, user_id, message, args)
         else:
             self.reply(chat_id, self.help_text())
 
@@ -1201,10 +1394,11 @@ class Bot:
         log.info(
             "bot started; %d authorized user(s); commands: /status /diag /testalert /id /help%s",
             len(self.cfg.allowed),
-            " /reboot" if self.cfg.totp_secret else "",
+            " /reboot /redeploy" if self.cfg.totp_secret else "",
         )
         if self.cfg.totp_secret:
             threading.Thread(target=self.notify_after_reboot, daemon=True).start()
+            self.resume_redeploy()
         if not self.cfg.allowed:
             log.warning("TELEGRAM_ALLOWED_IDS is empty: send /id to the bot to get your id")
         if self.cfg.allowed and self.cfg.alert_free_percent > 0:

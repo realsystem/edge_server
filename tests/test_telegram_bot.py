@@ -1243,3 +1243,225 @@ class TestCameraGrouping:
         assert (b.cfg.alert_confirm, b.cfg.watch_interval) == (3, 60.0)
         sent_at = [i * b.cfg.watch_interval for i in range(5) if b.watch_messages(T0 + i * 60.0)]
         assert sent_at == [120.0]  # third check, i.e. two minutes after the first
+
+
+# ------------------------------------------------------------------ redeploy
+
+
+@pytest.fixture
+def redeploy(reboot, monkeypatch):
+    """/reboot's setup plus a recorder instead of the real waiting thread."""
+    reboot.watches = []
+    monkeypatch.setattr(reboot, "_start_redeploy_watch", lambda chat: reboot.watches.append(chat))
+    return reboot
+
+
+def req(b, name):
+    return b.cfg.requests_dir / name
+
+
+def write_result(b, **data):
+    data.setdefault("at", NOW)
+    req(b, "redeploy-result").write_text(json.dumps(data))
+
+
+class TestRedeployCommand:
+    def test_accepted_code_requests_a_redeploy(self, redeploy, telegram):
+        send(redeploy, f"/redeploy {code_now()}")
+        assert req(redeploy, "redeploy").exists()
+        assert json.loads(req(redeploy, "redeploy-notify").read_text()) == {
+            "chat_id": ALICE,
+            "at": NOW,
+        }
+        assert req(redeploy, "totp-last-step").read_text() == str(int(NOW // 30))
+        assert telegram.sent("deleteMessage") == [{"chat_id": ALICE, "message_id": 77}]
+        assert "Updating from GitHub main" in telegram.texts()[-1]
+        assert redeploy.watches == [ALICE]
+
+    def test_a_code_works_once_across_both_commands(self, redeploy, telegram):
+        code = code_now()
+        send(redeploy, f"/redeploy {code}")
+        req(redeploy, "redeploy").unlink()  # the host picked it up
+        req(redeploy, "redeploy-notify").unlink()
+        send(redeploy, f"/reboot {code}")
+        assert "Wrong code" in telegram.texts()[-1]
+        assert not req(redeploy, "reboot").exists()
+        send(redeploy, f"/redeploy {code}")
+        assert "Wrong code" in telegram.texts()[-1]
+
+    def test_wrong_codes_lock_out_both_commands_together(self, redeploy, telegram):
+        wrong = "000000" if code_now() != "000000" else "111111"
+        send(redeploy, f"/reboot {wrong}")
+        send(redeploy, f"/redeploy {wrong}")
+        send(redeploy, f"/reboot {wrong}")
+        assert "Locked for 15 minutes" in telegram.texts()[-1]
+        send(redeploy, f"/redeploy {code_now()}")
+        assert "Too many wrong codes" in telegram.texts()[-1]
+        assert not req(redeploy, "redeploy").exists()
+
+    def test_nothing_happens_without_the_code(self, redeploy, telegram):
+        send(redeploy, "/redeploy")
+        assert "6-digit code" in telegram.texts()[-1]
+        send(redeploy, "/redeploy 12ab56")
+        assert "6 digits" in telegram.texts()[-1]
+        send(redeploy, f"/redeploy {code_now()}", date=NOW - 120)
+        assert "too old" in telegram.texts()[-1]
+        assert not req(redeploy, "redeploy").exists()
+
+    def test_only_listed_users_in_private_chats_and_only_when_set_up(
+        self, redeploy, telegram, frigate, host
+    ):
+        send(redeploy, f"/redeploy {code_now()}", user=EVE)
+        assert telegram.texts() == []
+        send(redeploy, f"/redeploy {code_now()}", chat=-5, chat_type="group")
+        assert "private chat" in telegram.texts()[-1]
+        plain = make_bot(telegram, frigate, host)
+        send(plain, "/redeploy 123456")
+        assert "not set up" in telegram.texts()[-1]
+        assert not req(redeploy, "redeploy").exists()
+
+    def test_not_while_one_is_running(self, redeploy, telegram):
+        req(redeploy, "redeploy-notify").write_text(json.dumps({"chat_id": ALICE, "at": NOW - 60}))
+        send(redeploy, f"/redeploy {code_now()}")
+        assert "already in progress" in telegram.texts()[-1]
+        assert not req(redeploy, "redeploy").exists()
+        assert not req(redeploy, "totp-last-step").exists()  # the code was not burned
+
+    def test_an_old_marker_does_not_block(self, redeploy, telegram):
+        req(redeploy, "redeploy-notify").write_text(
+            json.dumps({"chat_id": ALICE, "at": NOW - 7200})
+        )
+        send(redeploy, f"/redeploy {code_now()}")
+        assert req(redeploy, "redeploy").exists()
+
+    def test_not_while_a_reboot_is_pending(self, redeploy, telegram):
+        req(redeploy, "reboot").touch()
+        send(redeploy, f"/redeploy {code_now()}")
+        assert "reboot is pending" in telegram.texts()[-1]
+
+    def test_an_old_result_is_cleared_first(self, redeploy):
+        write_result(redeploy, status="ok", **{"from": "a", "to": "b"})
+        send(redeploy, f"/redeploy {code_now()}")
+        assert not req(redeploy, "redeploy-result").exists()
+
+    def test_menu_and_help_list_redeploy_only_when_enabled(self, redeploy, telegram, frigate, host):
+        assert "redeploy" in [c["command"] for c in redeploy.commands()]
+        assert "/redeploy <code>" in redeploy.help_text()
+        plain = make_bot(telegram, frigate, host)
+        assert "redeploy" not in [c["command"] for c in plain.commands()]
+        assert "/redeploy" not in plain.help_text()
+
+
+class TestRedeployResult:
+    def test_delivered_once_to_the_requester(self, reboot, telegram):
+        req(reboot, "redeploy-notify").write_text(json.dumps({"chat_id": ALICE, "at": NOW}))
+        write_result(reboot, status="ok", **{"from": "a" * 40, "to": "b" * 40})
+        assert reboot.deliver_redeploy_result() is True
+        assert telegram.texts() == [
+            "✅ Redeployed: updated aaaaaaa → bbbbbbb. All containers are running."
+        ]
+        assert not req(reboot, "redeploy-notify").exists()
+        assert not req(reboot, "redeploy-result").exists()
+        assert not req(reboot, "redeploy-result.claimed").exists()
+        assert reboot.deliver_redeploy_result() is False
+
+    def test_without_a_marker_everyone_allowed_is_told(self, reboot, telegram):
+        reboot.cfg.allowed = frozenset({ALICE, 2002})
+        write_result(reboot, status="ok", **{"from": "a" * 40, "to": "a" * 40})
+        reboot.deliver_redeploy_result()
+        assert sorted(p["chat_id"] for p in telegram.sent()) == [ALICE, 2002]
+        assert "Already on the latest version (aaaaaaa)" in telegram.texts()[0]
+
+    def test_a_result_from_long_ago_is_dropped_quietly(self, reboot, telegram):
+        write_result(reboot, status="ok", at=NOW - 7200)
+        assert reboot.deliver_redeploy_result() is True
+        assert telegram.texts() == []
+
+    @pytest.mark.parametrize(
+        "data,words",
+        [
+            (
+                {
+                    "status": "rolled_back",
+                    "from": "a" * 9,
+                    "to": "b" * 9,
+                    "detail": "Frigate did not come up",
+                },
+                ["update to bbbbbbb failed", "Frigate did not come up", "Rolled back to aaaaaaa"],
+            ),
+            (
+                {"status": "refused", "detail": "CI failed on the new version"},
+                ["Redeploy not started: CI failed on the new version."],
+            ),
+            (
+                {"status": "failed", "detail": "the deploy script failed (exit 2)"},
+                ["❌", "exit 2", "rollback did not work", "edge-server-deploy.log"],
+            ),
+            ({}, ["❌", "unknown reason"]),
+        ],
+    )
+    def test_wording(self, data, words):
+        text = bot.format_redeploy_result(data)
+        for w in words:
+            assert w in text
+
+    def test_garbled_result_is_still_reported(self, reboot, telegram):
+        req(reboot, "redeploy-result").write_text("{nope")
+        assert reboot.deliver_redeploy_result() is True
+        assert "❌" in telegram.texts()[-1]
+
+
+class TestRedeployWatching:
+    def setup_cfg(self, b):
+        b.cfg.redeploy_poll, b.cfg.redeploy_start_wait, b.cfg.redeploy_max_wait = 1.0, 3.0, 10.0
+        req(b, "redeploy-notify").write_text(json.dumps({"chat_id": ALICE, "at": NOW}))
+
+    def test_waits_until_the_result_appears(self, reboot, telegram):
+        self.setup_cfg(reboot)
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) == 4:  # the host finished
+                write_result(reboot, status="ok", **{"from": "a" * 7, "to": "b" * 7})
+
+        reboot.sleep = sleep
+        reboot._watch_redeploy(ALICE)
+        assert len(sleeps) == 4 and "Redeployed: updated" in telegram.texts()[-1]
+
+    def test_reports_a_request_the_host_never_picked_up(self, reboot, telegram):
+        self.setup_cfg(reboot)
+        req(reboot, "redeploy").touch()
+        reboot._watch_redeploy(ALICE)
+        assert "did not start" in telegram.texts()[-1]
+        assert "edge-redeploy.path" in telegram.texts()[-1]
+        assert not req(reboot, "redeploy").exists() and not req(reboot, "redeploy-notify").exists()
+
+    def test_gives_up_after_the_maximum_wait(self, reboot, telegram):
+        self.setup_cfg(reboot)  # the request was consumed, but no result ever comes
+        reboot._watch_redeploy(ALICE)
+        assert "No redeploy result after" in telegram.texts()[-1]
+        assert not req(reboot, "redeploy-notify").exists()
+
+    def test_resume_at_start_up(self, redeploy, telegram):
+        # finished while the bot was being recreated
+        req(redeploy, "redeploy-notify").write_text(json.dumps({"chat_id": ALICE, "at": NOW}))
+        write_result(redeploy, status="ok", **{"from": "a" * 7, "to": "b" * 7})
+        redeploy.resume_redeploy()
+        assert "Redeployed" in telegram.texts()[-1] and redeploy.watches == []
+        # still running: keep waiting for the requester
+        req(redeploy, "redeploy-notify").write_text(json.dumps({"chat_id": ALICE, "at": NOW - 30}))
+        redeploy.resume_redeploy()
+        assert redeploy.watches == [ALICE]
+
+    def test_resume_with_nothing_to_do(self, redeploy, telegram):
+        redeploy.resume_redeploy()
+        assert redeploy.watches == [] and telegram.texts() == []
+
+    def test_run_resumes_a_redeploy(self, redeploy, telegram, monkeypatch):
+        resumed = []
+        monkeypatch.setattr(redeploy, "resume_redeploy", lambda: resumed.append(1))
+        monkeypatch.setattr(redeploy, "poll_once", lambda offset: (_ for _ in ()).throw(SystemExit))
+        with pytest.raises(SystemExit):
+            redeploy.run()
+        assert resumed == [1]
