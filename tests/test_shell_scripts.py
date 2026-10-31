@@ -520,6 +520,30 @@ class TestFrigateOnlyDefault:
         assert "port 5000" in log
         assert "port 1883" not in log and "port 8123" not in log
 
+    def test_firewall_defaults_to_the_10_0_0_network(self, stub_path, tmp_path):
+        ufw = stub_path / "ufw"
+        ufw.write_text('#!/usr/bin/env bash\necho "ufw $*" >> "$STUB_LOG"\n')
+        ufw.chmod(0o755)
+        self.run(
+            stub_path,
+            tmp_path,
+            body="configure_firewall",
+            INSTALL_MQTT="true",
+            INSTALL_HOMEASSISTANT="true",
+        )
+        log = (stub_path / "log").read_text()
+        for port in ("5000", "1883", "8123"):
+            assert f"ufw allow from 10.0.0.0/24 to any port {port} proto tcp" in log
+        assert "192.168" not in log
+
+    def test_firewall_subnet_can_be_changed(self, stub_path, tmp_path):
+        ufw = stub_path / "ufw"
+        ufw.write_text('#!/usr/bin/env bash\necho "ufw $*" >> "$STUB_LOG"\n')
+        ufw.chmod(0o755)
+        self.run(stub_path, tmp_path, body="configure_firewall", LOCAL_SUBNET="172.16.4.0/22")
+        log = (stub_path / "log").read_text()
+        assert "ufw allow from 172.16.4.0/22 to any port 5000" in log and "10.0.0.0" not in log
+
     def test_firewall_with_optional_services(self, stub_path, tmp_path):
         ufw = stub_path / "ufw"
         ufw.write_text('#!/usr/bin/env bash\necho "ufw $*" >> "$STUB_LOG"\n')
@@ -1298,7 +1322,12 @@ class TestUnattendedHardening:
         assert f"ExecStart={app}/docker-firewall.sh" in unit
         assert "After=docker.service" in unit and "PartOf=docker.service" in unit
         log = (stub_path / "log").read_text()
-        assert "systemctl enable --now edge-docker-firewall.service" in log
+        # restarted on every deploy, so a changed subnet reaches Docker's chain at once
+        assert "systemctl enable edge-docker-firewall.service" in log
+        assert "systemctl restart edge-docker-firewall.service" in log
+        assert log.index("systemctl restart edge-docker-firewall.service") > log.index(
+            "daemon-reload"
+        )
 
     def test_firewall_script_applies_the_expected_rules(self, stub_path, tmp_path):
         app, _, _ = self.install_helpers(stub_path, tmp_path)

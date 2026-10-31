@@ -55,7 +55,7 @@ APP_DIR="${EDGE_SERVER_DIR:-/opt/edge-server}"
 SOURCE_DIR="$APP_DIR/source"  # checkout that --auto updates and deploys from
 
 # Local subnet for firewall rules (CIDR notation)
-LOCAL_SUBNET="${LOCAL_SUBNET:-192.168.0.0/16}"
+LOCAL_SUBNET="${LOCAL_SUBNET:-10.0.0.0/24}"
 
 # Timezone
 TIMEZONE="${TIMEZONE:-America/Los_Angeles}"
@@ -1092,7 +1092,10 @@ UNIT
 
     chmod 644 "$dir"/edge-docker-*.service "$dir"/edge-docker-clean.timer
     systemctl daemon-reload
-    systemctl enable --now edge-docker-firewall.service
+    # restart, not just "enable --now": the unit stays active after it has run once, so
+    # without this a changed LOCAL_SUBNET would not reach Docker's chain until a reboot
+    systemctl enable edge-docker-firewall.service
+    systemctl restart edge-docker-firewall.service
     systemctl enable --now edge-docker-clean.timer
     if [[ "$smart" == "true" ]]; then
         chmod 644 "$dir/edge-smart.service" "$dir/edge-smart.timer"

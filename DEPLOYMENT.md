@@ -34,7 +34,7 @@ sudo -E ./deploy-edge-server.sh
 |----------|-------------|---------|
 | `TAILSCALE_AUTH_KEY` | Reusable auth key from Tailscale admin | (prompted) |
 | `EXTERNAL_DRIVE_UUID` | UUID of external storage drive | (prompted) |
-| `LOCAL_SUBNET` | Allowed subnet for firewall | `192.168.0.0/16` |
+| `LOCAL_SUBNET` | Allowed subnet for firewall | `10.0.0.0/24` |
 | `TIMEZONE` | Server timezone | `America/Los_Angeles` |
 | `MQTT_USER` | MQTT broker username | `admin` |
 | `MQTT_PASS` | MQTT broker password | (auto-generated) |

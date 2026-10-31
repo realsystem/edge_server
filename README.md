@@ -348,6 +348,13 @@ sitting at the laptop.
   `edge-docker-firewall` unit adds the same rule to Docker's own `DOCKER-USER` chain:
   only `LOCAL_SUBNET` and Tailscale can reach published ports. Check with
   `sudo iptables -S EDGE-DOCKER-INPUT`.
+- **Changing the local network.** `LOCAL_SUBNET` (default `10.0.0.0/24`) is the only
+  network, besides Tailscale, allowed to reach Frigate (and MQTT / Home Assistant when
+  installed). After moving the server to another LAN, run
+  `sudo LOCAL_SUBNET=10.0.0.0/24 ./deploy-edge-server.sh` once: it rewrites the UFW rules
+  and the Docker firewall and saves the value for `--auto` / `/redeploy`. SSH and
+  Tailscale keep working meanwhile. Use a wider range (for example `10.0.0.0/16`) if
+  other networks need access.
 - **Old images are removed.** `edge-docker-clean.timer` runs weekly (Sunday 04:30),
   only while the whole stack is running, and removes images that nothing uses and
   that are older than 14 days.
