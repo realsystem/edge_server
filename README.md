@@ -172,7 +172,7 @@ A small bot that runs next to Frigate and answers you in a Telegram chat:
 | `/diag` | The full diagnostics report from `collect-diagnostics.sh`, sent as a file (about 15 s) |
 | `/testalert [percent]` | Sends you a simulated low-disk alert (default 5% free) plus the real disk state, so you can check delivery without filling a disk |
 | `/reboot <code>` | Reboots the laptop; needs a code from your authenticator app (off until set up, see below) |
-| `/redeploy <code>` | Updates the server from GitHub `main` and redeploys, same authenticator code (see below) |
+| `/redeploy <code>` | Deploys the newest **release tag** (`vX.Y`) from GitHub, same authenticator code (see below) |
 | `/id` | Your Telegram user id (works for anyone; used for setup) |
 
 Setup:
@@ -281,8 +281,12 @@ same lockout; a code is good for one command, not both) runs
 `sudo ./deploy-edge-server.sh --auto` on the server. You can run that by hand too.
 What `--auto` does:
 
-1. **Fetch** `main` from `REDEPLOY_REPO` (default this repository) into
-   `/opt/edge-server/source`. A new commit must have **green CI** on GitHub (all check
+1. **Fetch the newest release tag** from `REDEPLOY_REPO` (default this repository) into
+   `/opt/edge-server/source`. Only tags named `vMAJOR.MINOR` or `vMAJOR.MINOR.PATCH`
+   (`v1.0`, `v1.12`, `v2.0.1`) count, and the highest version wins. Branches, commit
+   ids and other tag names (`v1.0-rc1`, `release-2`) are never deployed, and this
+   rule cannot be changed by a setting. Work merged to `main` but not tagged does
+   nothing to the server. The tagged commit must have **green CI** on GitHub (all check
    runs completed and successful), otherwise nothing is touched and the bot tells you
    why ("CI is still running on the new version, try again in a few minutes").
 2. **Back up** `docker-compose.yml`, `frigate/config.yml`, `.cam`, `.telegram` and the
@@ -302,11 +306,14 @@ Things to know:
 - The first manual deploy after you set `REBOOT_TOTP_SECRET` creates the checkout
   and saves the settings. Until then `/redeploy` answers "run the deploy script by
   hand once".
-- It deploys what is on GitHub `main`, not your local copy, and the code runs as root.
-  Anyone who can push to `main` can change your server the next time you send
-  `/redeploy`. Keep branch protection and 2-factor on the GitHub account, and keep
-  `REDEPLOY_REQUIRE_CI=true`. Use `REDEPLOY_REPO` / `REDEPLOY_BRANCH` to deploy
-  from a fork or another branch.
+- It deploys the newest release tag on GitHub, not your local copy, and the code runs
+  as root. Anyone who can create a `v*` tag can change your server the next time you
+  send `/redeploy`. Keep 2-factor on the GitHub account, add a **tag protection rule /
+  ruleset for `v*`** so only you can create or move tags, and keep
+  `REDEPLOY_REQUIRE_CI=true`. Use `REDEPLOY_REPO` to deploy from a fork.
+- To release: `git tag v1.1 && git push origin v1.1` on a commit whose CI is green,
+  then `/redeploy`. To go back, release the fix as a higher version (v1.2): the
+  newest tag always wins, so deleting a tag is not a rollback.
 - Edit `.telegram` in `/opt/edge-server/`, not in your original folder: that is the
   copy `--auto` uses.
 - Only one deploy runs at a time. A deploy can take several minutes (image pulls); the

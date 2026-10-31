@@ -1440,6 +1440,8 @@ class TestAutoRedeploy:
         git(work, "add", "-A")
         git(work, "commit", "-qm", "one")
         git(work, "push", "-q", "origin", "HEAD:main")
+        git(work, "tag", "v1.0")
+        git(work, "push", "-q", "origin", "v1.0")
         app = tmp_path / "app"
         (app / "bot-requests").mkdir(parents=True)
         git(tmp_path, "clone", "-q", str(origin), str(app / "source"))
@@ -1455,13 +1457,21 @@ class TestAutoRedeploy:
         w.origin, w.work, w.app, w.tmp, w.stub = origin, work, app, tmp_path, stub_path
         w.head = lambda: git(app / "source", "rev-parse", "HEAD")
 
-        def push(msg="two"):
+        def commit(msg):
             (work / "VERSION").write_text(msg)
             git(work, "add", "-A")
             git(work, "commit", "-qm", msg)
             git(work, "push", "-q", "origin", "HEAD:main")
             return git(work, "rev-parse", "HEAD")
 
+        def push(msg="two", tag="v1.1"):
+            """A new commit on main, released as a tag (the only thing --auto deploys)."""
+            sha = commit(msg)
+            git(work, "tag", tag)
+            git(work, "push", "-q", "origin", tag)
+            return sha
+
+        w.commit = commit
         w.push = push
         w.log = lambda: (stub_path / "log").read_text() if (stub_path / "log").exists() else ""
         w.result = lambda: (
@@ -1699,6 +1709,78 @@ class TestAutoRedeploy:
         assert ok.returncode == 0, ok.stdout + ok.stderr
         assert world.head() == new
         assert f"commits/{new}/check-runs" in world.log()
+
+    # ---- release tags only ----
+
+    def test_untagged_commits_on_main_are_not_deployed(self, world):
+        before = world.head()
+        world.commit("unreleased work")
+        result = self.run(world, "auto_update")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert world.head() == before  # still the v1.0 commit
+        assert f"to={before}" in world.log()
+
+    def test_branches_and_commit_ids_are_never_deployed(self, world):
+        before = world.head()
+        sha = world.commit("risky")
+        git(world.work, "push", "-q", "origin", "HEAD:refs/heads/v9.9")  # a branch named like a tag
+        git(world.work, "push", "-q", "origin", "HEAD:refs/heads/feature")
+        self.run(world, "auto_update", REDEPLOY_BRANCH="feature", REDEPLOY_TAG=sha)
+        assert world.head() == before
+
+    @pytest.mark.parametrize(
+        "name",
+        ["v1.0-rc1", "v2", "1.5", "release-2", "v1.x", "V3.0", "v1.0.0.0", "v1.0;id", "v9.9-beta"],
+    )
+    def test_other_tag_names_are_ignored(self, world, name):
+        before = world.head()
+        world.commit("something")
+        git(world.work, "tag", name)
+        git(world.work, "push", "-q", "origin", name)
+        result = self.run(world, "auto_update")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert world.head() == before
+
+    def test_newest_version_wins_by_number_not_by_text(self, world):
+        for i, tag in enumerate(["v1.9", "v1.10", "v2.0.1", "v2.0"]):
+            world.push(f"c{i}", tag=tag)
+        git(world.app / "source", "fetch", "-q", "--tags", "origin")
+        result = self.run(world, "latest_release_tag")
+        assert result.stdout.strip().splitlines()[-1] == "v2.0.1"  # not v2.0, not v1.9
+
+    def test_three_part_and_two_part_versions_are_accepted(self, world):
+        world.push("x", tag="v1.2.3")
+        self.run(world, "auto_update")
+        assert world.head() == git(world.work, "rev-parse", "v1.2.3^{commit}")
+
+    def test_refused_when_no_release_tag_exists(self, world):
+        git(world.work, "push", "-q", "origin", ":refs/tags/v1.0")
+        git(world.app / "source", "tag", "-d", "v1.0")
+        result = self.run(world, "auto_update")
+        assert result.returncode == 1
+        assert world.result()["status"] == "refused"
+        assert "no release tag" in world.result()["detail"]
+        assert "APPLY" not in world.log()
+
+    def test_result_names_the_release(self, world):
+        world.push("two", tag="v1.1")
+        self.run(world, "auto_update")
+        assert "APPLY" in world.log()
+        self.apply(world, REDEPLOY_FROM="a" * 40, REDEPLOY_TO=world.head(), REDEPLOY_TAG="v1.1")
+        assert world.result()["tag"] == "v1.1"
+
+    def test_ci_is_checked_on_the_tagged_commit(self, world):
+        world.push()
+        tagged = git(world.work, "rev-parse", "v1.1^{commit}")
+        world.commit("later, never released")
+        self.set_ci(world, "success")
+        self.run(world, "auto_update", **self.github_env(world))
+        assert f"commits/{tagged}/check-runs" in world.log()
+
+    def test_branch_setting_no_longer_exists(self):
+        text = (REPO / "deploy-edge-server.sh").read_text()
+        assert "REDEPLOY_BRANCH" not in text
+        assert "readonly RELEASE_TAG_REGEX" in text  # a constant, not overridable
 
     def test_same_commit_skips_the_ci_check_but_still_redeploys(self, world):
         self.set_ci(world, "failure")  # would block a new commit

@@ -73,9 +73,11 @@ REBOOT_COMMAND = {"command": "reboot", "description": "Reboot the laptop (authen
 REBOOT_HELP = "\n/reboot <code> - reboot the laptop; code from your authenticator app"
 REDEPLOY_COMMAND = {
     "command": "redeploy",
-    "description": "Update from GitHub and redeploy (authenticator code)",
+    "description": "Deploy the newest release and redeploy (authenticator code)",
 }
-REDEPLOY_HELP = "\n/redeploy <code> - update from GitHub main and redeploy; same authenticator code"
+REDEPLOY_HELP = (
+    "\n/redeploy <code> - deploy the newest release tag (vX.Y) from GitHub; same authenticator code"
+)
 REDEPLOY_RESULT_MAX_AGE = 30 * 60.0
 
 TOTP_STEP = 30
@@ -634,13 +636,15 @@ def format_redeploy_result(data: dict) -> str:
     status = data.get("status")
     old, new = str(data.get("from") or "?")[:7], str(data.get("to") or "?")[:7]
     detail = str(data.get("detail") or "").strip()
+    tag = str(data.get("tag") or "").strip()
+    release = f"release {tag} ({new})" if tag else new
     if status == "ok":
         if old == new:
-            return f"✅ Redeployed. Already on the latest version ({new}); settings re-applied."
-        return f"✅ Redeployed: updated {old} → {new}. All containers are running."
+            return f"✅ Redeployed. Already on the latest version ({release}); settings re-applied."
+        return f"✅ Redeployed: updated {old} → {release}. All containers are running."
     if status == "rolled_back":
         return (
-            f"⚠️ The update to {new} failed ({detail or 'unknown reason'}). Rolled back to "
+            f"⚠️ The update to {release} failed ({detail or 'unknown reason'}). Rolled back to "
             f"{old}; the stack is running on the old version."
         )
     if status == "refused":

@@ -1405,6 +1405,12 @@ class TestRedeployResult:
         for w in words:
             assert w in text
 
+    def test_result_names_the_release_tag(self):
+        text = bot.format_redeploy_result(
+            {"status": "ok", "from": "a" * 40, "to": "b" * 40, "tag": "v1.2"}
+        )
+        assert "release v1.2 (bbbbbbb)" in text and "aaaaaaa" in text
+
     def test_garbled_result_is_still_reported(self, reboot, telegram):
         req(reboot, "redeploy-result").write_text("{nope")
         assert reboot.deliver_redeploy_result() is True
