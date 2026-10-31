@@ -1201,6 +1201,7 @@ EOF
       - FRIGATE_URL=http://frigate:5000
       - EDGE_SERVER_DIR=/opt/edge-server
       - STORAGE_PATH=/media/frigate
+      - STORAGE_LABEL=__STORAGE_MOUNT__
 EOF
             # /reboot: the one writable path, a drop box only root on the host can use
             [[ "$TELEGRAM_REBOOT_ENABLED" == "true" ]] && printf '      - REQUESTS_DIR=/requests\n'

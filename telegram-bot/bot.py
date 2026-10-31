@@ -23,6 +23,7 @@ Environment:
   FRIGATE_URL           default http://frigate:5000
   EDGE_SERVER_DIR       default /opt/edge-server (the stack directory)
   STORAGE_PATH          default /media/frigate (recordings, for the disk check)
+  STORAGE_LABEL         host path shown in /status for that disk, default /mnt/storage
   ALERT_DISK_FREE_PERCENT, ALERT_INTERVAL, ALERT_REPEAT_HOURS  see above
 """
 
@@ -99,6 +100,7 @@ class Config:
     frigate_url: str = "http://frigate:5000"
     app_dir: Path = Path("/opt/edge-server")
     storage_path: Path = Path("/media/frigate")
+    storage_label: str = "/mnt/storage"  # where the host mounts it; only shown in /status
     proc: Path = Path("/proc")
     sys: Path = Path("/sys")
     api_url: str = "https://api.telegram.org"
@@ -162,6 +164,7 @@ class Config:
             frigate_url=env.get("FRIGATE_URL", cls.frigate_url).rstrip("/"),
             app_dir=Path(env.get("EDGE_SERVER_DIR", str(cls.app_dir))),
             storage_path=Path(env.get("STORAGE_PATH", str(cls.storage_path))),
+            storage_label=env.get("STORAGE_LABEL", cls.storage_label).strip() or cls.storage_label,
             proc=Path(env.get("HOST_PROC", str(cls.proc))),
             sys=Path(env.get("HOST_SYS", str(cls.sys))),
             api_url=env.get("TELEGRAM_API_URL", cls.api_url).rstrip("/"),
@@ -425,6 +428,18 @@ def disk_line(label: str, path: Path) -> tuple[str, bool]:
     return f"{label}: {gib(free)} of {gib(total)} GB free ({pct_free:.0f}%)", pct_free < 10
 
 
+def storage_usage_line(label: str, path: Path) -> str:
+    """How full the storage disk is, as used space (disk_line reports free space)."""
+    try:
+        st = os.statvfs(path)
+    except OSError:
+        return f"storage {label}: n/a"
+    total = st.f_blocks * st.f_frsize
+    used = (st.f_blocks - st.f_bfree) * st.f_frsize
+    pct = 100 * used / total if total else 0
+    return f"storage {label}: {gib(used)} of {gib(total)} GB used ({pct:.0f}%)"
+
+
 RECOVERY_MARGIN = 3.0  # percentage points above the alert level before "recovered"
 
 
@@ -585,6 +600,8 @@ def build_status(cfg: Config, sleep: Callable[[float], None] = time.sleep) -> st
         host.append(line)
         if low:
             problems.append(f"{label} almost full")
+        if label == "recordings":
+            host.append(storage_usage_line(cfg.storage_label, path))
 
     frigate, frigate_problems = frigate_status(cfg)
     problems += frigate_problems

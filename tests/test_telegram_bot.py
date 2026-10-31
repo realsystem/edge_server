@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import re
 import sys
 import threading
 import time
@@ -316,6 +317,28 @@ class TestStatus:
         text = bot.build_status(make_bot(telegram, frigate, host).cfg, lambda s: None)
         assert "gate: no video" in text
 
+    def test_storage_usage_has_its_own_line(self, telegram, frigate, host):
+        cfg = make_bot(telegram, frigate, host).cfg
+        text = bot.build_status(cfg, lambda s: None)
+        lines = [line.strip() for line in text.splitlines()]
+        storage = [line for line in lines if line.startswith("storage /mnt/storage:")]
+        assert len(storage) == 1
+        assert re.fullmatch(r"storage /mnt/storage: [\d.]+ of [\d.]+ GB used \(\d+%\)", storage[0])
+        recordings = [i for i, line in enumerate(lines) if line.startswith("recordings:")]
+        assert (
+            recordings and lines[recordings[0] + 1] == storage[0]
+        )  # right under the free-space line
+
+    def test_storage_label_comes_from_the_environment(self):
+        cfg = bot.Config.from_env({"TELEGRAM_BOT_TOKEN": TOKEN, "STORAGE_LABEL": "/data/disk2"})
+        assert cfg.storage_label == "/data/disk2"
+        assert (
+            bot.storage_usage_line("/data/disk2", Path("/nonexistent"))
+            == "storage /data/disk2: n/a"
+        )
+        blank = bot.Config.from_env({"TELEGRAM_BOT_TOKEN": TOKEN, "STORAGE_LABEL": " "})
+        assert blank.storage_label == "/mnt/storage"
+
     def test_slow_detector_is_a_problem(self, telegram, frigate, host):
         stats = {"cameras": {"gate": {"camera_fps": 5, "skipped_fps": 2.5}}}
         frigate.routes["/api/stats"] = (200, stats)
@@ -348,7 +371,7 @@ class TestStatus:
 
     def test_low_disk(self, telegram, frigate, host, monkeypatch):
         class Full:
-            f_blocks, f_bavail, f_frsize = 1000, 20, 4096
+            f_blocks, f_bavail, f_bfree, f_frsize = 1000, 20, 20, 4096
 
         monkeypatch.setattr(bot.os, "statvfs", lambda p: Full())
         text = bot.build_status(make_bot(telegram, frigate, host).cfg, lambda s: None)

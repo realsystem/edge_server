@@ -895,6 +895,7 @@ class TestTelegramBotInDeploy:
         assert bot["cap_drop"] == ["ALL"] and "no-new-privileges:true" in bot["security_opt"]
         assert bot["env_file"] == "./.telegram"
         assert "ports" not in bot and "privileged" not in bot and "devices" not in bot
+        assert f"STORAGE_LABEL={tmp_path / 'storage'}" in bot["environment"]  # shown in /status
         # host paths are mounted read-only
         assert all(v.endswith(":ro") for v in bot["volumes"])
         assert any(v.startswith(f"{tmp_path / 'storage'}/frigate:") for v in bot["volumes"])

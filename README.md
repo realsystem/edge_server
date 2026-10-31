@@ -168,7 +168,7 @@ A small bot that runs next to Frigate and answers you in a Telegram chat:
 
 | Command | Answer |
 |---|---|
-| `/status` | One screen: load, CPU, memory, disk, temperature, AC/battery, Frigate detector speed and every camera's FPS, with a list of problems on top |
+| `/status` | One screen: load, CPU, memory, disk (free space, plus a separate `storage /mnt/storage` line with used space), temperature, AC/battery, Frigate detector speed and every camera's FPS, with a list of problems on top |
 | `/diag` | The full diagnostics report from `collect-diagnostics.sh`, sent as a file (about 15 s) |
 | `/testalert [percent]` | Sends you a simulated low-disk alert (default 5% free) plus the real disk state, so you can check delivery without filling a disk |
 | `/reboot <code>` | Reboots the laptop; needs a code from your authenticator app (off until set up, see below) |
