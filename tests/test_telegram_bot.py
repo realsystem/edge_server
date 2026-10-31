@@ -599,15 +599,16 @@ class TestDiskAlerts:
         real_start = threading.Thread.start
 
         def tracking_start(self):
-            if getattr(self._target, "__name__", "") == "alert_loop":
-                started.append("alert_loop")  # do not really run it
+            name = getattr(self._target, "__name__", "")
+            if name in ("alert_loop", "watch_loop"):
+                started.append(name)  # do not really run it
             else:
                 real_start(self)  # the fake HTTP servers need real threads
 
         monkeypatch.setattr(threading.Thread, "start", tracking_start)
         for allowed, percent, watch, expected in [
-            (frozenset({ALICE}), 15.0, True, ["alert_loop"]),
-            (frozenset({ALICE}), 0.0, True, ["alert_loop"]),  # watchers alone are enough
+            (frozenset({ALICE}), 15.0, True, ["alert_loop", "watch_loop"]),
+            (frozenset({ALICE}), 0.0, True, ["watch_loop"]),  # watchers alone are enough
             (frozenset({ALICE}), 15.0, False, ["alert_loop"]),
             (frozenset(), 15.0, True, []),
             (frozenset({ALICE}), 0.0, False, []),
@@ -986,6 +987,7 @@ def watcher(telegram, frigate, host):
         status_dir=host / "status",
         alert_repeat=3600.0,
         alert_free_percent=0,
+        alert_confirm=2,
     )
     b.clock = lambda: NOW
     return b
@@ -1027,12 +1029,6 @@ class TestWatchFrigate:
         assert len(second) == 1 and "Camera front has no video" in second[0]
         frigate.routes["/api/stats"] = (200, stats_with())
         assert watcher.watch_messages(T0 + 900) == ["✅ Camera front: back to normal."]
-
-    def test_each_camera_is_tracked_separately(self, watcher, frigate):
-        frigate.routes["/api/stats"] = (200, stats_with(front_fps=0.0, back_fps=0.0))
-        _, second = run_checks(watcher, 2)
-        assert len(second) == 2
-        assert {"Camera front" in m or "Camera back" in m for m in second} == {True}
 
     def test_disabled_cameras_are_ignored(self, watcher, frigate):
         frigate.routes["/api/stats"] = (200, stats_with(front_fps=0.0))
@@ -1148,7 +1144,7 @@ class TestWatchIntegration:
     def test_send_alerts_delivers_watcher_messages_to_every_user(self, watcher, telegram, host):
         watcher.cfg.allowed = frozenset({ALICE, 2002})
         write_disks(watcher, [{**GOOD_DISK, "wear_used": 90}])
-        watcher.send_alerts()
+        watcher.send_watch_alerts()
         recipients = sorted(p["chat_id"] for p in telegram.sent())
         assert recipients == [ALICE, 2002]
         assert "90% of its rated life" in telegram.texts()[0]
@@ -1156,7 +1152,7 @@ class TestWatchIntegration:
     def test_watchers_can_be_switched_off(self, watcher, telegram):
         write_disks(watcher, [{**GOOD_DISK, "wear_used": 90}])
         watcher.cfg.watch = False
-        watcher.send_alerts()
+        watcher.send_watch_alerts()
         assert telegram.texts() == []
 
     def test_a_broken_check_does_not_hide_the_others(self, watcher, monkeypatch):
@@ -1180,7 +1176,8 @@ class TestWatchIntegration:
     def test_config_from_env(self):
         env = {"TELEGRAM_BOT_TOKEN": TOKEN}
         cfg = bot.Config.from_env(env)
-        assert cfg.watch and cfg.alert_confirm == 2 and cfg.alert_temp_c == 85.0
+        assert cfg.watch and cfg.alert_confirm == 3 and cfg.watch_interval == 60.0
+        assert cfg.alert_temp_c == 85.0
         assert cfg.alert_wear_percent == 80.0 and cfg.status_dir == Path("/status")
         cfg = bot.Config.from_env(
             {
@@ -1189,10 +1186,60 @@ class TestWatchIntegration:
                 "ALERT_TEMP_C": "90",
                 "ALERT_DISK_WEAR_PERCENT": "70",
                 "ALERT_CONFIRM": "0",
+                "ALERT_WATCH_INTERVAL": "1",
                 "STATUS_DIR": "/s",
             }
         )
         assert not cfg.watch and cfg.alert_temp_c == 90 and cfg.alert_wear_percent == 70
         assert cfg.alert_confirm == 1 and cfg.status_dir == Path("/s")
+        assert cfg.watch_interval == 5.0  # not faster than every 5 s
         with pytest.raises(ValueError, match="must be numbers"):
             bot.Config.from_env({**env, "ALERT_TEMP_C": "hot"})
+
+
+class TestCameraGrouping:
+    def all_dark(self, frigate):
+        frigate.routes["/api/stats"] = (200, stats_with(front_fps=0.0, back_fps=0.0))
+
+    def test_cameras_that_die_together_get_one_message(self, watcher, frigate):
+        self.all_dark(frigate)
+        results = run_checks(watcher, 2)
+        assert results[0] == []
+        (message,) = results[1]
+        assert message.startswith("⚠️ 2 cameras have no video: back, front.")
+        assert "switch" in message
+
+    def test_one_camera_keeps_the_single_camera_wording(self, watcher, frigate):
+        frigate.routes["/api/stats"] = (200, stats_with(front_fps=0.0))
+        (message,) = run_checks(watcher, 2)[1]
+        assert message.startswith("⚠️ Camera front has no video")
+
+    def test_reminder_and_recovery_are_grouped_too(self, watcher, frigate):
+        self.all_dark(frigate)
+        run_checks(watcher, 2)
+        (reminder,) = watcher.watch_messages(T0 + 4000)
+        assert "2 cameras have no video" in reminder and reminder.endswith("(reminder)")
+        frigate.routes["/api/stats"] = (200, stats_with())
+        assert watcher.watch_messages(T0 + 4060) == ["✅ Cameras back to normal: back, front."]
+
+    def test_a_second_camera_failing_later_is_reported_on_its_own(self, watcher, frigate):
+        frigate.routes["/api/stats"] = (200, stats_with(front_fps=0.0))
+        run_checks(watcher, 2)
+        self.all_dark(frigate)
+        later = [watcher.watch_messages(T0 + 600 + i * 60) for i in range(2)]
+        (message,) = later[1]
+        assert message.startswith("⚠️ Camera back has no video")  # front is not repeated
+
+    def test_the_switched_off_cameras_scenario_with_default_timing(self, telegram, frigate, host):
+        """Four cameras dark at once: one alert about two minutes after the first check."""
+        stats = stats_with()
+        stats["cameras"] = {
+            f"reolink_{n}": {"camera_fps": 0.0, "detection_fps": 0.0, "skipped_fps": 0.0}
+            for n in (3, 4, 5, 6)
+        }
+        frigate.routes["/api/stats"] = (200, stats)
+        frigate.routes["/api/config"] = (200, {"cameras": {}})
+        b = make_bot(telegram, frigate, host, alert_free_percent=0)
+        assert (b.cfg.alert_confirm, b.cfg.watch_interval) == (3, 60.0)
+        sent_at = [i * b.cfg.watch_interval for i in range(5) if b.watch_messages(T0 + i * 60.0)]
+        assert sent_at == [120.0]  # third check, i.e. two minutes after the first

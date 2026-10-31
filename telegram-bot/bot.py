@@ -103,7 +103,8 @@ class Config:
     alert_interval: float = 300.0  # seconds between disk checks
     alert_repeat: float = 6 * 3600.0  # seconds between reminders while the disk stays low
     watch: bool = True  # alert on Frigate down, camera offline, hot CPU, failing disk
-    alert_confirm: int = 2  # checks in a row before alerting (ignores restarts and blips)
+    watch_interval: float = 60.0  # seconds between watcher checks
+    alert_confirm: int = 3  # checks in a row before alerting (ignores restarts and blips)
     alert_temp_c: float = 85.0  # CPU temperature alert level; 0 = off
     alert_wear_percent: float = 80.0  # alert when an SSD reports this much of its life used
     status_dir: Path = Path("/status")  # disk health written by the host (smart-report.py)
@@ -137,9 +138,11 @@ class Config:
             temp = float(env.get("ALERT_TEMP_C", cls.alert_temp_c))
             wear = float(env.get("ALERT_DISK_WEAR_PERCENT", cls.alert_wear_percent))
             confirm = int(env.get("ALERT_CONFIRM", cls.alert_confirm))
+            watch_interval = float(env.get("ALERT_WATCH_INTERVAL", cls.watch_interval))
         except ValueError:
             raise ValueError(
-                "ALERT_TEMP_C, ALERT_DISK_WEAR_PERCENT and ALERT_CONFIRM must be numbers"
+                "ALERT_TEMP_C, ALERT_DISK_WEAR_PERCENT, ALERT_CONFIRM and "
+                "ALERT_WATCH_INTERVAL must be numbers"
             ) from None
         watch = env.get("ALERT_WATCH", "true").strip().lower() not in ("false", "0", "no", "off")
         return cls(
@@ -160,6 +163,7 @@ class Config:
             alert_repeat=float(env.get("ALERT_REPEAT_HOURS", cls.alert_repeat / 3600)) * 3600,
             watch=watch,
             alert_confirm=max(1, confirm),
+            watch_interval=max(5.0, watch_interval),
             alert_temp_c=temp,
             alert_wear_percent=wear,
             status_dir=Path(env.get("STATUS_DIR", str(cls.status_dir))),
@@ -602,6 +606,20 @@ class Incident:
     last_alert: float = 0.0
 
 
+def no_video_message(names: list[str], reminder: bool = False) -> str:
+    """One message for all cameras that went dark together (power cut, switch down)."""
+    tail = " (reminder)" if reminder else ""
+    if len(names) == 1:
+        return (
+            f"⚠️ Camera {names[0]} has no video (offline, unplugged or wrong login?). "
+            f"Nothing is being recorded from it.{tail}"
+        )
+    return (
+        f"⚠️ {len(names)} cameras have no video: {', '.join(names)}. Offline, unplugged, "
+        f"a network switch down, or wrong logins? Nothing is being recorded from them.{tail}"
+    )
+
+
 def disk_problems(disk: dict, wear_limit: float) -> list[str]:
     """What is wrong with one drive, from smart-report.py's summary of it."""
     problems = []
@@ -751,6 +769,34 @@ class Bot:
     # or a camera reboot is not an outage), is repeated every ``alert_repeat``
     # seconds while it lasts, and a "back to normal" message ends it.
 
+    def step(
+        self,
+        key: str,
+        label: str,
+        problem: str | None,
+        now: float,
+        confirm: int | None = None,
+    ) -> str | None:
+        """Advance one watched thing. Returns "alert", "reminder", "recovered" or None."""
+        needed = self.cfg.alert_confirm if confirm is None else confirm
+        incident = self._incidents.get(key)
+        if problem is None:
+            if incident is None:
+                return None
+            del self._incidents[key]
+            return "recovered" if incident.alerted else None
+        if incident is None:
+            incident = self._incidents[key] = Incident(label)
+        incident.strikes += 1
+        if incident.strikes < needed:
+            return None
+        if incident.alerted and now - incident.last_alert < self.cfg.alert_repeat:
+            return None
+        event = "reminder" if incident.alerted else "alert"
+        incident.alerted = True
+        incident.last_alert = now
+        return event
+
     def judge(
         self,
         key: str,
@@ -759,24 +805,12 @@ class Bot:
         now: float,
         confirm: int | None = None,
     ) -> str | None:
-        needed = self.cfg.alert_confirm if confirm is None else confirm
-        incident = self._incidents.get(key)
-        if problem is None:
-            if incident is None:
-                return None
-            del self._incidents[key]
-            return f"✅ {label}: back to normal." if incident.alerted else None
-        if incident is None:
-            incident = self._incidents[key] = Incident(label)
-        incident.strikes += 1
-        if incident.strikes < needed:
-            return None
-        if incident.alerted and now - incident.last_alert < self.cfg.alert_repeat:
-            return None
-        reminder = " (reminder)" if incident.alerted else ""
-        incident.alerted = True
-        incident.last_alert = now
-        return f"⚠️ {problem}{reminder}"
+        event = self.step(key, label, problem, now, confirm)
+        if event == "recovered":
+            return f"✅ {label}: back to normal."
+        if event:
+            return f"⚠️ {problem}" + (" (reminder)" if event == "reminder" else "")
+        return None
 
     def watch_frigate(self, now: float) -> list[str]:
         cfg = self.cfg
@@ -793,20 +827,21 @@ class Bot:
             return [message] if message else []
         messages = [self.judge("frigate", "Frigate", None, now)]
         disabled = disabled_cameras(cfg)
+        events: dict[str, list[str]] = {"alert": [], "reminder": [], "recovered": []}
         for name, camera in sorted((stats.get("cameras") or {}).items()):
             offline = name not in disabled and float(camera.get("camera_fps") or 0) < 0.5
+            event = self.step(f"camera:{name}", name, "no video" if offline else None, now)
+            if event:
+                events[event].append(name)
+        for event in ("alert", "reminder"):
+            if events[event]:
+                messages.append(no_video_message(events[event], reminder=event == "reminder"))
+        if events["recovered"]:
+            names = events["recovered"]
             messages.append(
-                self.judge(
-                    f"camera:{name}",
-                    f"Camera {name}",
-                    (
-                        f"Camera {name} has no video (offline, unplugged or wrong login?). "
-                        "Nothing is being recorded from it."
-                        if offline
-                        else None
-                    ),
-                    now,
-                )
+                f"✅ Camera {names[0]}: back to normal."
+                if len(names) == 1
+                else f"✅ Cameras back to normal: {', '.join(names)}."
             )
         return [m for m in messages if m]
 
@@ -871,13 +906,17 @@ class Bot:
                 log.exception("%s failed", check.__name__)
         return messages
 
-    def send_alerts(self) -> None:
-        messages = self.disk_alert_messages()
-        if self.cfg.watch:
-            messages += self.watch_messages()
+    def broadcast(self, messages: list[str]) -> None:
         for text in messages:
             for chat_id in sorted(self.cfg.allowed):  # private chats: chat id == user id
                 self.reply(chat_id, text)
+
+    def send_alerts(self) -> None:
+        self.broadcast(self.disk_alert_messages())
+
+    def send_watch_alerts(self) -> None:
+        if self.cfg.watch:
+            self.broadcast(self.watch_messages())
 
     def alert_loop(self) -> None:
         while True:
@@ -886,6 +925,15 @@ class Bot:
             except Exception:  # noqa: BLE001 - keep watching
                 log.exception("disk check failed")
             if self.stop.wait(self.cfg.alert_interval):
+                return
+
+    def watch_loop(self) -> None:
+        while True:
+            try:
+                self.send_watch_alerts()
+            except Exception:  # noqa: BLE001 - keep watching
+                log.exception("watcher run failed")
+            if self.stop.wait(self.cfg.watch_interval):
                 return
 
     # -- reboot -----------------------------------------------------------
@@ -1159,13 +1207,20 @@ class Bot:
             threading.Thread(target=self.notify_after_reboot, daemon=True).start()
         if not self.cfg.allowed:
             log.warning("TELEGRAM_ALLOWED_IDS is empty: send /id to the bot to get your id")
-        if self.cfg.allowed and (self.cfg.alert_free_percent > 0 or self.cfg.watch):
+        if self.cfg.allowed and self.cfg.alert_free_percent > 0:
             threading.Thread(target=self.alert_loop, daemon=True).start()
             log.info(
-                "alerts on every %g s: disk below %g%% free, watchers %s",
-                self.cfg.alert_interval,
+                "disk alerts on: below %g%% free, every %g s",
                 self.cfg.alert_free_percent,
-                "on" if self.cfg.watch else "off",
+                self.cfg.alert_interval,
+            )
+        if self.cfg.allowed and self.cfg.watch:
+            threading.Thread(target=self.watch_loop, daemon=True).start()
+            log.info(
+                "watchers on every %g s (Frigate, cameras, temperature, disk health); "
+                "alert after %d checks in a row",
+                self.cfg.watch_interval,
+                self.cfg.alert_confirm,
             )
         offset: int | None = None
         failures = 0
