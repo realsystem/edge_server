@@ -7,7 +7,8 @@ container has no Docker access; this is the only thing it can ask for, and it
 accepts nothing but a service name from the stack's own compose file:
 
   restart  docker compose restart <service>, then wait until it is running again
-  logs     the last lines of <service>'s log, with passwords removed
+  logs     the last lines of <service>'s log, passwords removed, one timestamp per
+           line in the server's time zone (Docker's, converted from UTC)
 
 Usage: service-request.py restart|logs
 Environment: EDGE_SERVER_DIR (default /opt/edge-server), FRIGATE_URL
@@ -29,6 +30,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
@@ -91,6 +93,44 @@ def cam_passwords(cam_file: Path) -> set[str]:
                 }
             )
     return found
+
+
+# "frigate  | 2026-11-01T14:49:20.442382760Z 2026-11-01 14:49:20.442301969  <message>":
+# Docker's UTC timestamp (from --timestamps), then, for Frigate, a second UTC one from
+# the image's log wrapper. Both are UTC, and a message often has its own local time too.
+LOG_STAMPS = re.compile(
+    r"^(?P<head>[^\s|]+\s*\| )?"
+    r"(?P<docker>\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?)Z "
+    r"(?P<wrapper>(?P<wrapper_time>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?) +)?"
+)
+DUPLICATE_WITHIN = 5.0  # seconds: a second timestamp this close to Docker's is the same moment
+
+
+def parse_utc(text: str) -> datetime | None:
+    base, _, fraction = text.replace("T", " ").partition(".")
+    try:
+        moment = datetime.strptime(base, "%Y-%m-%d %H:%M:%S")
+        micro = int((fraction + "000000")[:6]) if fraction else 0
+    except ValueError:
+        return None
+    return moment.replace(microsecond=micro, tzinfo=timezone.utc)
+
+
+def localize_log_line(line: str) -> str:
+    """One timestamp per line, in the server's own time zone: Docker's, converted from UTC.
+    The wrapper's duplicate is dropped; lines without a Docker timestamp are left alone."""
+    match = LOG_STAMPS.match(line)
+    moment = parse_utc(match["docker"]) if match else None
+    if match is None or moment is None:
+        return line
+    local = moment.astimezone()
+    stamp = f"{local:%Y-%m-%d %H:%M:%S}.{local.microsecond // 1000:03d} {local:%Z}"
+    wrapper = match["wrapper"] or ""
+    if wrapper:
+        other = parse_utc(match["wrapper_time"])
+        if other is not None and abs((other - moment).total_seconds()) <= DUPLICATE_WITHIN:
+            wrapper = ""  # the same moment again; anything else is part of the message
+    return f"{match['head'] or ''}{stamp} {wrapper}{line[match.end():]}"
 
 
 def redact(text: str, passwords: set[str] | None = None) -> str:
@@ -233,6 +273,7 @@ def do_logs() -> int:
         write_result("logs", "failed", service, redact(tail)[:200])
         return 1
     text = redact(result.stdout + result.stderr, cam_passwords(app_dir() / ".cam"))
+    text = "".join(localize_log_line(line) for line in text.splitlines(keepends=True))
     data = text.encode(errors="replace")[-MAX_LOG_BYTES:]  # keep the newest
     write_atomic(requests_dir() / "logs-output.txt", data)
     write_result("logs", "ok", service, lines=lines, bytes=len(data))
