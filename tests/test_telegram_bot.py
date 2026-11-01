@@ -1308,7 +1308,7 @@ class TestRedeployCommand:
         }
         assert req(redeploy, "totp-last-step").read_text() == str(int(NOW // 30))
         assert telegram.sent("deleteMessage") == [{"chat_id": ALICE, "message_id": 77}]
-        assert "Updating from GitHub main" in telegram.texts()[-1]
+        assert "Deploying the newest release tag" in telegram.texts()[-1]
         assert redeploy.watches == [ALICE]
 
     def test_a_code_works_once_across_both_commands(self, redeploy, telegram):
@@ -1504,3 +1504,309 @@ class TestRedeployWatching:
         with pytest.raises(SystemExit):
             redeploy.run()
         assert resumed == [1]
+
+
+# ------------------------------------------------------------ restart and logs
+
+COMPOSE = """\
+services:
+  frigate:
+    image: x
+    environment:
+      - A=1
+  mosquitto:
+    image: y
+  telegram-bot:
+    image: z
+volumes:
+  data: {}
+"""
+
+
+@pytest.fixture
+def jobs(reboot, telegram, monkeypatch):
+    """/reboot's setup, a stack with three services and a recorder for the waiting thread."""
+    (reboot.cfg.app_dir / "docker-compose.yml").write_text(COMPOSE)
+    reboot.watches = []
+    monkeypatch.setattr(
+        reboot,
+        "_start_job_watch",
+        lambda kind, chat, wait, deliver: reboot.watches.append((kind, chat)),
+    )
+    return reboot
+
+
+class TestComposeServices:
+    def test_reads_the_services_block_only(self, jobs):
+        assert bot.compose_services(jobs.cfg) == ["frigate", "mosquitto", "telegram-bot"]
+
+    def test_missing_or_odd_file(self, jobs):
+        (jobs.cfg.app_dir / "docker-compose.yml").unlink()
+        assert bot.compose_services(jobs.cfg) == []
+        (jobs.cfg.app_dir / "docker-compose.yml").write_text("volumes:\n  frigate:\n")
+        assert bot.compose_services(jobs.cfg) == []
+
+
+class TestRestartCommand:
+    def test_accepted_code_requests_a_restart(self, jobs, telegram):
+        send(jobs, f"/restart frigate {code_now()}")
+        assert json.loads(req(jobs, "restart-request").read_text()) == {"service": "frigate"}
+        assert req(jobs, "totp-last-step").read_text() == str(int(NOW // 30))
+        assert telegram.sent("deleteMessage") == [{"chat_id": ALICE, "message_id": 77}]
+        assert "Restarting frigate" in telegram.texts()[-1]
+        assert jobs.watches == [("restart", ALICE)]
+        assert not list(jobs.cfg.requests_dir.glob(".*.tmp"))  # no temp file left behind
+
+    def test_service_name_is_case_insensitive(self, jobs):
+        send(jobs, f"/restart FRIGATE {code_now()}")
+        assert json.loads(req(jobs, "restart-request").read_text())["service"] == "frigate"
+
+    def test_unknown_service_spends_no_code(self, jobs, telegram):
+        send(jobs, f"/restart nginx {code_now()}")
+        assert "Unknown service 'nginx'" in telegram.texts()[-1]
+        assert "frigate, mosquitto" in telegram.texts()[-1]
+        assert not req(jobs, "restart-request").exists()
+        assert not req(jobs, "totp-last-step").exists()  # the code is still good
+        send(jobs, f"/restart frigate {code_now()}")
+        assert req(jobs, "restart-request").exists()
+
+    def test_the_bot_cannot_restart_itself(self, jobs, telegram):
+        send(jobs, f"/restart telegram-bot {code_now()}")
+        assert "Unknown service" in telegram.texts()[-1]
+        assert "telegram-bot" not in telegram.texts()[-1].split("Services:")[1]
+        assert not req(jobs, "restart-request").exists()
+
+    @pytest.mark.parametrize("text", ["/restart", "/restart frigate"])
+    def test_usage_lists_the_services(self, jobs, telegram, text):
+        send(jobs, text)
+        assert "/restart <service> <code>" in telegram.texts()[-1]
+        assert "frigate, mosquitto" in telegram.texts()[-1]
+        assert not req(jobs, "restart-request").exists()
+
+    def test_wrong_code_is_counted_and_nothing_happens(self, jobs, telegram):
+        wrong = "000000" if code_now() != "000000" else "111111"
+        send(jobs, f"/restart frigate {wrong}")
+        assert "Wrong code (1/3)" in telegram.texts()[-1]
+        assert not req(jobs, "restart-request").exists() and jobs.watches == []
+
+    def test_a_code_works_once_across_all_commands(self, jobs, telegram):
+        code = code_now()
+        send(jobs, f"/restart frigate {code}")
+        req(jobs, "restart-request").unlink()  # the host picked it up
+        jobs._active_jobs.clear()
+        send(jobs, f"/restart frigate {code}")
+        assert "Wrong code" in telegram.texts()[-1]
+        send(jobs, f"/reboot {code}")
+        assert "Wrong code" in telegram.texts()[-1]
+
+    def test_only_one_restart_at_a_time(self, jobs, telegram):
+        send(jobs, f"/restart frigate {code_now()}")
+        send(jobs, f"/restart mosquitto {code_now(1)}")
+        assert "already in progress" in telegram.texts()[-1]
+        assert json.loads(req(jobs, "restart-request").read_text())["service"] == "frigate"
+
+    def test_not_while_a_reboot_or_redeploy_is_pending(self, jobs, telegram):
+        for pending in ("reboot", "redeploy"):
+            req(jobs, pending).touch()
+            send(jobs, f"/restart frigate {code_now()}")
+            assert f"A {pending} is pending" in telegram.texts()[-1]
+            req(jobs, pending).unlink()
+        assert not req(jobs, "restart-request").exists()
+
+    def test_needs_the_authenticator_private_chat_and_a_listed_user(
+        self, jobs, telegram, frigate, host
+    ):
+        send(jobs, f"/restart frigate {code_now()}", chat_type="group")
+        assert "private chat" in telegram.texts()[-1]
+        send(jobs, f"/restart frigate {code_now()}", user=999)
+        assert not req(jobs, "restart-request").exists()
+        plain = make_bot(telegram, frigate, host)  # no TOTP secret
+        send(plain, "/restart frigate 123456")
+        assert "not set up" in telegram.texts()[-1]
+
+    def test_a_failure_to_write_the_request_is_reported(self, jobs, telegram, monkeypatch):
+        def broken(kind, payload):
+            raise OSError("read-only file system")
+
+        monkeypatch.setattr(jobs, "_submit_job", broken)
+        send(jobs, f"/restart frigate {code_now()}")
+        assert "Could not request the restart" in telegram.texts()[-1]
+        assert jobs.watches == []
+
+
+class TestRestartResult:
+    @pytest.mark.parametrize(
+        "data,words",
+        [
+            ({"status": "ok", "service": "frigate"}, ["✅", "Restarted frigate", "running again"]),
+            (
+                {"status": "ok", "service": "frigate", "detail": "API not answering yet"},
+                ["✅", "API not answering yet"],
+            ),
+            (
+                {"status": "failed", "service": "frigate", "detail": "not running"},
+                ["❌", "frigate failed", "not running", "/logs frigate"],
+            ),
+            ({"status": "refused", "detail": "unknown service"}, ["not done", "unknown service"]),
+            ({}, ["❌", "unknown reason"]),
+        ],
+    )
+    def test_wording(self, data, words):
+        text = bot.format_restart_result(data)
+        for w in words:
+            assert w in text
+
+    def test_delivery_claims_the_result_once(self, jobs, telegram):
+        assert jobs._deliver_restart(ALICE) is False
+        req(jobs, "restart-result").write_text(json.dumps({"status": "ok", "service": "frigate"}))
+        assert jobs._deliver_restart(ALICE) is True
+        assert "Restarted frigate" in telegram.texts()[-1]
+        assert jobs._deliver_restart(ALICE) is False
+        assert not list(jobs.cfg.requests_dir.glob("restart-result*"))
+
+    def test_garbled_result_is_still_reported(self, jobs, telegram):
+        req(jobs, "restart-result").write_text("{nope")
+        assert jobs._deliver_restart(ALICE) is True
+        assert "❌" in telegram.texts()[-1]
+
+
+class TestJobWatching:
+    def setup_cfg(self, b):
+        b.cfg.job_poll, b.cfg.job_start_wait = 1.0, 3.0
+
+    def deliver_after(self, b, calls):
+        state = {"n": 0}
+
+        def deliver(chat):
+            state["n"] += 1
+            return state["n"] >= calls
+
+        return deliver, state
+
+    def test_waits_until_the_host_answers(self, jobs):
+        self.setup_cfg(jobs)
+        deliver, state = self.deliver_after(jobs, 4)
+        jobs._active_jobs.add("restart")
+        jobs._watch_job("restart", ALICE, 10.0, deliver)
+        assert state["n"] == 4 and "restart" not in jobs._active_jobs
+
+    def test_reports_a_request_the_host_never_picked_up(self, jobs, telegram):
+        self.setup_cfg(jobs)
+        req(jobs, "restart-request").touch()
+        jobs._watch_job("restart", ALICE, 10.0, lambda chat: False)
+        assert "did not pick up the restart" in telegram.texts()[-1]
+        assert "edge-restart.path" in telegram.texts()[-1]
+        assert not req(jobs, "restart-request").exists()
+
+    def test_gives_up_after_the_maximum_wait(self, jobs, telegram):
+        self.setup_cfg(jobs)
+        jobs._watch_job("logs", ALICE, 10.0, lambda chat: False)
+        assert "No answer to /logs after" in telegram.texts()[-1]
+
+    def test_a_real_watch_thread_delivers(self, reboot, telegram):
+        """No fakes: command -> request file -> (host answers) -> message."""
+        (reboot.cfg.app_dir / "docker-compose.yml").write_text(COMPOSE)
+        reboot.cfg.job_poll = 0.01
+        send(reboot, f"/restart frigate {code_now()}")
+        req(reboot, "restart-request").unlink()  # the host picked it up
+        req(reboot, "restart-result").write_text(json.dumps({"status": "ok", "service": "frigate"}))
+        for t in reboot.threads:
+            t.join(timeout=10)
+        assert "Restarted frigate" in telegram.texts()[-1]
+        assert "restart" not in reboot._active_jobs
+
+
+class TestLogsCommand:
+    def test_requests_the_logs(self, jobs, telegram):
+        send(jobs, "/logs frigate 50")
+        assert json.loads(req(jobs, "logs-request").read_text()) == {
+            "service": "frigate",
+            "lines": 50,
+        }
+        assert jobs.watches == [("logs", ALICE)]
+        assert telegram.sent("deleteMessage") == []  # no code involved
+
+    def test_default_is_100_lines_and_the_bot_itself_is_allowed(self, jobs):
+        send(jobs, "/logs telegram-bot")
+        assert json.loads(req(jobs, "logs-request").read_text()) == {
+            "service": "telegram-bot",
+            "lines": 100,
+        }
+
+    @pytest.mark.parametrize(
+        "text", ["/logs", "/logs nginx", "/logs frigate 0", "/logs frigate 1001", "/logs frigate x"]
+    )
+    def test_bad_arguments_get_the_usage(self, jobs, telegram, text):
+        send(jobs, text)
+        assert "Usage: /logs <service> [lines 1-1000]" in telegram.texts()[-1]
+        assert "frigate, mosquitto, telegram-bot" in telegram.texts()[-1]
+        assert not req(jobs, "logs-request").exists()
+
+    def test_cooldown_and_busy(self, jobs, telegram):
+        send(jobs, "/logs frigate")
+        req(jobs, "logs-request").unlink()
+        send(jobs, "/logs mosquitto")
+        assert "Please wait" in telegram.texts()[-1]
+        jobs.clock = lambda: NOW + 60
+        req(jobs, "logs-request").touch()
+        send(jobs, "/logs mosquitto", date=NOW + 60)
+        assert "already being fetched" in telegram.texts()[-1]
+
+    def test_not_set_up_without_the_authenticator(self, telegram, frigate, host):
+        plain = make_bot(telegram, frigate, host)
+        send(plain, "/logs frigate")
+        assert "/logs is not set up" in telegram.texts()[-1]
+
+    def test_only_listed_users(self, jobs, telegram):
+        send(jobs, "/logs frigate", user=999)
+        assert not req(jobs, "logs-request").exists()
+
+
+class TestLogsResult:
+    def answer(self, b, text, **result):
+        result = {"status": "ok", "service": "frigate", "lines": 100, **result}
+        req(b, "logs-result").write_text(json.dumps(result))
+        if text is not None:
+            req(b, "logs-output.txt").write_text(text)
+
+    def test_short_logs_are_sent_as_a_message(self, jobs, telegram):
+        self.answer(jobs, "2026-01-01 frigate | started\n")
+        assert jobs._deliver_logs(ALICE) is True
+        assert "frigate (last 100 lines)" in telegram.texts()[-1]
+        assert "frigate | started" in telegram.texts()[-1]
+        assert telegram.sent("sendDocument") == []
+        assert not req(jobs, "logs-output.txt").exists()  # cleaned up
+
+    def test_long_logs_are_sent_as_a_file(self, jobs, telegram):
+        self.answer(jobs, "line of log text\n" * 400)
+        assert jobs._deliver_logs(ALICE) is True
+        (doc,) = telegram.sent("sendDocument")
+        assert b'filename="frigate-logs-' in doc and b"line of log text" in doc
+        assert b"Passwords are removed" in doc
+        assert not req(jobs, "logs-output.txt").exists()
+
+    def test_empty_logs(self, jobs, telegram):
+        self.answer(jobs, "")
+        jobs._deliver_logs(ALICE)
+        assert "no log lines" in telegram.texts()[-1]
+
+    def test_refusal_and_failure_from_the_host(self, jobs, telegram):
+        self.answer(jobs, None, status="refused", detail="unknown service 'x'")
+        jobs._deliver_logs(ALICE)
+        assert "Logs not available: unknown service 'x'" in telegram.texts()[-1]
+
+    def test_no_answer_yet(self, jobs):
+        assert jobs._deliver_logs(ALICE) is False
+
+
+class TestHelpAndMenu:
+    def test_new_commands_only_with_the_authenticator(self, jobs, telegram, frigate, host):
+        names = {c["command"] for c in jobs.commands()}
+        assert {"restart", "logs"} <= names
+        assert (
+            "/restart <service> <code>" in jobs.help_text()
+            and "/logs <service>" in jobs.help_text()
+        )
+        plain = make_bot(telegram, frigate, host)
+        assert not {"restart", "logs"} & {c["command"] for c in plain.commands()}
+        assert "/restart" not in plain.help_text()

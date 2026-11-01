@@ -906,6 +906,66 @@ UNIT
     systemctl enable --now edge-reboot.path
 }
 
+# Host side of /restart and /logs: two path units that run service-request.py when the
+# bot drops bot-requests/restart-request or logs-request. That script takes nothing but a
+# service name from the stack's compose file, so the bot gets no Docker access.
+install_service_requests() {
+    local dir="$SYSTEMD_DIR" script_dir kind
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [[ "$TELEGRAM_REBOOT_ENABLED" != "true" || ! -f "$script_dir/telegram-bot/service-request.py" ]]; then
+        local removed=false
+        for kind in restart logs; do
+            if [[ -f "$dir/edge-$kind.path" || -f "$dir/edge-$kind.service" ]]; then
+                systemctl disable --now "edge-$kind.path" &> /dev/null || true
+                rm -f "$dir/edge-$kind.path" "$dir/edge-$kind.service"
+                removed=true
+            fi
+        done
+        rm -f "$APP_DIR/service-request.py"
+        if [[ "$removed" == "true" ]]; then
+            systemctl daemon-reload
+            info "Removed the /restart and /logs watchers (no REBOOT_TOTP_SECRET)"
+        fi
+        return 0
+    fi
+
+    info "Installing the Telegram /restart and /logs watchers..."
+    mkdir -p "$dir"
+    install -m 755 "$script_dir/telegram-bot/service-request.py" "$APP_DIR/service-request.py"
+    local timeout
+    for kind in restart logs; do
+        timeout=300
+        [[ "$kind" == "logs" ]] && timeout=120
+        cat > "$dir/edge-$kind.path" << UNIT
+[Unit]
+Description=$kind request from the Telegram bot
+
+[Path]
+PathExists=$APP_DIR/bot-requests/$kind-request
+Unit=edge-$kind.service
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+        cat > "$dir/edge-$kind.service" << UNIT
+[Unit]
+Description=Telegram bot request: $kind a container of the stack
+After=docker.service
+
+[Service]
+Type=oneshot
+Environment=EDGE_SERVER_DIR=$APP_DIR
+TimeoutStartSec=$timeout
+ExecStart=$APP_DIR/service-request.py $kind
+UNIT
+        chmod 644 "$dir/edge-$kind.path" "$dir/edge-$kind.service"
+        # a request left over from before must not act the moment the watcher starts
+        rm -f "$APP_DIR/bot-requests/$kind-request"
+    done
+    systemctl daemon-reload
+    systemctl enable --now edge-restart.path edge-logs.path
+}
+
 # Host side of /redeploy: a path unit that runs "deploy-edge-server.sh --auto"
 # when the bot drops bot-requests/redeploy. Needs the source checkout.
 install_auto_redeploy() {
@@ -2190,6 +2250,7 @@ run_deploy() {
     create_systemd_service
     install_reboot_unit
     install_auto_redeploy
+    install_service_requests
     install_host_helpers
     start_services
     install_victron
