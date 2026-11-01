@@ -6,6 +6,9 @@ Commands, for the users listed in TELEGRAM_ALLOWED_IDS:
   /diag    full diagnostics report (collect-diagnostics.sh), sent as a file
   /testalert [percent]  send a simulated low-disk alert to you (to test delivery)
   /help    list the commands
+With the authenticator set up (REBOOT_TOTP_SECRET) there are also:
+  /reboot <code>, /redeploy <code>, /restart <service> <code>
+  /logs <service> [lines]   recent log lines of one container (passwords removed)
 
 It also sends a message to every authorized user when the recordings or system
 disk drops below ALERT_DISK_FREE_PERCENT free (default 15, 0 turns it off),
@@ -80,6 +83,19 @@ REDEPLOY_HELP = (
     "\n/redeploy <code> - deploy the newest release tag (vX.Y) from GitHub; same authenticator code"
 )
 REDEPLOY_RESULT_MAX_AGE = 30 * 60.0
+LOGS_INLINE_LIMIT = 3500  # longer logs are sent as a file
+RESTART_COMMAND = {
+    "command": "restart",
+    "description": "Restart one container (authenticator code)",
+}
+RESTART_HELP = (
+    "\n/restart <service> <code> - restart one container, e.g. frigate; same authenticator code"
+)
+LOGS_COMMAND = {"command": "logs", "description": "Recent log lines of one container"}
+LOGS_HELP = "\n/logs <service> [lines] - last log lines of a container (default 100, at most 1000)"
+HIDDEN_FROM_RESTART = {
+    "telegram-bot"
+}  # restarting the bot from the bot would cut off its own answer
 
 TOTP_STEP = 30
 TOTP_FILE_AGE = 60  # a /reboot message older than this is refused
@@ -125,6 +141,11 @@ class Config:
     redeploy_poll: float = 5.0  # seconds between looks for the redeploy result
     redeploy_start_wait: float = 120.0  # the host must pick the request up within this
     redeploy_max_wait: float = 2700.0  # give up waiting for a result after this
+    job_poll: float = 2.0  # seconds between looks for a /restart or /logs answer from the host
+    job_start_wait: float = 30.0  # the host must pick the request up within this
+    restart_max_wait: float = 300.0  # give up waiting for a restart result after this
+    logs_max_wait: float = 90.0
+    logs_cooldown: float = 10.0
     reboot_wait: float = 150.0  # seconds to wait for the host to go down before reporting failure
 
     @classmethod
@@ -672,6 +693,38 @@ def format_redeploy_result(data: dict) -> str:
     )
 
 
+def compose_services(cfg: Config) -> list[str]:
+    """Service names in the stack's docker-compose.yml (mounted read-only into the bot).
+    The file is written by the deploy script, so a plain scan of its services: block is enough."""
+    names: list[str] = []
+    in_services = False
+    for line in (read_text(cfg.app_dir / "docker-compose.yml") or "").splitlines():
+        if re.match(r"^services:\s*$", line):
+            in_services = True
+        elif in_services:
+            if line and not line.startswith((" ", "#")):
+                break  # the next top-level key
+            match = re.match(r"^  ([A-Za-z0-9][A-Za-z0-9_-]*):\s*$", line)
+            if match:
+                names.append(match.group(1))
+    return names
+
+
+def format_restart_result(data: dict) -> str:
+    """The outcome written by service-request.py restart."""
+    service = str(data.get("service") or "the service")
+    detail = str(data.get("detail") or "").strip()
+    status = data.get("status")
+    if status == "ok":
+        return f"✅ Restarted {service}; it is running again." + (f" ({detail})" if detail else "")
+    if status == "refused":
+        return f"Restart not done: {detail or 'refused by the server'}."
+    return (
+        f"❌ Restarting {service} failed: {detail or 'unknown reason'}. "
+        f"See /logs {service if data.get('service') else '<service>'}."
+    )
+
+
 def disk_problems(disk: dict, wear_limit: float) -> list[str]:
     """What is wrong with one drive, from smart-report.py's summary of it."""
     problems = []
@@ -703,6 +756,9 @@ class Bot:
     _locked_until: dict[int, float] = field(default_factory=dict)
     _reboot_timer: threading.Timer | None = None
     _incidents: dict[str, Incident] = field(default_factory=dict)
+    _active_jobs: set[str] = field(default_factory=set)
+    _jobs_lock: threading.Lock = field(default_factory=threading.Lock)
+    _logs_last: float = 0.0
 
     # -- sending ----------------------------------------------------------
 
@@ -995,10 +1051,11 @@ class Bot:
     def commands(self) -> list[dict]:
         if not self.cfg.totp_secret:
             return COMMANDS
-        return COMMANDS + [REBOOT_COMMAND, REDEPLOY_COMMAND]
+        return COMMANDS + [REBOOT_COMMAND, REDEPLOY_COMMAND, RESTART_COMMAND, LOGS_COMMAND]
 
     def help_text(self) -> str:
-        return HELP + (REBOOT_HELP + REDEPLOY_HELP if self.cfg.totp_secret else "")
+        extra = REBOOT_HELP + REDEPLOY_HELP + RESTART_HELP + LOGS_HELP
+        return HELP + (extra if self.cfg.totp_secret else "")
 
     def uptime(self) -> float | None:
         text = read_text(self.cfg.proc / "uptime")
@@ -1185,11 +1242,214 @@ class Bot:
         log.warning("redeploy requested by user id %s", user_id)
         self.reply(
             chat_id,
-            "Code accepted. Updating from GitHub main and redeploying; this can take several "
+            "Code accepted. Deploying the newest release tag and redeploying; this can take several "
             "minutes (images, checks, restart). It rolls back by itself if the new version does not "
             "come up. I will message you with the outcome.",
         )
         self._start_redeploy_watch(chat_id)
+
+    # -- restart and logs -------------------------------------------------
+    # Same drop box. The container writes bot-requests/<kind>-request with a service
+    # name; the host unit (edge-restart.path / edge-logs.path) runs service-request.py,
+    # which only accepts services from the stack's compose file, and writes
+    # <kind>-result. The bot never gets Docker access.
+
+    def _host_jobs_available(self, chat_id: int, command: str) -> bool:
+        if self.cfg.totp_secret and self.cfg.requests_dir.is_dir():
+            return True
+        self.reply(
+            chat_id,
+            f"/{command} is not set up. It uses the same host helper as /reboot: run 'python3 "
+            "telegram-bot/bot.py --totp-setup' on the server, put REBOOT_TOTP_SECRET in .telegram "
+            "and redeploy.",
+        )
+        return False
+
+    def _submit_job(self, kind: str, payload: dict) -> bool:
+        """Drop the request for the host. False if one is already waiting."""
+        cfg = self.cfg
+        for stale in (f"{kind}-result", "logs-output.txt" if kind == "logs" else ""):
+            if stale:
+                (cfg.requests_dir / stale).unlink(missing_ok=True)
+        tmp = cfg.requests_dir / f".{kind}-request.tmp"
+        tmp.write_text(json.dumps(payload))
+        try:
+            os.link(tmp, cfg.requests_dir / f"{kind}-request")  # fails if one is pending
+        except FileExistsError:
+            return False
+        finally:
+            tmp.unlink(missing_ok=True)
+        return True
+
+    def _job_busy(self, kind: str) -> bool:
+        with self._jobs_lock:
+            return kind in self._active_jobs or (self.cfg.requests_dir / f"{kind}-request").exists()
+
+    def _start_job_watch(
+        self, kind: str, chat_id: int, max_wait: float, deliver: Callable[[int], bool]
+    ) -> None:
+        with self._jobs_lock:
+            self._active_jobs.add(kind)
+        thread = threading.Thread(
+            target=self._watch_job, args=(kind, chat_id, max_wait, deliver), daemon=True
+        )
+        thread.start()
+        self.threads.append(thread)
+
+    def _watch_job(
+        self, kind: str, chat_id: int, max_wait: float, deliver: Callable[[int], bool]
+    ) -> None:
+        cfg = self.cfg
+        request = cfg.requests_dir / f"{kind}-request"
+        start_polls = int(cfg.job_start_wait / cfg.job_poll)
+        try:
+            for i in range(max(1, int(max_wait / cfg.job_poll))):
+                if deliver(chat_id):
+                    return
+                if i >= start_polls and request.exists():
+                    request.unlink(missing_ok=True)
+                    self.reply(
+                        chat_id,
+                        f"The host did not pick up the {kind} request. On the server check: "
+                        f"systemctl status edge-{kind}.path edge-{kind}.service",
+                    )
+                    return
+                self.sleep(cfg.job_poll)
+            self.reply(chat_id, f"No answer to /{kind} after {human_duration(max_wait)}.")
+        finally:
+            with self._jobs_lock:
+                self._active_jobs.discard(kind)
+
+    def _claim_result(self, kind: str) -> dict | None:
+        result = self.cfg.requests_dir / f"{kind}-result"
+        claimed = result.with_name(f"{kind}-result.claimed")
+        try:
+            os.rename(result, claimed)
+        except OSError:
+            return None
+        try:
+            data = json.loads(claimed.read_text())
+        except (OSError, ValueError):
+            data = {}
+        claimed.unlink(missing_ok=True)
+        return data if isinstance(data, dict) else {}
+
+    def cmd_restart(self, chat_id: int, user_id: int, message: dict, args: list[str]) -> None:
+        cfg = self.cfg
+        services = [s for s in compose_services(cfg) if s not in HIDDEN_FROM_RESTART]
+        service = args[0].lower() if args else ""
+        if cfg.totp_secret and (len(args) < 2 or service not in services):
+            known = ", ".join(services) or "none found"
+            if service and len(args) >= 2:
+                self.reply(chat_id, f"Unknown service '{service}'. Services: {known}")
+            else:
+                self.reply(
+                    chat_id,
+                    f"Send /restart <service> <code>, with the 6-digit code from your "
+                    f"authenticator app. Services: {known}",
+                )
+            return  # nothing was spent: a wrong name does not use up or count a code
+
+        def precheck() -> str | None:
+            if self._job_busy("restart"):
+                return "A restart is already in progress. I will message you when it is done."
+            for pending in ("reboot", "redeploy"):
+                if (cfg.requests_dir / pending).exists():
+                    return f"A {pending} is pending; try again after it."
+            return None
+
+        now = self._totp_gate(chat_id, user_id, message, args[1:], "restart", precheck)
+        if now is None:
+            return
+        try:
+            if not self._submit_job("restart", {"service": service}):
+                self.reply(chat_id, "A restart is already in progress.")
+                return
+        except OSError as e:
+            log.error("restart request failed: %s", e)
+            self.reply(chat_id, f"Could not request the restart: {e}")
+            return
+        log.warning("restart of %s requested by user id %s", service, user_id)
+        self.reply(
+            chat_id, f"Code accepted. Restarting {service}; I will message you when it is up."
+        )
+        self._start_job_watch("restart", chat_id, cfg.restart_max_wait, self._deliver_restart)
+
+    def _deliver_restart(self, chat_id: int) -> bool:
+        data = self._claim_result("restart")
+        if data is None:
+            return False
+        self.reply(chat_id, format_restart_result(data))
+        return True
+
+    def cmd_logs(self, chat_id: int, args: list[str]) -> None:
+        cfg = self.cfg
+        if not self._host_jobs_available(chat_id, "logs"):
+            return
+        services = compose_services(cfg)
+        service = args[0].lower() if args else ""
+        lines = 100
+        if len(args) > 1:
+            try:
+                lines = int(args[1])
+            except ValueError:
+                lines = 0
+        if service not in services or not 1 <= lines <= 1000:
+            self.reply(
+                chat_id,
+                f"Usage: /logs <service> [lines 1-1000]. Services: {', '.join(services) or 'none found'}",
+            )
+            return
+        wait = cfg.logs_cooldown - (self.clock() - self._logs_last)
+        if self._logs_last and wait > 0:
+            self.reply(chat_id, f"Please wait {wait:.0f} s before asking again.")
+            return
+        if self._job_busy("logs"):
+            self.reply(chat_id, "Logs are already being fetched.")
+            return
+        try:
+            if not self._submit_job("logs", {"service": service, "lines": lines}):
+                self.reply(chat_id, "Logs are already being fetched.")
+                return
+        except OSError as e:
+            log.error("logs request failed: %s", e)
+            self.reply(chat_id, f"Could not request the logs: {e}")
+            return
+        self._logs_last = self.clock()
+        self._start_job_watch("logs", chat_id, cfg.logs_max_wait, self._deliver_logs)
+
+    def _deliver_logs(self, chat_id: int) -> bool:
+        data = self._claim_result("logs")
+        if data is None:
+            return False
+        service = str(data.get("service") or "service")
+        output = self.cfg.requests_dir / "logs-output.txt"
+        if data.get("status") != "ok":
+            output.unlink(missing_ok=True)
+            self.reply(chat_id, f"Logs not available: {data.get('detail') or 'unknown reason'}.")
+            return True
+        try:
+            text = output.read_bytes().decode(errors="replace")
+        except OSError:
+            text = ""
+        output.unlink(missing_ok=True)
+        if not text.strip():
+            self.reply(chat_id, f"{service}: no log lines.")
+        elif len(text) <= LOGS_INLINE_LIMIT:
+            self.reply(chat_id, f"{service} (last {data.get('lines')} lines)\n{text}", pre=True)
+        else:
+            name = time.strftime(f"{service}-logs-%Y%m%d-%H%M%S.txt")
+            try:
+                self.api.send_document(
+                    chat_id,
+                    name,
+                    text.encode(),
+                    caption=f"{service}, last {data.get('lines')} lines. Passwords are removed.",
+                )
+            except TelegramError as e:
+                log.error("could not send logs: %s", e)
+                self.reply(chat_id, "Could not upload the logs to Telegram.")
+        return True
 
     def _start_redeploy_watch(self, chat_id: int | None) -> None:
         thread = threading.Thread(target=self._watch_redeploy, args=(chat_id,), daemon=True)
@@ -1387,6 +1647,10 @@ class Bot:
             self.cmd_reboot(chat_id, user_id, message, args)
         elif command == "/redeploy":
             self.cmd_redeploy(chat_id, user_id, message, args)
+        elif command == "/restart":
+            self.cmd_restart(chat_id, user_id, message, args)
+        elif command == "/logs":
+            self.cmd_logs(chat_id, args)
         else:
             self.reply(chat_id, self.help_text())
 
@@ -1417,7 +1681,7 @@ class Bot:
         log.info(
             "bot started; %d authorized user(s); commands: /status /diag /testalert /id /help%s",
             len(self.cfg.allowed),
-            " /reboot /redeploy" if self.cfg.totp_secret else "",
+            " /reboot /redeploy /restart /logs" if self.cfg.totp_secret else "",
         )
         if self.cfg.totp_secret:
             threading.Thread(target=self.notify_after_reboot, daemon=True).start()

@@ -173,6 +173,8 @@ A small bot that runs next to Frigate and answers you in a Telegram chat:
 | `/testalert [percent]` | Sends you a simulated low-disk alert (default 5% free) plus the real disk state, so you can check delivery without filling a disk |
 | `/reboot <code>` | Reboots the laptop; needs a code from your authenticator app (off until set up, see below) |
 | `/redeploy <code>` | Deploys the newest **release tag** (`vX.Y`) from GitHub, same authenticator code (see below) |
+| `/restart <service> <code>` | Restarts one container (`frigate`, `mosquitto`, ...) without rebooting; same authenticator code (see below) |
+| `/logs <service> [lines]` | The last log lines of a container (default 100, up to 1000), passwords removed; a message, or a file when long (see below) |
 | `/id` | Your Telegram user id (works for anyone; used for setup) |
 
 Setup:
@@ -332,6 +334,28 @@ Things to know:
 - A redeploy re-applies the firewall, which briefly resets UFW. Do not run it over an
   SSH session you cannot afford to lose; use Tailscale or the bot.
 - Watch it: `journalctl -u edge-redeploy.service` and `/var/log/edge-server-deploy.log`.
+
+#### Restart a container and read its log (`/restart`, `/logs`)
+
+Both need the authenticator set up, because they use the same host helper as `/reboot`.
+
+- `/restart frigate 123456` restarts that one container (`docker compose restart`) and
+  waits until it runs again (for Frigate, until its API answers), then reports. The
+  service must be one in the stack's own compose file; `telegram-bot` is left out
+  because the bot cannot restart itself and still answer. A wrong service name is
+  rejected before the code is checked, so it does not use up the code or count as a
+  failed attempt. Same code rules and lockout as `/reboot`, one restart at a time, and
+  not while a reboot or redeploy is pending.
+- `/logs frigate 200` sends the last 200 lines (default 100, at most 1000) with
+  timestamps. It needs no code because it only reads. Short logs arrive as a message,
+  longer ones as a file. Camera passwords (from `.cam`), `user:password@` in URLs,
+  password/token/key settings and the bot token are replaced by `***`. `/logs
+  telegram-bot` shows the bot's own log. One request every 10 seconds.
+- The bot still has no Docker access. It writes `bot-requests/restart-request` or
+  `logs-request` with a service name; `edge-restart.path` / `edge-logs.path` on the host
+  start `service-request.py`, which deletes the request first, accepts only a service name
+  from the compose file, and answers in `restart-result` / `logs-result`. If nothing
+  answers: `systemctl status edge-restart.path edge-restart.service` (or `edge-logs`).
 
 Keep the secret like a password. Anyone who has it can generate valid codes (but
 still needs to be one of the listed Telegram users). Test it once while you are

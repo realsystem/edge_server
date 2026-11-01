@@ -10,6 +10,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -1733,6 +1734,7 @@ class TestAutoRedeploy:
             for step in (
                 "install_reboot_unit",
                 "install_auto_redeploy",
+                "install_service_requests",
                 "install_host_helpers",
                 "start_services",
                 "save_settings",
@@ -2118,6 +2120,72 @@ class TestAutoRedeploy:
         )
         assert result.returncode == 0 and "not available" in result.stdout
         assert not (world.tmp / "units" / "edge-redeploy.path").exists()
+
+
+class TestServiceRequestUnits:
+    """install_service_requests: the host side of the bot's /restart and /logs."""
+
+    @pytest.fixture
+    def host(self, stub_path, tmp_path):
+        app, units = tmp_path / "app", tmp_path / "units"
+        (app / "bot-requests").mkdir(parents=True)
+        units.mkdir()
+        env = {"EDGE_SERVER_DIR": str(app), "SYSTEMD_DIR": str(units)}
+
+        def run(body, **extra):
+            return run_sourced("deploy-edge-server.sh", body, stub_path, {**env, **extra})
+
+        return app, units, run, stub_path
+
+    def test_units_and_script_are_installed(self, host):
+        app, units, run, stub = host
+        result = run("TELEGRAM_REBOOT_ENABLED=true; install_service_requests")
+        assert result.returncode == 0, result.stdout + result.stderr
+        script = app / "service-request.py"
+        assert script.read_text() == (REPO / "telegram-bot/service-request.py").read_text()
+        assert os.access(script, os.X_OK) and stat.S_IMODE(script.stat().st_mode) == 0o755
+        for kind in ("restart", "logs"):
+            path = (units / f"edge-{kind}.path").read_text()
+            assert f"PathExists={app}/bot-requests/{kind}-request" in path
+            assert f"Unit=edge-{kind}.service" in path
+            service = (units / f"edge-{kind}.service").read_text()
+            assert f"ExecStart={app}/service-request.py {kind}" in service
+            assert f"Environment=EDGE_SERVER_DIR={app}" in service and "Type=oneshot" in service
+        assert "TimeoutStartSec=300" in (units / "edge-restart.service").read_text()
+        log = (stub / "log").read_text()
+        assert "systemctl enable --now edge-restart.path edge-logs.path" in log
+        assert "daemon-reload" in log
+
+    def test_a_request_left_over_does_not_act_at_install(self, host):
+        app, _, run, _ = host
+        for kind in ("restart", "logs"):
+            (app / "bot-requests" / f"{kind}-request").write_text("{}")
+        run("TELEGRAM_REBOOT_ENABLED=true; install_service_requests")
+        assert not list((app / "bot-requests").glob("*-request"))
+
+    def test_removed_when_the_authenticator_is_turned_off(self, host):
+        app, units, run, stub = host
+        run("TELEGRAM_REBOOT_ENABLED=true; install_service_requests")
+        (stub / "log").write_text("")
+        run("TELEGRAM_REBOOT_ENABLED=false; install_service_requests")
+        for kind in ("restart", "logs"):
+            assert not (units / f"edge-{kind}.path").exists()
+            assert not (units / f"edge-{kind}.service").exists()
+        assert not (app / "service-request.py").exists()
+        log = (stub / "log").read_text()
+        assert "systemctl disable --now edge-restart.path" in log
+        assert "systemctl disable --now edge-logs.path" in log
+
+    def test_nothing_to_remove_is_quiet(self, host):
+        _, _, run, stub = host
+        result = run("TELEGRAM_REBOOT_ENABLED=false; install_service_requests")
+        assert result.returncode == 0
+        assert "systemctl" not in (stub / "log").read_text() if (stub / "log").exists() else True
+
+    def test_the_script_is_valid_python(self):
+        script = REPO / "telegram-bot/service-request.py"
+        assert subprocess.run([sys.executable, "-m", "py_compile", str(script)]).returncode == 0
+        assert os.access(script, os.X_OK)
 
 
 class TestAddonUninstall:
