@@ -347,7 +347,8 @@ Both need the authenticator set up, because they use the same host helper as `/r
   failed attempt. Same code rules and lockout as `/reboot`, one restart at a time, and
   not while a reboot or redeploy is pending.
 - `/logs frigate 200` sends the last 200 lines (default 100, at most 1000) with
-  timestamps. It needs no code because it only reads. Short logs arrive as a message,
+  timestamps in the server's own time zone (one per line; Docker's UTC prefix is converted
+  and Frigate's duplicate one dropped). It needs no code because it only reads. Short logs arrive as a message,
   longer ones as a file. Camera passwords (from `.cam`), `user:password@` in URLs,
   password/token/key settings and the bot token are replaced by `***`. `/logs
   telegram-bot` shows the bot's own log. One request every 10 seconds.

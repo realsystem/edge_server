@@ -307,3 +307,75 @@ def test_end_to_end_with_a_docker_on_the_path(tmp_path):
     assert json.loads((tmp_path / "bot-requests" / "logs-result").read_text())["status"] == "ok"
     out = (tmp_path / "bot-requests" / "logs-output.txt").read_text()
     assert "hello" in out and "sekrit1234" not in out
+
+
+# ---------------------------------------------------------------- timestamps
+
+
+@pytest.fixture
+def los_angeles(monkeypatch):
+    monkeypatch.setenv("TZ", "America/Los_Angeles")
+    time_module = sr.time
+    time_module.tzset()
+    yield
+    monkeypatch.undo()
+    time_module.tzset()
+
+
+FRIGATE_LINE = (
+    "frigate  | 2026-11-01T14:49:20.442382760Z 2026-11-01 14:49:20.442301969  "
+    "2026/11/01 06:49:20 [error] 205#205: *4 auth request unexpected status: 502\n"
+)
+
+
+def test_frigate_line_gets_one_local_timestamp(los_angeles):
+    assert sr.localize_log_line(FRIGATE_LINE) == (
+        "frigate  | 2026-11-01 06:49:20.442 PST "
+        "2026/11/01 06:49:20 [error] 205#205: *4 auth request unexpected status: 502\n"
+    )
+
+
+def test_summer_time_follows_the_calendar(los_angeles):
+    line = "frigate  | 2026-07-01T20:00:00.5Z 2026-07-01 20:00:00.5  hello\n"
+    assert sr.localize_log_line(line) == "frigate  | 2026-07-01 13:00:00.500 PDT hello\n"
+
+
+def test_other_containers_and_missing_prefixes(los_angeles):
+    assert (
+        sr.localize_log_line("mosquitto  | 2026-11-01T14:49:20Z 1730000000: New client\n")
+        == "mosquitto  | 2026-11-01 06:49:20.000 PST 1730000000: New client\n"
+    )
+    assert sr.localize_log_line("2026-11-01T14:49:20.1Z plain\n") == (
+        "2026-11-01 06:49:20.100 PST plain\n"
+    )
+
+
+def test_a_second_timestamp_that_is_not_the_same_moment_is_kept(los_angeles):
+    line = "app  | 2026-11-01T14:49:20Z 2026-10-01 08:00:00 started at an older date\n"
+    out = sr.localize_log_line(line)
+    assert (
+        out == "app  | 2026-11-01 06:49:20.000 PST 2026-10-01 08:00:00 started at an older date\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "frigate  | no timestamp at all\n",
+        "    continuation of a stack trace\n",
+        "frigate  | 2026-13-45T99:99:99Z impossible date\n",
+        "\n",
+        "",
+    ],
+)
+def test_lines_without_a_docker_timestamp_are_unchanged(los_angeles, line):
+    assert sr.localize_log_line(line) == line
+
+
+def test_logs_output_uses_local_time_everywhere(app, docker, los_angeles):
+    docker.logs = FRIGATE_LINE + "frigate  | plain line\n" + FRIGATE_LINE.replace("20.4", "21.4")
+    ask(app, "logs", {"service": "frigate"})
+    assert sr.main(["logs"]) == 0
+    text = (app / "bot-requests" / "logs-output.txt").read_text()
+    assert "T14:49" not in text and "Z " not in text and "14:49:20.442301969" not in text
+    assert text.count("06:49:") >= 2 and "plain line" in text
