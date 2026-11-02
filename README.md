@@ -192,8 +192,10 @@ Setup:
 3. Open your bot in Telegram, send `/id`, put the number it answers into
    `TELEGRAM_ALLOWED_IDS` (several ids: comma-separated) and run the deploy again.
 
-**Home Assistant check.** Add `HA_HOST=10.0.0.2` (and `HA_PORT=8123` if different) to
-`.telegram` and run the deploy. `/status` then shows two lines under Host, for example
+**Home Assistant check.** Built in for the Raspberry Pi at `10.0.0.2`, port 8123, with
+nothing to configure. To change it, put `HA_HOST=<address>` (and `HA_PORT=<port>`) into
+`.telegram` and run the deploy; `HA_HOST=` (empty) switches the check off. `/status`
+shows two lines under Host, for example
 `home assistant 10.0.0.2 ping: 3/3 replies, avg 1 ms` and
 `home assistant 10.0.0.2:8123 HTTP 200 in 85 ms`. Lost pings, no answer or an HTTP 5xx
 show up in the problem list on top (a 401/403 still counts as up). The ping is sent by

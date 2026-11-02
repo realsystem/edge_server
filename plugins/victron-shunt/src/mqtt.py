@@ -45,7 +45,9 @@ class MQTTPublisher:
             time.sleep(0.1)
 
         if not self._connected:
-            raise RuntimeError(f"Failed to connect to MQTT broker {self.config.host}:{self.config.port}")
+            raise RuntimeError(
+                f"Failed to connect to MQTT broker {self.config.host}:{self.config.port}"
+            )
 
     def disconnect(self) -> None:
         """Disconnect from MQTT broker."""

@@ -33,6 +33,7 @@ class TestMQTTPublisher:
 
     def test_import(self):
         from victron_shunt.mqtt import MQTTPublisher
+
         assert MQTTPublisher is not None
 
     @patch("victron_shunt.mqtt.mqtt")

@@ -27,8 +27,9 @@ Environment:
   EDGE_SERVER_DIR       default /opt/edge-server (the stack directory)
   STORAGE_PATH          default /media/frigate (recordings, for the disk check)
   STORAGE_LABEL         host path shown in /status for that disk, default /mnt/storage
-  HA_HOST               address of another Home Assistant (e.g. on a Raspberry Pi): /status
-                        then shows two lines, ping and HTTP on HA_PORT. Empty = off.
+  HA_HOST               address of the Home Assistant on the LAN (the Raspberry Pi):
+                        /status shows two lines, ping and HTTP on HA_PORT.
+                        Default 10.0.0.2; set another address, or empty to switch off.
   HA_PORT               default 8123
   ALERT_DISK_FREE_PERCENT, ALERT_INTERVAL, ALERT_REPEAT_HOURS  see above
 """
@@ -122,7 +123,7 @@ class Config:
     app_dir: Path = Path("/opt/edge-server")
     storage_path: Path = Path("/media/frigate")
     storage_label: str = "/mnt/storage"  # where the host mounts it; only shown in /status
-    ha_host: str = ""  # a Home Assistant elsewhere on the LAN to check in /status; "" = off
+    ha_host: str = "10.0.0.2"  # Home Assistant on the LAN checked in /status; "" = off
     ha_port: int = 8123
     ha_timeout: float = 3.0
     proc: Path = Path("/proc")
@@ -186,7 +187,7 @@ class Config:
                 "ALERT_TEMP_C, ALERT_DISK_WEAR_PERCENT, ALERT_CONFIRM and "
                 "ALERT_WATCH_INTERVAL must be numbers"
             ) from None
-        ha_host = env.get("HA_HOST", "").strip()
+        ha_host = env.get("HA_HOST", cls.ha_host).strip()
         if ha_host and not HOST_RE.match(ha_host):
             raise ValueError("HA_HOST must be an IP address or host name")
         try:

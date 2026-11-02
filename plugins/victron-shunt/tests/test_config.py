@@ -28,15 +28,18 @@ class TestConfig:
 
     def test_load_from_file(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            yaml.dump({
-                "address": "AA:BB:CC:DD:EE:FF",
-                "key": "0123456789abcdef0123456789abcdef",
-                "mqtt": {
-                    "host": "mqtt.example.com",
-                    "port": 8883,
-                    "user": "testuser",
-                }
-            }, f)
+            yaml.dump(
+                {
+                    "address": "AA:BB:CC:DD:EE:FF",
+                    "key": "0123456789abcdef0123456789abcdef",
+                    "mqtt": {
+                        "host": "mqtt.example.com",
+                        "port": 8883,
+                        "user": "testuser",
+                    },
+                },
+                f,
+            )
             f.flush()
 
             try:
@@ -68,10 +71,13 @@ class TestConfig:
     def test_env_overrides_file(self, monkeypatch):
         """Env vars should override file values."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            yaml.dump({
-                "address": "AA:BB:CC:DD:EE:FF",
-                "key": "0123456789abcdef0123456789abcdef",
-            }, f)
+            yaml.dump(
+                {
+                    "address": "AA:BB:CC:DD:EE:FF",
+                    "key": "0123456789abcdef0123456789abcdef",
+                },
+                f,
+            )
             f.flush()
 
             try:
@@ -101,10 +107,7 @@ class TestConfig:
         assert "32 hex" in errors[0]
 
     def test_validate_valid(self):
-        cfg = Config(
-            address="AA:BB:CC:DD:EE:FF",
-            key="0123456789abcdef0123456789abcdef"
-        )
+        cfg = Config(address="AA:BB:CC:DD:EE:FF", key="0123456789abcdef0123456789abcdef")
         errors = cfg.validate()
         assert len(errors) == 0
 

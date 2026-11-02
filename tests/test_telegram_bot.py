@@ -134,6 +134,7 @@ def host(tmp_path):
 
 
 def make_bot(telegram, frigate, host, **overrides):
+    overrides.setdefault("ha_host", "")  # the built-in default would probe a real address
     cfg = bot.Config(
         token=TOKEN,
         allowed=frozenset({ALICE}),
@@ -1989,8 +1990,8 @@ class TestHomeAssistantLines:
 
 
 class TestHomeAssistantInStatus:
-    def test_off_by_default(self, telegram, frigate, host):
-        text = bot.build_status(make_bot(telegram, frigate, host).cfg, lambda s: None)
+    def test_off_when_empty(self, telegram, frigate, host):
+        text = bot.build_status(make_bot(telegram, frigate, host, ha_host="").cfg, lambda s: None)
         assert "home assistant" not in text.lower()
 
     def test_two_lines_in_the_host_section(self, telegram, frigate, host, monkeypatch):
@@ -2019,7 +2020,8 @@ class TestHomeAssistantInStatus:
 
     def test_config(self):
         env = {"TELEGRAM_BOT_TOKEN": TOKEN}
-        assert bot.Config.from_env(env).ha_host == ""
+        assert bot.Config.from_env(env).ha_host == "10.0.0.2"  # built-in default
+        assert bot.Config.from_env({**env, "HA_HOST": ""}).ha_host == ""  # switched off
         cfg = bot.Config.from_env({**env, "HA_HOST": " 10.0.0.2 ", "HA_PORT": "8124"})
         assert (cfg.ha_host, cfg.ha_port) == ("10.0.0.2", 8124)
         for bad in ("10.0.0.2/x", "a b", "http://x", "x;id", "-x"):

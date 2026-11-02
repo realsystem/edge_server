@@ -160,8 +160,14 @@ class TestScanner:
             @staticmethod
             async def discover(timeout, return_adv):
                 return {
-                    "A": (SimpleNamespace(name="SmartShunt", address="A"), SimpleNamespace(rssi=-70, local_name=None)),
-                    "B": (SimpleNamespace(name=None, address="B"), SimpleNamespace(rssi=None, local_name=None)),
+                    "A": (
+                        SimpleNamespace(name="SmartShunt", address="A"),
+                        SimpleNamespace(rssi=-70, local_name=None),
+                    ),
+                    "B": (
+                        SimpleNamespace(name=None, address="B"),
+                        SimpleNamespace(rssi=None, local_name=None),
+                    ),
                 }
 
         monkeypatch.setattr(scanner_mod, "BleakScanner", FakeScanner)
@@ -176,9 +182,18 @@ class TestScanner:
                 self.cb = detection_callback
 
             async def start(self):
-                self.cb(SimpleNamespace(name="SmartShunt HQ1", address="A"), SimpleNamespace(rssi=-60, local_name=None))
-                self.cb(SimpleNamespace(name=None, address="B"), SimpleNamespace(rssi=-50, local_name="BMV-712"))
-                self.cb(SimpleNamespace(name="TV", address="C"), SimpleNamespace(rssi=-10, local_name=None))
+                self.cb(
+                    SimpleNamespace(name="SmartShunt HQ1", address="A"),
+                    SimpleNamespace(rssi=-60, local_name=None),
+                )
+                self.cb(
+                    SimpleNamespace(name=None, address="B"),
+                    SimpleNamespace(rssi=-50, local_name="BMV-712"),
+                )
+                self.cb(
+                    SimpleNamespace(name="TV", address="C"),
+                    SimpleNamespace(rssi=-10, local_name=None),
+                )
 
             async def stop(self):
                 pass
@@ -219,8 +234,6 @@ def test_consumed_ah_is_measurement(mock_mqtt):
     pub = MQTTPublisher(MQTTConfig())
     pub.client = MagicMock()
     pub.publish_discovery()
-    payloads = {
-        c.args[0]: json.loads(c.args[1]) for c in pub.client.publish.call_args_list
-    }
+    payloads = {c.args[0]: json.loads(c.args[1]) for c in pub.client.publish.call_args_list}
     consumed = payloads["homeassistant/sensor/victron_smartshunt/consumed_ah/config"]
     assert consumed["state_class"] == "measurement"
