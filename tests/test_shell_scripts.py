@@ -2314,3 +2314,9 @@ class TestAddonUninstall:
         script = REPO / "plugins" / plugin / "uninstall.sh"
         assert os.access(script, os.X_OK)
         assert run_bash(f"bash -n {script}").returncode == 0
+
+
+def test_bot_container_may_send_unprivileged_ping():
+    text = (Path(__file__).resolve().parent.parent / "deploy-edge-server.sh").read_text()
+    bot_block = text[text.index("  telegram-bot:") :]
+    assert "net.ipv4.ping_group_range=0 2147483647" in bot_block.split("\nEOF")[0]

@@ -36,8 +36,13 @@ pass_config = click.make_pass_decorator(Config, ensure=True)
 
 
 @click.group()
-@click.option("--config", "-c", "config_path", type=click.Path(exists=True, path_type=Path),
-              help="Config file path (default: ~/.config/renogy-rover.yaml)")
+@click.option(
+    "--config",
+    "-c",
+    "config_path",
+    type=click.Path(exists=True, path_type=Path),
+    help="Config file path (default: ~/.config/renogy-rover.yaml)",
+)
 @click.version_option(version=__version__)
 @click.pass_context
 def cli(ctx, config_path):
@@ -147,6 +152,7 @@ def read(ctx, address: str, timeout: float, continuous: bool, interval: float, m
     mqtt_pub = None
     if mqtt:
         from .mqtt import MQTTPublisher
+
         click.echo(f"Connecting to MQTT broker {config.mqtt.host}:{config.mqtt.port}...")
         try:
             mqtt_pub = MQTTPublisher(config.mqtt)
@@ -248,8 +254,14 @@ def config_cmd(ctx, address, device_id, poll_interval, mqtt_host, mqtt_port, mqt
     """Show or update configuration."""
     config: Config = ctx.obj["config"]
 
-    if show or (not address and device_id is None and poll_interval is None
-                and not mqtt_host and not mqtt_port and not mqtt_user):
+    if show or (
+        not address
+        and device_id is None
+        and poll_interval is None
+        and not mqtt_host
+        and not mqtt_port
+        and not mqtt_user
+    ):
         # Show current config
         click.echo("Configuration:")
         click.echo(f"  Address:       {config.address or '(not set)'}")
@@ -413,11 +425,11 @@ def service(ctx, no_mqtt: bool):
         last_log = now
 
     try:
-        run_async(reader.poll_continuous(
-            on_reading,
-            interval=float(config.poll_interval),
-            stop_event=stop_event
-        ))
+        run_async(
+            reader.poll_continuous(
+                on_reading, interval=float(config.poll_interval), stop_event=stop_event
+            )
+        )
     except KeyboardInterrupt:
         pass
     finally:

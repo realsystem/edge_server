@@ -36,8 +36,13 @@ pass_config = click.make_pass_decorator(Config, ensure=True)
 
 
 @click.group()
-@click.option("--config", "-c", "config_path", type=click.Path(exists=True, path_type=Path),
-              help="Config file path (default: ~/.config/victron-shunt.yaml)")
+@click.option(
+    "--config",
+    "-c",
+    "config_path",
+    type=click.Path(exists=True, path_type=Path),
+    help="Config file path (default: ~/.config/victron-shunt.yaml)",
+)
 @click.version_option(version=__version__)
 @click.pass_context
 def cli(ctx, config_path):
@@ -153,6 +158,7 @@ def read(ctx, address: str, key: str, timeout: float, continuous: bool, mqtt: bo
     mqtt_pub = None
     if mqtt:
         from .mqtt import MQTTPublisher
+
         click.echo(f"Connecting to MQTT broker {config.mqtt.host}:{config.mqtt.port}...")
         try:
             mqtt_pub = MQTTPublisher(config.mqtt)

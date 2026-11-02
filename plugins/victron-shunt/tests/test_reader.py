@@ -1,6 +1,5 @@
 """Tests for reader module."""
 
-
 from victron_shunt.reader import ShuntReading, VictronReader
 
 

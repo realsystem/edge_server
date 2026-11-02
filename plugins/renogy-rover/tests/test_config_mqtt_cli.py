@@ -161,9 +161,18 @@ class TestScanner:
                 self.cb = detection_callback
 
             async def start(self):
-                self.cb(SimpleNamespace(name="BT-TH-123", address="A"), SimpleNamespace(rssi=-50, local_name=None))
-                self.cb(SimpleNamespace(name="BT-TH-123", address="A"), SimpleNamespace(rssi=-50, local_name=None))
-                self.cb(SimpleNamespace(name="Phone", address="B"), SimpleNamespace(rssi=-30, local_name=None))
+                self.cb(
+                    SimpleNamespace(name="BT-TH-123", address="A"),
+                    SimpleNamespace(rssi=-50, local_name=None),
+                )
+                self.cb(
+                    SimpleNamespace(name="BT-TH-123", address="A"),
+                    SimpleNamespace(rssi=-50, local_name=None),
+                )
+                self.cb(
+                    SimpleNamespace(name="Phone", address="B"),
+                    SimpleNamespace(rssi=-30, local_name=None),
+                )
 
             async def stop(self):
                 pass
@@ -198,7 +207,9 @@ class TestCLI:
         async def fake_read(self, timeout=30.0):
             return reading()
 
-        monkeypatch.setattr("renogy_rover.cli.RenogyReader.__init__", lambda self, a, device_id=255: None)
+        monkeypatch.setattr(
+            "renogy_rover.cli.RenogyReader.__init__", lambda self, a, device_id=255: None
+        )
         monkeypatch.setattr("renogy_rover.cli.RenogyReader.read_once", fake_read)
         result = CliRunner().invoke(cli, ["read", "--address", "AA"])
         assert result.exit_code == 0, result.output

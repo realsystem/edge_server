@@ -27,6 +27,10 @@ Environment:
   EDGE_SERVER_DIR       default /opt/edge-server (the stack directory)
   STORAGE_PATH          default /media/frigate (recordings, for the disk check)
   STORAGE_LABEL         host path shown in /status for that disk, default /mnt/storage
+  HA_HOST               address of the Home Assistant on the LAN (the Raspberry Pi):
+                        /status shows two lines, ping and HTTP on HA_PORT.
+                        Default 10.0.0.2; set another address, or empty to switch off.
+  HA_PORT               default 8123
   ALERT_DISK_FREE_PERCENT, ALERT_INTERVAL, ALERT_REPEAT_HOURS  see above
 """
 
@@ -41,6 +45,7 @@ import logging
 import os
 import re
 import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -51,6 +56,7 @@ import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -117,6 +123,9 @@ class Config:
     app_dir: Path = Path("/opt/edge-server")
     storage_path: Path = Path("/media/frigate")
     storage_label: str = "/mnt/storage"  # where the host mounts it; only shown in /status
+    ha_host: str = "10.0.0.2"  # Home Assistant on the LAN checked in /status; "" = off
+    ha_port: int = 8123
+    ha_timeout: float = 3.0
     proc: Path = Path("/proc")
     sys: Path = Path("/sys")
     api_url: str = "https://api.telegram.org"
@@ -178,6 +187,15 @@ class Config:
                 "ALERT_TEMP_C, ALERT_DISK_WEAR_PERCENT, ALERT_CONFIRM and "
                 "ALERT_WATCH_INTERVAL must be numbers"
             ) from None
+        ha_host = env.get("HA_HOST", cls.ha_host).strip()
+        if ha_host and not HOST_RE.match(ha_host):
+            raise ValueError("HA_HOST must be an IP address or host name")
+        try:
+            ha_port = int(env.get("HA_PORT", cls.ha_port))
+        except ValueError:
+            raise ValueError("HA_PORT must be a number") from None
+        if not 1 <= ha_port <= 65535:
+            raise ValueError("HA_PORT must be between 1 and 65535")
         watch = env.get("ALERT_WATCH", "true").strip().lower() not in ("false", "0", "no", "off")
         return cls(
             token=token,
@@ -186,6 +204,8 @@ class Config:
             app_dir=Path(env.get("EDGE_SERVER_DIR", str(cls.app_dir))),
             storage_path=Path(env.get("STORAGE_PATH", str(cls.storage_path))),
             storage_label=env.get("STORAGE_LABEL", cls.storage_label).strip() or cls.storage_label,
+            ha_host=ha_host,
+            ha_port=ha_port,
             proc=Path(env.get("HOST_PROC", str(cls.proc))),
             sys=Path(env.get("HOST_SYS", str(cls.sys))),
             api_url=env.get("TELEGRAM_API_URL", cls.api_url).rstrip("/"),
@@ -449,6 +469,123 @@ def disk_line(label: str, path: Path) -> tuple[str, bool]:
     return f"{label}: {gib(free)} of {gib(total)} GB free ({pct_free:.0f}%)", pct_free < 10
 
 
+HOST_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
+
+
+def icmp_checksum(data: bytes) -> int:
+    if len(data) % 2:
+        data += b"\0"
+    total = sum(struct.unpack(f"!{len(data) // 2}H", data))
+    total = (total & 0xFFFF) + (total >> 16)
+    total = (total & 0xFFFF) + (total >> 16)
+    return int(~total & 0xFFFF)
+
+
+def ping_host(host: str, count: int = 3, timeout: float = 1.0) -> tuple[int, int, float] | None:
+    """Echo requests over an unprivileged ICMP socket (no ping binary, no capability).
+    Returns (replies, sent, average ms), or None if this container may not send ICMP.
+    Raises OSError if the name does not resolve."""
+    address = socket.gethostbyname(host)
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_ICMP)
+    except OSError:
+        return None  # net.ipv4.ping_group_range does not cover this process
+    sock.settimeout(timeout)
+    rtts: list[float] = []
+    try:
+        for seq in range(1, count + 1):
+            header = struct.pack("!BBHHH", 8, 0, 0, 0, seq)
+            payload = b"edge-server-status"
+            checksum = icmp_checksum(header + payload)
+            packet = struct.pack("!BBHHH", 8, 0, checksum, 0, seq) + payload
+            started = time.monotonic()
+            try:
+                sock.sendto(packet, (address, 0))
+            except PermissionError:
+                return None  # sending is refused (ping_group_range, a firewall)
+            except OSError:
+                continue  # network unreachable: counts as lost
+            deadline = started + timeout
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    break
+                sock.settimeout(left)
+                try:
+                    data, _ = sock.recvfrom(512)
+                except OSError:  # timeout
+                    break
+                # an ICMP datagram socket delivers the ICMP message without the IP header
+                if len(data) >= 8 and data[0] == 0 and struct.unpack("!H", data[6:8])[0] == seq:
+                    rtts.append((time.monotonic() - started) * 1000)
+                    break
+    finally:
+        sock.close()
+    return len(rtts), count, (sum(rtts) / len(rtts) if rtts else 0.0)
+
+
+def http_probe(host: str, port: int, timeout: float) -> tuple[int | None, float, str]:
+    """GET / on host:port. (status code or None, milliseconds, short error)."""
+    started = time.monotonic()
+    try:
+        with urllib.request.urlopen(
+            f"http://{host}:{port}/", timeout=timeout
+        ) as response:  # noqa: S310
+            return response.status, (time.monotonic() - started) * 1000, ""
+    except urllib.error.HTTPError as e:  # it answered, e.g. 401 or 503
+        return e.code, (time.monotonic() - started) * 1000, ""
+    except urllib.error.URLError as e:
+        reason = e.reason
+        if isinstance(reason, ConnectionRefusedError):
+            return None, (time.monotonic() - started) * 1000, "connection refused"
+        if isinstance(reason, (TimeoutError, socket.timeout)):
+            return None, (time.monotonic() - started) * 1000, "timed out"
+        return None, (time.monotonic() - started) * 1000, str(reason)[:60]
+    except (TimeoutError, OSError) as e:
+        text = "timed out" if isinstance(e, TimeoutError) else str(e)[:60]
+        return None, (time.monotonic() - started) * 1000, text
+
+
+def home_assistant_lines(cfg: Config) -> tuple[list[str], list[str]]:
+    """Two compact lines for /status (ping, HTTP) and the problems they imply."""
+    host, port = cfg.ha_host, cfg.ha_port
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        ping_job = pool.submit(ping_host, host, 3, 1.0)
+        http_job = pool.submit(http_probe, host, port, cfg.ha_timeout)
+        try:
+            ping = ping_job.result()
+            ping_error = ""
+        except OSError:
+            ping, ping_error = None, "cannot resolve the name"
+        code, ms, error = http_job.result()
+
+    problems: list[str] = []
+    label = f"home assistant {host}"
+    if ping_error:
+        ping_line = f"{label} ping: {ping_error}"
+        problems.append(f"Home Assistant {host}: {ping_error}")
+    elif ping is None:
+        ping_line = f"{label} ping: n/a (this container may not send ICMP)"
+    else:
+        replies, sent, avg = ping
+        if replies:
+            ping_line = f"{label} ping: {replies}/{sent} replies, avg {avg:.0f} ms"
+            if replies < sent:
+                problems.append(f"Home Assistant {host}: lost {sent - replies} of {sent} pings")
+        else:
+            ping_line = f"{label} ping: no reply (0/{sent})"
+            problems.append(f"Home Assistant {host} does not answer ping")
+
+    if code is None:
+        http_line = f"{label}:{port} HTTP: {error or 'no answer'} ({ms:.0f} ms)"
+        problems.append(f"Home Assistant web interface ({host}:{port}): {error or 'no answer'}")
+    else:
+        http_line = f"{label}:{port} HTTP {code} in {ms:.0f} ms"
+        if code >= 500:
+            problems.append(f"Home Assistant web interface answers HTTP {code}")
+    return [ping_line, http_line], problems
+
+
 def storage_usage_line(label: str, path: Path) -> str:
     """How full the storage disk is, as used space (disk_line reports free space)."""
     try:
@@ -623,6 +760,11 @@ def build_status(cfg: Config, sleep: Callable[[float], None] = time.sleep) -> st
             problems.append(f"{label} almost full")
         if label == "recordings":
             host.append(storage_usage_line(cfg.storage_label, path))
+
+    if cfg.ha_host:
+        ha_lines, ha_problems = home_assistant_lines(cfg)
+        host += ha_lines
+        problems += ha_problems
 
     frigate, frigate_problems = frigate_status(cfg)
     problems += frigate_problems

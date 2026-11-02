@@ -39,7 +39,9 @@ def _call(parsed: Any, method: str) -> Any:
     return fn() if callable(fn) else None
 
 
-def parse_advertisement(manufacturer_data: Dict[int, bytes], encryption_key: str) -> Optional[ShuntReading]:
+def parse_advertisement(
+    manufacturer_data: Dict[int, bytes], encryption_key: str
+) -> Optional[ShuntReading]:
     """Decode a Victron "instant readout" advertisement into a ShuntReading.
 
     Returns None when the advertisement is not from a Victron device or is of a

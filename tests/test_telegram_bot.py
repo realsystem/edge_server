@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import re
+import struct
 import sys
 import threading
 import time
@@ -133,6 +134,7 @@ def host(tmp_path):
 
 
 def make_bot(telegram, frigate, host, **overrides):
+    overrides.setdefault("ha_host", "")  # the built-in default would probe a real address
     cfg = bot.Config(
         token=TOKEN,
         allowed=frozenset({ALICE}),
@@ -1810,3 +1812,221 @@ class TestHelpAndMenu:
         plain = make_bot(telegram, frigate, host)
         assert not {"restart", "logs"} & {c["command"] for c in plain.commands()}
         assert "/restart" not in plain.help_text()
+
+
+# ------------------------------------------------------ Home Assistant in /status
+
+
+class FakeIcmpSocket:
+    """Stands in for an ICMP datagram socket: answers the sequence numbers in ``answer``."""
+
+    answer: set[int] = set()
+    refuse = False
+    sent: list = []
+
+    def __init__(self, *a, **kw):
+        if FakeIcmpSocket.refuse:
+            raise PermissionError("ping_group_range")
+        self.replies: list[bytes] = []
+
+    def settimeout(self, t):
+        self.timeout = t
+
+    def sendto(self, packet, addr):
+        FakeIcmpSocket.sent.append((packet, addr))
+        seq = struct.unpack("!H", packet[6:8])[0]
+        if seq in FakeIcmpSocket.answer:
+            self.replies.append(struct.pack("!BBHHH", 0, 0, 0, 0, seq) + packet[8:])
+
+    def recvfrom(self, n):
+        if not self.replies:
+            raise TimeoutError("timed out")
+        return self.replies.pop(0), ("10.0.0.2", 0)
+
+    def close(self):
+        pass
+
+
+@pytest.fixture
+def icmp(monkeypatch):
+    FakeIcmpSocket.answer, FakeIcmpSocket.refuse, FakeIcmpSocket.sent = {1, 2, 3}, False, []
+    monkeypatch.setattr(bot.socket, "socket", FakeIcmpSocket)
+    monkeypatch.setattr(bot.socket, "gethostbyname", lambda h: h)
+    return FakeIcmpSocket
+
+
+class TestPing:
+    def test_checksum_matches_rfc_1071(self):
+        assert bot.icmp_checksum(bytes.fromhex("0001f203f4f5f6f7")) == 0x220D
+        assert bot.icmp_checksum(b"\x08\x00\x00\x00\x00\x00\x00\x01x") != 0  # odd length is padded
+
+    def test_all_replies(self, icmp):
+        replies, sent, avg = bot.ping_host("10.0.0.2")
+        assert (replies, sent) == (3, 3) and avg >= 0
+        packet, addr = icmp.sent[0]
+        assert addr == ("10.0.0.2", 0) and packet[0] == 8  # echo request
+        assert bot.icmp_checksum(packet) == 0  # a valid packet sums to zero
+
+    def test_some_lost(self, icmp):
+        icmp.answer = {2}
+        assert bot.ping_host("10.0.0.2")[:2] == (1, 3)
+
+    def test_nothing_comes_back(self, icmp):
+        icmp.answer = set()
+        assert bot.ping_host("10.0.0.2", timeout=0.05)[:2] == (0, 3)
+
+    def test_a_reply_to_another_ping_is_ignored(self, icmp):
+        icmp.answer = {9}  # replies with a different sequence number
+        assert bot.ping_host("10.0.0.2", count=1, timeout=0.05)[:2] == (0, 1)
+
+    def test_not_permitted_means_not_available(self, icmp):
+        icmp.refuse = True
+        assert bot.ping_host("10.0.0.2") is None
+
+    def test_unresolvable_name(self, monkeypatch):
+        def fail(host):
+            raise OSError("no such host")
+
+        monkeypatch.setattr(bot.socket, "gethostbyname", fail)
+        with pytest.raises(OSError):
+            bot.ping_host("nohost.invalid")
+
+    def test_a_real_ping_of_this_machine_when_the_kernel_allows_it(self):
+        try:
+            result = bot.ping_host("127.0.0.1", count=1, timeout=1.0)
+        except OSError:
+            pytest.skip("no loopback")
+        if result is None:
+            pytest.skip("unprivileged ICMP is not allowed here (net.ipv4.ping_group_range)")
+        assert result[:2] == (1, 1)
+
+
+class TestHttpProbe:
+    @pytest.fixture
+    def server(self):
+        codes = {"code": 200, "delay": 0.0}
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                time.sleep(codes["delay"])
+                self.send_response(codes["code"])
+                self.end_headers()
+                self.wfile.write(b"<html></html>")
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        yield codes, srv.server_address[1]
+        srv.shutdown()
+        srv.server_close()
+
+    @pytest.mark.parametrize("code", [200, 401, 503])
+    def test_status_codes_are_reported(self, server, code):
+        codes, port = server
+        codes["code"] = code
+        got, ms, error = bot.http_probe("127.0.0.1", port, 3.0)
+        assert got == code and error == "" and ms >= 0
+
+    def test_refused(self):
+        import socket as socket_module
+
+        with socket_module.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        got, _, error = bot.http_probe("127.0.0.1", port, 1.0)  # nothing listens there now
+        assert got is None and error == "connection refused"
+
+    def test_timeout(self, server):
+        codes, port = server
+        codes["delay"] = 1.0
+        got, _, error = bot.http_probe("127.0.0.1", port, 0.2)
+        assert got is None and error == "timed out"
+
+
+class TestHomeAssistantLines:
+    def lines(self, monkeypatch, ping, probe):
+        monkeypatch.setattr(bot, "ping_host", lambda *a, **k: ping)
+        monkeypatch.setattr(bot, "http_probe", lambda *a, **k: probe)
+        cfg = bot.Config(token=TOKEN, ha_host="10.0.0.2")
+        return bot.home_assistant_lines(cfg)
+
+    def test_healthy(self, monkeypatch):
+        lines, problems = self.lines(monkeypatch, (3, 3, 1.4), (200, 85.0, ""))
+        assert lines == [
+            "home assistant 10.0.0.2 ping: 3/3 replies, avg 1 ms",
+            "home assistant 10.0.0.2:8123 HTTP 200 in 85 ms",
+        ]
+        assert problems == []
+
+    def test_401_counts_as_up_and_500_does_not(self, monkeypatch):
+        assert self.lines(monkeypatch, (3, 3, 1.0), (401, 5.0, ""))[1] == []
+        _, problems = self.lines(monkeypatch, (3, 3, 1.0), (503, 5.0, ""))
+        assert problems == ["Home Assistant web interface answers HTTP 503"]
+
+    def test_down(self, monkeypatch):
+        lines, problems = self.lines(monkeypatch, (0, 3, 0.0), (None, 3000.0, "timed out"))
+        assert lines[0] == "home assistant 10.0.0.2 ping: no reply (0/3)"
+        assert lines[1] == "home assistant 10.0.0.2:8123 HTTP: timed out (3000 ms)"
+        assert len(problems) == 2
+
+    def test_packet_loss_is_a_problem(self, monkeypatch):
+        _, problems = self.lines(monkeypatch, (2, 3, 1.0), (200, 5.0, ""))
+        assert problems == ["Home Assistant 10.0.0.2: lost 1 of 3 pings"]
+
+    def test_ping_not_available_is_not_a_problem(self, monkeypatch):
+        lines, problems = self.lines(monkeypatch, None, (200, 5.0, ""))
+        assert "n/a" in lines[0] and problems == []
+
+    def test_unresolvable_name(self, monkeypatch):
+        def fail(*a, **k):
+            raise OSError("nope")
+
+        monkeypatch.setattr(bot, "ping_host", fail)
+        monkeypatch.setattr(bot, "http_probe", lambda *a, **k: (None, 1.0, "no route"))
+        lines, problems = bot.home_assistant_lines(bot.Config(token=TOKEN, ha_host="ha.local"))
+        assert "cannot resolve the name" in lines[0] and len(problems) == 2
+
+
+class TestHomeAssistantInStatus:
+    def test_off_when_empty(self, telegram, frigate, host):
+        text = bot.build_status(make_bot(telegram, frigate, host, ha_host="").cfg, lambda s: None)
+        assert "home assistant" not in text.lower()
+
+    def test_two_lines_in_the_host_section(self, telegram, frigate, host, monkeypatch):
+        monkeypatch.setattr(bot, "ping_host", lambda *a, **k: (3, 3, 0.8))
+        monkeypatch.setattr(bot, "http_probe", lambda *a, **k: (200, 42.0, ""))
+        cfg = make_bot(telegram, frigate, host, ha_host="10.0.0.2").cfg
+        text = bot.build_status(cfg, lambda s: None)
+        ha = [line.strip() for line in text.splitlines() if "home assistant" in line.lower()]
+        assert ha == [
+            "home assistant 10.0.0.2 ping: 3/3 replies, avg 1 ms",
+            "home assistant 10.0.0.2:8123 HTTP 200 in 42 ms",
+        ]
+        assert "Edge server: OK" in text
+        assert text.index("Host") < text.index(ha[0]) < text.index("Frigate")
+
+    def test_an_unreachable_home_assistant_is_a_problem_on_top(
+        self, telegram, frigate, host, monkeypatch
+    ):
+        monkeypatch.setattr(bot, "ping_host", lambda *a, **k: (0, 3, 0.0))
+        monkeypatch.setattr(bot, "http_probe", lambda *a, **k: (None, 3000.0, "connection refused"))
+        cfg = make_bot(telegram, frigate, host, ha_host="10.0.0.2", ha_port=8123).cfg
+        text = bot.build_status(cfg, lambda s: None)
+        assert "2 problem(s)" in text
+        assert "Home Assistant 10.0.0.2 does not answer ping" in text
+        assert "connection refused" in text
+
+    def test_config(self):
+        env = {"TELEGRAM_BOT_TOKEN": TOKEN}
+        assert bot.Config.from_env(env).ha_host == "10.0.0.2"  # built-in default
+        assert bot.Config.from_env({**env, "HA_HOST": ""}).ha_host == ""  # switched off
+        cfg = bot.Config.from_env({**env, "HA_HOST": " 10.0.0.2 ", "HA_PORT": "8124"})
+        assert (cfg.ha_host, cfg.ha_port) == ("10.0.0.2", 8124)
+        for bad in ("10.0.0.2/x", "a b", "http://x", "x;id", "-x"):
+            with pytest.raises(ValueError, match="HA_HOST"):
+                bot.Config.from_env({**env, "HA_HOST": bad})
+        for bad in ("abc", "0", "70000"):
+            with pytest.raises(ValueError, match="HA_PORT"):
+                bot.Config.from_env({**env, "HA_HOST": "10.0.0.2", "HA_PORT": bad})

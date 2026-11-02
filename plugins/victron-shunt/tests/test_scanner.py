@@ -1,6 +1,5 @@
 """Tests for scanner module."""
 
-
 from victron_shunt.scanner import BluetoothStatus, VictronDevice, VICTRON_PREFIXES
 
 
@@ -47,4 +46,6 @@ class TestVictronPrefixes:
         ]
         for name, should_match in test_names:
             matches = any(name.startswith(prefix) for prefix in VICTRON_PREFIXES)
-            assert matches == should_match, f"Name '{name}' match={matches}, expected={should_match}"
+            assert (
+                matches == should_match
+            ), f"Name '{name}' match={matches}, expected={should_match}"

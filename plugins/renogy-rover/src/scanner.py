@@ -34,9 +34,7 @@ RENOGY_PREFIXES = ("BT-TH", "RENOGY", "Renogy", "RNG")
 async def check_bluetooth() -> BluetoothStatus:
     """Check if Bluetooth is available and working."""
     if BleakScanner is None:
-        return BluetoothStatus(
-            available=False, error="bleak not installed (pip install bleak)"
-        )
+        return BluetoothStatus(available=False, error="bleak not installed (pip install bleak)")
 
     try:
         scanner = BleakScanner()

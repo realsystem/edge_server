@@ -168,7 +168,7 @@ A small bot that runs next to Frigate and answers you in a Telegram chat:
 
 | Command | Answer |
 |---|---|
-| `/status` | One screen: load, CPU, memory, disk (free space, plus a separate `storage /mnt/storage` line with used space), temperature, AC/battery, Frigate detector speed and every camera's FPS, with a list of problems on top |
+| `/status` | One screen: load, CPU, memory, disk (free space, plus a separate `storage /mnt/storage` line with used space), temperature, AC/battery, Frigate detector speed and every camera's FPS, with a list of problems on top; with `HA_HOST` set, two more lines for Home Assistant (ping and HTTP, see below) |
 | `/diag` | The full diagnostics report from `collect-diagnostics.sh`, sent as a file (about 15 s): hardware, load, Docker, Frigate, config, and the host's **firewall rules, open ports**, SSH settings and service state |
 | `/testalert [percent]` | Sends you a simulated low-disk alert (default 5% free) plus the real disk state, so you can check delivery without filling a disk |
 | `/reboot <code>` | Reboots the laptop; needs a code from your authenticator app (off until set up, see below) |
@@ -191,6 +191,17 @@ Setup:
    ```
 3. Open your bot in Telegram, send `/id`, put the number it answers into
    `TELEGRAM_ALLOWED_IDS` (several ids: comma-separated) and run the deploy again.
+
+**Home Assistant check.** Built in for the Raspberry Pi at `10.0.0.2`, port 8123, with
+nothing to configure. To change it, put `HA_HOST=<address>` (and `HA_PORT=<port>`) into
+`.telegram` and run the deploy; `HA_HOST=` (empty) switches the check off. `/status`
+shows two lines under Host, for example
+`home assistant 10.0.0.2 ping: 3/3 replies, avg 1 ms` and
+`home assistant 10.0.0.2:8123 HTTP 200 in 85 ms`. Lost pings, no answer or an HTTP 5xx
+show up in the problem list on top (a 401/403 still counts as up). The ping is sent by
+the bot container itself; the deploy sets `net.ipv4.ping_group_range` for it so it
+needs no extra privileges. If the kernel refuses, the ping line says `n/a` and the
+HTTP line still works.
 
 **Low-disk alerts.** Without being asked, the bot messages every user in
 `TELEGRAM_ALLOWED_IDS` when the recordings or system disk has less than 15% free,

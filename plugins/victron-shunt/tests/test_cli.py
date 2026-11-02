@@ -1,6 +1,5 @@
 """Tests for CLI module."""
 
-
 from click.testing import CliRunner
 
 import pytest
@@ -63,11 +62,7 @@ class TestCLI:
         assert "address and key required" in result.output
 
     def test_read_invalid_key_length(self, runner):
-        result = runner.invoke(cli, [
-            "read",
-            "--address", "AA:BB:CC:DD:EE:FF",
-            "--key", "tooshort"
-        ])
+        result = runner.invoke(cli, ["read", "--address", "AA:BB:CC:DD:EE:FF", "--key", "tooshort"])
         assert result.exit_code == 1
         assert "Invalid key length" in result.output
 
@@ -79,24 +74,39 @@ class TestConfigCommand:
 
     def test_config_save(self, runner, tmp_path):
         config_file = tmp_path / "test-config.yaml"
-        runner.invoke(cli, [
-            "--config", str(config_file),
-            "config",
-            "--address", "AA:BB:CC:DD:EE:FF",
-            "--key", "0123456789abcdef0123456789abcdef",
-        ], catch_exceptions=False)
+        runner.invoke(
+            cli,
+            [
+                "--config",
+                str(config_file),
+                "config",
+                "--address",
+                "AA:BB:CC:DD:EE:FF",
+                "--key",
+                "0123456789abcdef0123456789abcdef",
+            ],
+            catch_exceptions=False,
+        )
 
         # May fail if config path doesn't exist, but shouldn't crash
         # The actual save goes to ~/.config/victron-shunt.yaml
 
     def test_config_with_mqtt(self, runner):
-        result = runner.invoke(cli, [
-            "config",
-            "--address", "AA:BB:CC:DD:EE:FF",
-            "--key", "0123456789abcdef0123456789abcdef",
-            "--mqtt-host", "mqtt.test.com",
-            "--mqtt-port", "8883",
-            "--mqtt-user", "testuser",
-        ])
+        result = runner.invoke(
+            cli,
+            [
+                "config",
+                "--address",
+                "AA:BB:CC:DD:EE:FF",
+                "--key",
+                "0123456789abcdef0123456789abcdef",
+                "--mqtt-host",
+                "mqtt.test.com",
+                "--mqtt-port",
+                "8883",
+                "--mqtt-user",
+                "testuser",
+            ],
+        )
         # Should complete without error
         assert "Config saved" in result.output or "validation" in result.output.lower()

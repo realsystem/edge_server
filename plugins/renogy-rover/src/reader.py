@@ -11,6 +11,7 @@ from typing import Callable, Optional
 
 try:
     from bleak import BleakClient
+
     HAS_BLEAK = True
 except ImportError:
     HAS_BLEAK = False
