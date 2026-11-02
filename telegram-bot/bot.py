@@ -477,7 +477,7 @@ def icmp_checksum(data: bytes) -> int:
     total = sum(struct.unpack(f"!{len(data) // 2}H", data))
     total = (total & 0xFFFF) + (total >> 16)
     total = (total & 0xFFFF) + (total >> 16)
-    return ~total & 0xFFFF
+    return int(~total & 0xFFFF)
 
 
 def ping_host(host: str, count: int = 3, timeout: float = 1.0) -> tuple[int, int, float] | None:
