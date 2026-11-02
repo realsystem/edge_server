@@ -1355,6 +1355,10 @@ EOF
       - ALL
     security_opt:
       - no-new-privileges:true
+    sysctls:
+      # lets /status ping HA_HOST without the ping binary or NET_RAW: the bot sends
+      # echo requests over an unprivileged ICMP socket
+      - net.ipv4.ping_group_range=0 2147483647
     env_file: ./.telegram
     environment:
       - TZ=${TIMEZONE:-America/Los_Angeles}
