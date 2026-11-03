@@ -518,6 +518,32 @@ sudo ./deploy-edge-server.sh --config fleet.yaml --node my-node
   `Edge server (my-node)`). They never become paths, container names or systemd units.
 - Needs `python3-yaml`; the script installs it when run as root.
 
+#### Several nodes: signed heartbeats and `/fleet`
+
+With two or more nodes in the file, each node's bot also talks to the others: every minute
+it sends a small signed heartbeat over Tailscale (and over the site LAN to nodes at the same
+site) and answers theirs. Nothing is set up for a one-node file or without a fleet file.
+
+1. **Deploy each node** (`--config fleet.yaml --node <name>`). The deploy makes the node's
+   Ed25519 signing key (`/opt/edge-server/node.key`, root-only, never copied out or
+   replaced) and prints its public half; it is also in `/opt/edge-server/node.pub`.
+2. **Put each public key into the file** under `nodes.<name>.public_key`, copy the same
+   file to every node and deploy again (or `/redeploy`). `--check` warns about nodes
+   without a key; the others refuse a message they cannot verify.
+3. **`/fleet` in Telegram** shows, per other node, the last contact and which paths
+   (Tailscale, LAN) worked, its `edge_server` version, whether it has the same fleet file
+   (by hash), its clock offset and any messages refused.
+
+How it is kept safe: a message is accepted only if it is addressed to the node, comes from
+a node in the file, has a valid signature, is fresh (not expired, not from the future,
+never valid longer than 10 minutes) and has an id not seen before; seen ids are kept on
+disk, so a restart does not reopen replays. Every answer is a signed acknowledgement. A
+message never runs anything. The port is `fleet.control_port` (default 7443), published
+only on the node's own LAN and Tailscale addresses; the existing Docker firewall already
+limits those to the local network and Tailscale. The deploy also starts Docker after
+`tailscaled`, so the Tailscale address exists when the container starts at boot.
+Alerts ("node down", "site unreachable") come in a later phase; this one only observes.
+
 ## Files
 
 **Orchestrator (runs on laptop):**
@@ -527,6 +553,7 @@ sudo ./deploy-edge-server.sh --config fleet.yaml --node my-node
 - `initial-setup.sh` — System setup (static IP, Docker, storage)
 - `deploy-edge-server.sh` — Deploy the stack (Frigate, Tailscale, firewall, Telegram bot; optional Home Assistant, MQTT)
 - `tools/fleet.py` — reads and checks the optional `fleet.yaml` for the deploy script (`examples/fleet.*.yaml`)
+- `telegram-bot/controlplane.py` — signed heartbeats between the nodes of a fleet (only used with two or more nodes)
 - `secrets.sh` — Encrypted secrets management on target
 
 **Plugins:**

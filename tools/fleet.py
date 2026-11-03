@@ -18,11 +18,15 @@ precedence. Needs PyYAML (``python3-yaml`` on Ubuntu). Nothing here touches the 
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
+import hashlib
 import ipaddress
 import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -33,6 +37,7 @@ IMPLEMENTED_ROLES = ("nvr", "power", "ha")  # archive and agent arrive in later 
 PACKAGINGS = ("host", "ha-addon")
 NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 UPSTREAM_REPO = "https://github.com/realsystem/edge_server.git"
+DEFAULT_CONTROL_PORT = 7443  # fleet.control_port; TCP, Tailscale and site LAN only
 
 # --- the known keys at every level. An unknown key is an error, never silently skipped.
 TOP_KEYS = {"schema_version", "fleet", "sites", "nodes"}
@@ -402,9 +407,21 @@ class Validator:
                     self.err(path + ("bot_id",), f"bot_id is also used by node '{bot_ids[bot_id]}'")
                 else:
                     bot_ids[bot_id] = name
-            for key in ("tailscale", "public_key"):
-                if key in node:
-                    self.need(path + (key,), node[key], str, key)
+            if "tailscale" in node:
+                self.need(path + ("tailscale",), node["tailscale"], str, "tailscale")
+            if "public_key" in node and self.need(
+                path + ("public_key",), node["public_key"], str, "public_key"
+            ):
+                try:
+                    ok = len(base64.b64decode(node["public_key"], validate=True)) == 32
+                except (binascii.Error, ValueError):
+                    ok = False
+                if not ok:
+                    self.err(
+                        path + ("public_key",),
+                        "public_key must be the node's Ed25519 key: base64 of 32 bytes "
+                        "(the deploy prints it, and keeps it in node.pub)",
+                    )
             lan = node.get("lan")
             if lan is not None:
                 try:
@@ -529,6 +546,14 @@ class Validator:
                         ("sites", site_name, "relays", i, "owner"),
                         f"relay owner '{owner}' is not a node at site {site_name}",
                     )
+        if len(nodes) > 1:
+            for name, node in nodes.items():
+                if isinstance(node, dict) and "public_key" not in node:
+                    self.warn(
+                        ("nodes", name),
+                        f"node {name} has no public_key: the other nodes refuse its messages "
+                        "until you add the key its deploy printed",
+                    )
         ha_by_site: dict[str, list[str]] = {}
         for name, node in nodes.items():
             if (
@@ -641,6 +666,9 @@ def settings(fleet: dict, node: str, role_override: list[str] | None = None) -> 
     put("EDGE_SITE", entry["site"])
     put("EDGE_OPERATORS", ",".join(str(o) for o in fleet["fleet"]["telegram"]["operators"]))
     put("FLEET_ROLES", ",".join(roles))
+    # the control plane (signed heartbeats) needs somebody to talk to
+    put("CONTROL_PLANE", len(fleet["nodes"]) > 1)
+    put("CONTROL_PORT", fleet["fleet"].get("control_port", DEFAULT_CONTROL_PORT))
     return out
 
 
@@ -698,6 +726,74 @@ def deploy_blockers(fleet: dict, node: str, role_override: list[str] | None) -> 
     if "nvr" not in roles:
         return [f"node {node} has no nvr role: this release always installs Frigate on a host"]
     return []
+
+
+# ---------------------------------------------------------------- what the bot gets to read
+
+
+def file_hash(text: bytes) -> str:
+    return hashlib.sha256(text).hexdigest()
+
+
+def _tailscale_ip(name: str | None = None) -> str:
+    """The Tailscale IPv4 address of ``name`` (this machine when None), or ""."""
+    cmd = ["tailscale", "ip", "-4"] + ([name] if name else [])
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    first = out.stdout.split()[:1]
+    if out.returncode != 0 or not first:
+        return ""
+    try:
+        return str(ipaddress.IPv4Address(first[0]))
+    except ValueError:
+        return ""
+
+
+def bot_config(
+    fleet: dict,
+    node: str,
+    raw: bytes,
+    version: str = "",
+    resolve: Any = _tailscale_ip,
+) -> tuple[dict, list[str]]:
+    """What the bot reads about the fleet: this node, its peers and their addresses.
+
+    No secret in it. Returns ``(config, addresses)``; the addresses are where this node's
+    control port is published (its own LAN and Tailscale addresses).
+    """
+    entry = fleet["nodes"][node]
+    port = fleet["fleet"].get("control_port", DEFAULT_CONTROL_PORT)
+    peers = []
+    for name, other in fleet["nodes"].items():
+        if name == node:
+            continue
+        addrs: dict[str, str] = {}
+        if other.get("tailscale"):
+            addrs["tailscale"] = resolve(other["tailscale"]) or other["tailscale"]
+        if other.get("lan") and other["site"] == entry["site"]:
+            addrs["lan"] = other["lan"]
+        peers.append(
+            {
+                "name": name,
+                "site": other["site"],
+                "roles": node_roles(fleet, name),
+                "public_key": other.get("public_key", ""),
+                "addrs": addrs,
+            }
+        )
+    config = {
+        "node": node,
+        "site": entry["site"],
+        "roles": node_roles(fleet, node),
+        "port": port,
+        "version": version,
+        "fleet_hash": file_hash(raw),
+        "peers": peers,
+    }
+    own = [a for a in (entry.get("lan"), resolve(None)) if a]
+    return config, own
 
 
 # ---------------------------------------------------------------- one-node file from an install
@@ -819,6 +915,11 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("file")
         p.add_argument("--node", required=(name == "env"))
         p.add_argument("--role", default=None, help="comma-separated roles for this run")
+    b = sub.add_parser("bot-config", help="write the fleet description the bot reads (JSON)")
+    b.add_argument("file")
+    b.add_argument("--node", required=True)
+    b.add_argument("--out", required=True)
+    b.add_argument("--version", default="")
     w = sub.add_parser("write")
     w.add_argument("--node", required=True)
     w.add_argument("--out", required=True)
@@ -827,6 +928,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     w.add_argument("--ha-host", default="")
     args = parser.parse_args(argv)
+
+    if args.cmd == "bot-config":
+        try:
+            raw = Path(args.file).read_bytes()
+            fleet_data, _ = parse(raw.decode())
+            if args.node not in fleet_data["nodes"]:
+                raise FleetError([(0, f"node '{args.node}' is not in the file")])
+        except (OSError, UnicodeDecodeError) as exc:
+            report([(0, f"cannot read {args.file}: {exc}")], args.file)
+            return 1
+        except FleetError as exc:
+            report(exc.errors, args.file)
+            return 1
+        config, own = bot_config(fleet_data, args.node, raw, args.version)
+        tmp = Path(args.out + ".tmp")
+        tmp.write_text(json.dumps(config, indent=2) + "\n")
+        tmp.replace(args.out)
+        print("CONTROL_PUBLISH=" + shlex.quote(" ".join(own)))
+        return 0
 
     if args.cmd == "write":
         try:
