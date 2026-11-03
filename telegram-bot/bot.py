@@ -62,6 +62,7 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 log = logging.getLogger("edge-bot")
 
@@ -82,6 +83,11 @@ HELP = (
     "/testalert [percent] - simulate a low-disk alert, sent only to you\n"
     "/id - your Telegram user id"
 )
+FLEET_COMMAND = {
+    "command": "fleet",
+    "description": "The other nodes: contact, versions, fleet file",
+}
+FLEET_HELP = "\n/fleet - the other nodes of the fleet: last contact, versions, fleet file"
 REBOOT_COMMAND = {"command": "reboot", "description": "Reboot the laptop (authenticator code)"}
 REBOOT_HELP = "\n/reboot <code> - reboot the laptop; code from your authenticator app"
 REDEPLOY_COMMAND = {
@@ -147,6 +153,10 @@ class Config:
     alert_temp_c: float = 85.0  # CPU temperature alert level; 0 = off
     alert_wear_percent: float = 80.0  # alert when an SSD reports this much of its life used
     status_dir: Path = Path("/status")  # disk health written by the host (smart-report.py)
+    # fleet control plane (controlplane.py): on only when the host wrote status_dir/fleet.json
+    control_key: Path = Path("/run/edge/node.key")
+    control_state: Path = Path("/state")
+    control_bind: str = "0.0.0.0"  # noqa: S104  # the host publishes the port on LAN/Tailscale only
     smart_max_age: float = 3 * 86400.0  # alert if that file is older than this
     totp_secret: str = ""  # base32; empty = /reboot is off
     requests_dir: Path = Path("/requests")  # shared with the host-side reboot watcher
@@ -229,6 +239,9 @@ class Config:
             alert_temp_c=temp,
             alert_wear_percent=wear,
             status_dir=Path(env.get("STATUS_DIR", str(cls.status_dir))),
+            control_key=Path(env.get("CONTROL_KEY", str(cls.control_key))),
+            control_state=Path(env.get("CONTROL_STATE", str(cls.control_state))),
+            control_bind=env.get("CONTROL_BIND", cls.control_bind),
             totp_secret=totp_secret,
             requests_dir=Path(env.get("REQUESTS_DIR", str(cls.requests_dir))),
         )
@@ -909,6 +922,7 @@ class Bot:
     _active_jobs: set[str] = field(default_factory=set)
     _jobs_lock: threading.Lock = field(default_factory=threading.Lock)
     _logs_last: float = 0.0
+    control: Any = None  # controlplane.ControlPlane when this node is in a fleet
 
     # -- sending ----------------------------------------------------------
 
@@ -1199,13 +1213,55 @@ class Bot:
     # on the host notices it and reboots; nothing here can run commands on the host.
 
     def commands(self) -> list[dict]:
-        if not self.cfg.totp_secret:
-            return COMMANDS
-        return COMMANDS + [REBOOT_COMMAND, REDEPLOY_COMMAND, RESTART_COMMAND, LOGS_COMMAND]
+        commands = list(COMMANDS)
+        if self.control:
+            commands.append(FLEET_COMMAND)
+        if self.cfg.totp_secret:
+            commands += [REBOOT_COMMAND, REDEPLOY_COMMAND, RESTART_COMMAND, LOGS_COMMAND]
+        return commands
 
     def help_text(self) -> str:
         extra = REBOOT_HELP + REDEPLOY_HELP + RESTART_HELP + LOGS_HELP
-        return HELP + (extra if self.cfg.totp_secret else "")
+        text = HELP + (FLEET_HELP if self.control else "")
+        return text + (extra if self.cfg.totp_secret else "")
+
+    def cmd_fleet(self, chat_id: int) -> None:
+        if not self.control:
+            self.reply(
+                chat_id,
+                "This node is not part of a fleet: no fleet file with two or more nodes was "
+                "deployed here (README: Fleet file).",
+            )
+            return
+        self.reply(chat_id, self.control.fleet_text(), pre=True)
+
+    def setup_control(self) -> None:
+        """Start the control plane if the host described a fleet. Never stops the bot."""
+        config_path = self.cfg.status_dir / "fleet.json"
+        if not config_path.is_file():
+            return
+        try:
+            import controlplane  # next to this file; needs the cryptography package
+
+            config = controlplane.load_config(config_path)
+            key = controlplane.load_private_key(self.cfg.control_key)
+            boot = (read_text(self.cfg.proc / "sys/kernel/random/boot_id") or "").strip()
+            plane = controlplane.ControlPlane(
+                config,
+                key,
+                self.cfg.control_state,
+                uptime=lambda: self.uptime() or 0.0,
+                boot_id=boot,
+                clock=self.clock,
+            )
+            plane.start(self.cfg.control_bind)
+        except Exception as e:  # a broken fleet setup must not take /status down with it
+            log.error("fleet control plane is off: %s: %s", type(e).__name__, e)
+            return
+        self.control = plane
+        log.info(
+            "fleet control plane on: node %s, public key %s", plane.me, controlplane.public_b64(key)
+        )
 
     def uptime(self) -> float | None:
         text = read_text(self.cfg.proc / "uptime")
@@ -1791,6 +1847,8 @@ class Bot:
             thread = threading.Thread(target=self.cmd_diag, args=(chat_id,), daemon=True)
             thread.start()
             self.threads.append(thread)
+        elif command == "/fleet":
+            self.cmd_fleet(chat_id)
         elif command == "/testalert":
             self.cmd_testalert(chat_id, args)
         elif command == "/reboot":
@@ -1824,6 +1882,7 @@ class Bot:
         return offset
 
     def run(self) -> None:
+        self.setup_control()
         try:
             self.api.call("setMyCommands", {"commands": self.commands()})
         except TelegramError as e:

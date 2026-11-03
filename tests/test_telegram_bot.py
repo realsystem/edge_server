@@ -2052,3 +2052,109 @@ class TestFleetIdentity:
         # .telegram's own list wins, and an empty line there does not hide the fleet's
         assert bot.Config.from_env({**env, "TELEGRAM_ALLOWED_IDS": "5"}).allowed == {5}
         assert bot.Config.from_env({**env, "TELEGRAM_ALLOWED_IDS": ""}).allowed == {7, 8}
+
+
+class TestFleetCommand:
+    """/fleet and the control plane start-up. The protocol itself is in test_controlplane.py."""
+
+    @pytest.fixture
+    def fleet_files(self, host, monkeypatch):
+        pytest.importorskip("cryptography")
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+
+        monkeypatch.syspath_prepend(str(REPO / "telegram-bot"))
+        status = host / "status"
+        status.mkdir()
+        key = ed25519.Ed25519PrivateKey.generate()
+        (host / "node.key").write_bytes(
+            key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+        )
+        (status / "fleet.json").write_text(
+            json.dumps(
+                {
+                    "node": "site-a",
+                    "site": "s1",
+                    "roles": ["base", "nvr"],
+                    "port": 0,
+                    "version": "v1.2",
+                    "fleet_hash": "abcdef123456",
+                    "heartbeat_interval": 3600,
+                    "peers": [{"name": "site-b", "site": "s2", "public_key": "", "addrs": {}}],
+                }
+            )
+        )
+        return status
+
+    def fleet_bot(self, telegram, frigate, host, status):
+        return make_bot(
+            telegram,
+            frigate,
+            host,
+            status_dir=status,
+            control_key=host / "node.key",
+            control_state=host / "state",
+            control_bind="127.0.0.1",
+        )
+
+    def test_without_a_fleet_description_nothing_starts(self, telegram, frigate, host):
+        b = make_bot(telegram, frigate, host)
+        b.setup_control()
+        assert b.control is None
+        assert "fleet" not in [c["command"] for c in b.commands()]
+        b.handle_update(message(ALICE, "/fleet"))
+        assert "not part of a fleet" in telegram.texts()[-1]
+
+    def test_with_one_it_starts_and_the_command_shows_up(
+        self, telegram, frigate, host, fleet_files
+    ):
+        b = self.fleet_bot(telegram, frigate, host, fleet_files)
+        b.setup_control()
+        try:
+            assert b.control is not None and b.control.me == "site-a"
+            assert "fleet" in [c["command"] for c in b.commands()]
+            assert "/fleet" in b.help_text()
+            b.handle_update(message(ALICE, "/fleet"))
+            text = telegram.texts()[-1]
+            assert "Fleet: site-a (site s1), 1 other node(s)" in text
+            assert "site-b: no public_key in the fleet file" in text
+        finally:
+            b.control.shutdown()
+
+    def test_only_listed_users_may_ask(self, telegram, frigate, host, fleet_files):
+        b = self.fleet_bot(telegram, frigate, host, fleet_files)
+        b.setup_control()
+        try:
+            before = len(telegram.texts())
+            b.handle_update(message(EVE, "/fleet"))
+            assert "Fleet:" not in "".join(telegram.texts()[before:])
+        finally:
+            b.control.shutdown()
+
+    def test_a_missing_key_leaves_the_bot_running_without_the_control_plane(
+        self, telegram, frigate, host, fleet_files, caplog
+    ):
+        (host / "node.key").unlink()
+        b = self.fleet_bot(telegram, frigate, host, fleet_files)
+        b.setup_control()
+        assert b.control is None and "fleet control plane is off" in caplog.text
+        b.handle_update(message(ALICE, "/status"))
+        assert "Edge server" in telegram.texts()[-1]
+
+    def test_a_missing_crypto_library_does_the_same(
+        self, telegram, frigate, host, fleet_files, monkeypatch, caplog
+    ):
+        monkeypatch.setitem(sys.modules, "controlplane", None)
+        b = self.fleet_bot(telegram, frigate, host, fleet_files)
+        b.setup_control()
+        assert b.control is None and "fleet control plane is off" in caplog.text
+
+    def test_a_broken_description_does_the_same(self, telegram, frigate, host, fleet_files, caplog):
+        (fleet_files / "fleet.json").write_text("{not json")
+        b = self.fleet_bot(telegram, frigate, host, fleet_files)
+        b.setup_control()
+        assert b.control is None and "fleet control plane is off" in caplog.text

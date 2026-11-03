@@ -400,3 +400,118 @@ class TestCommandLine:
         target = tmp_path / "fleet.yaml"
         assert self.run("write", "--node", "edge-1", "--out", str(target)).returncode == 0
         assert self.run("check", str(target), "--node", "edge-1").returncode == 0
+
+
+class TestControlPlaneSettings:
+    KEY = "A" * 43 + "="  # 32 bytes of base64
+
+    def test_one_node_has_no_control_plane(self):
+        s = fleet.settings(fleet.parse(MINIMAL)[0], "node-1")
+        assert s["CONTROL_PLANE"] == "false" and s["CONTROL_PORT"] == "7443"
+
+    def test_two_nodes_do(self):
+        s = fleet.settings(fleet.parse(TWO_SITE)[0], "remote-nvr")
+        assert s["CONTROL_PLANE"] == "true"
+
+    def test_the_port_is_a_fleet_setting(self):
+        def change(d):
+            d["fleet"]["control_port"] = 9000
+
+        assert (
+            fleet.settings(fleet.parse(mutated(TWO_SITE, change))[0], "remote-nvr")["CONTROL_PORT"]
+            == "9000"
+        )
+
+        def low(d):
+            d["fleet"]["control_port"] = 80
+
+        assert "control_port must be a number from 1024" in messages(mutated(TWO_SITE, low))
+
+    def test_public_key_must_be_32_bytes_of_base64(self):
+        def good(d):
+            d["nodes"]["remote-nvr"]["public_key"] = self.KEY
+
+        fleet.parse(mutated(TWO_SITE, good))
+        for bad in ("short", "!!!!", "QUFB", True):
+
+            def change(d, bad=bad):
+                d["nodes"]["remote-nvr"]["public_key"] = bad
+
+            assert "public_key" in messages(mutated(TWO_SITE, change))
+
+    def test_a_missing_key_is_a_warning_only_in_a_fleet_of_several(self):
+        assert not any("public_key" in m for _, m in fleet.parse(MINIMAL)[1])
+        warned = [m for _, m in fleet.parse(TWO_SITE)[1] if "public_key" in m]
+        assert len(warned) == 4
+
+        def keys(d):
+            for node in d["nodes"].values():
+                node["public_key"] = self.KEY
+
+        assert not any("public_key" in m for _, m in fleet.parse(mutated(TWO_SITE, keys))[1])
+
+
+class TestBotConfig:
+    def resolver(self, table):
+        return lambda name=None: table.get(name, "")
+
+    def config(self, resolve=None, node="remote-nvr", version="v1.2"):
+        data = fleet.parse(TWO_SITE)[0]
+        raw = TWO_SITE.encode()
+        return fleet.bot_config(data, node, raw, version, resolve or self.resolver({})), raw
+
+    def test_describes_this_node_and_its_peers(self):
+        (cfg, own), raw = self.config(
+            self.resolver({None: "100.64.0.9", "remote-ha": "100.64.0.2"})
+        )
+        assert cfg["node"] == "remote-nvr" and cfg["site"] == "remote" and cfg["port"] == 7443
+        assert cfg["version"] == "v1.2" and cfg["fleet_hash"] == fleet.file_hash(raw)
+        assert cfg["roles"] == ["base", "nvr", "power", "agent"]
+        assert [p["name"] for p in cfg["peers"]] == ["remote-ha", "home-server", "home-ha"]
+        assert own == ["192.168.10.10", "100.64.0.9"]
+
+    def test_addresses_per_path(self):
+        (cfg, _), _ = self.config(self.resolver({"remote-ha": "100.64.0.2"}))
+        peers = {p["name"]: p for p in cfg["peers"]}
+        # same site: Tailscale (resolved) and LAN
+        assert peers["remote-ha"]["addrs"] == {"tailscale": "100.64.0.2", "lan": "192.168.10.2"}
+        # another site: Tailscale only, and the name when it cannot be resolved
+        assert peers["home-server"]["addrs"] == {"tailscale": "home-server"}
+
+    def test_public_keys_are_passed_on_and_nothing_secret_is(self):
+        def change(d):
+            d["nodes"]["remote-ha"]["public_key"] = "A" * 43 + "="
+
+        data = fleet.parse(mutated(TWO_SITE, change))[0]
+        cfg, _ = fleet.bot_config(data, "remote-nvr", b"x", "", self.resolver({}))
+        assert {p["name"]: p["public_key"] for p in cfg["peers"]}["remote-ha"] == "A" * 43 + "="
+        text = json.dumps(cfg)
+        assert "AA:BB:CC" not in text and "victron" not in text  # device addresses stay on the host
+
+    def test_a_node_with_no_address_at_all_publishes_nowhere(self):
+        data = fleet.parse(TWO_SITE)[0]
+        _, own = fleet.bot_config(data, "home-server", b"x", "", self.resolver({}))
+        assert own == []
+
+    def test_cli_writes_the_file_and_prints_the_addresses(self, tmp_path):
+        out = tmp_path / "fleet.json"
+        result = subprocess.run(
+            [sys.executable, str(REPO / "tools/fleet.py"), "bot-config",
+             str(REPO / "examples/fleet.two-site.yaml"), "--node", "remote-nvr",
+             "--out", str(out), "--version", "v1.2"],
+            capture_output=True, text=True, check=False,
+        )  # fmt: skip
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.startswith("CONTROL_PUBLISH=")
+        assert json.loads(out.read_text())["node"] == "remote-nvr"
+        assert not (tmp_path / "fleet.json.tmp").exists()
+
+    def test_cli_refuses_an_invalid_file(self, tmp_path):
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("schema_version: 9\n")
+        result = subprocess.run(
+            [sys.executable, str(REPO / "tools/fleet.py"), "bot-config", str(bad),
+             "--node", "x", "--out", str(tmp_path / "o.json")],
+            capture_output=True, text=True, check=False,
+        )  # fmt: skip
+        assert result.returncode == 1 and not (tmp_path / "o.json").exists()

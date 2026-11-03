@@ -164,6 +164,13 @@ DRI_DEVICE="${DRI_DEVICE:-/dev/dri/renderD128}"  # overridable for tests
 LEGACY_HA_HOST="10.0.0.2"
 HA_HOST="${HA_HOST-$LEGACY_HA_HOST}"
 HA_PORT="${HA_PORT:-8123}"
+# Control plane (signed heartbeats between the nodes of a fleet of two or more). Only a
+# fleet file turns it on; CONTROL_ACTIVE says it actually got set up on this run.
+CONTROL_PLANE="${CONTROL_PLANE:-false}"
+CONTROL_PORT="${CONTROL_PORT:-7443}"
+CONTROL_ACTIVE=false
+CONTROL_PUBLISH=""  # host addresses the control port is published on
+NODE_PUBLIC_KEY=""
 # Who this machine is in the fleet (labels only: never a path, container or unit name)
 EDGE_NODE="${EDGE_NODE:-}"
 EDGE_SITE="${EDGE_SITE:-}"
@@ -868,6 +875,80 @@ install_if_changed() {
     TELEGRAM_CHANGED=true
 }
 
+# Fleet control plane for the bot: this node's signing key, the description of the fleet
+# the bot reads, and where the control port gets published. Any problem here turns the
+# control plane off with a warning; it never stops the deploy or the rest of the bot.
+prepare_control_plane() {
+    CONTROL_ACTIVE=false
+    local script_dir key="$APP_DIR/node.key" pub tmp version="" out
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [[ "$CONTROL_PLANE" != "true" || "$FLEET_ACTIVE" != "true" ]]; then
+        # not a fleet (any more): the bot must not keep an old description
+        rm -f "$APP_DIR/bot-status/fleet.json"
+        if [[ -f "$SYSTEMD_DIR/docker.service.d/edge-after-tailscale.conf" ]]; then
+            rm -f "$SYSTEMD_DIR/docker.service.d/edge-after-tailscale.conf"
+            systemctl daemon-reload || true
+        fi
+        return 0
+    fi
+    if ! command -v openssl > /dev/null; then
+        warn "openssl is missing: no fleet control plane on this node"
+        return 0
+    fi
+    mkdir -p "$APP_DIR/bot-state" "$APP_DIR/bot-status"
+    chmod 700 "$APP_DIR/bot-state"
+    chmod 755 "$APP_DIR/bot-status"
+    if [[ ! -s "$key" ]]; then
+        # Generated here and never copied out; an existing key is never replaced, because
+        # the other nodes know the public half.
+        tmp=$(umask 077 && mktemp "$key.XXXXXX")
+        if ! openssl genpkey -algorithm ed25519 -out "$tmp" 2> /dev/null; then
+            rm -f "$tmp"
+            warn "Could not create the node key: no fleet control plane on this node"
+            return 0
+        fi
+        chmod 600 "$tmp"
+        mv "$tmp" "$key"
+        info "Created this node's signing key $key"
+    fi
+    chmod 600 "$key"
+    pub=$(openssl pkey -in "$key" -pubout -outform DER 2> /dev/null | tail -c 32 | base64 -w0) || pub=""
+    if [[ -z "$pub" ]]; then
+        warn "Could not read the node key $key: no fleet control plane on this node"
+        return 0
+    fi
+    printf '%s\n' "$pub" > "$APP_DIR/node.pub"
+    chmod 644 "$APP_DIR/node.pub"
+    NODE_PUBLIC_KEY="$pub"
+
+    version=$(git -C "$script_dir" describe --tags --always 2> /dev/null) || version=""
+    tmp=$(mktemp)
+    if ! out=$(python3 "$FLEET_TOOL" bot-config "$FLEET_FILE" --node "$FLEET_NODE" \
+        --out "$tmp" --version "$version"); then
+        rm -f "$tmp"
+        warn "Could not describe the fleet for the bot: no fleet control plane on this node"
+        return 0
+    fi
+    eval "$out" # CONTROL_PUBLISH='addr addr'
+    if [[ -z "${CONTROL_PUBLISH// /}" ]]; then
+        rm -f "$tmp"
+        warn "No lan address for this node in the fleet file and no Tailscale address: no fleet control plane on this node"
+        return 0
+    fi
+    chmod 644 "$tmp"
+    install_if_changed "$tmp" "$APP_DIR/bot-status/fleet.json" 644
+    rm -f "$tmp"
+    CONTROL_ACTIVE=true
+    # The bot's port is published on this node's Tailscale address, which must exist when
+    # Docker starts the container at boot: start Docker after tailscaled.
+    mkdir -p "$SYSTEMD_DIR/docker.service.d"
+    printf '[Unit]\nWants=tailscaled.service\nAfter=tailscaled.service\n' \
+        > "$SYSTEMD_DIR/docker.service.d/edge-after-tailscale.conf"
+    systemctl daemon-reload || true
+    info "Fleet control plane: port $CONTROL_PORT on ${CONTROL_PUBLISH// /, }; this node's public key:"
+    info "  $NODE_PUBLIC_KEY"
+}
+
 # Defaults for the bot that do not belong in the secrets file: the Home Assistant to
 # check and who this node is. The compose file reads this before .telegram, so a
 # setting in .telegram (HA_HOST=, say) still wins. No secrets here.
@@ -954,6 +1035,9 @@ prepare_telegram_bot() {
     chmod 755 "$APP_DIR" "$APP_DIR/telegram-bot"
     install_if_changed "$script_dir/telegram-bot/bot.py" "$APP_DIR/telegram-bot/bot.py" 644
     install_if_changed "$script_dir/telegram-bot/Dockerfile" "$APP_DIR/telegram-bot/Dockerfile" 644
+    if [[ -f "$script_dir/telegram-bot/controlplane.py" ]]; then
+        install_if_changed "$script_dir/telegram-bot/controlplane.py" "$APP_DIR/telegram-bot/controlplane.py" 644
+    fi
     install_if_changed "$script_dir/collect-diagnostics.sh" "$APP_DIR/telegram-bot/collect-diagnostics.sh" 755
     # The token is a secret: root-only, and never written into the compose file
     if [[ "$cred" == "$APP_DIR/.telegram" ]]; then
@@ -965,7 +1049,11 @@ prepare_telegram_bot() {
 
     # Only OS tools go into the image (the bot code is mounted), so this is
     # quick after the first build.
-    if docker build -q -t "$TELEGRAM_IMAGE" "$APP_DIR/telegram-bot" > /dev/null; then
+    prepare_control_plane
+    local build_args=()
+    # the signing library goes into the image only for fleets; other installs build as before
+    [[ "$CONTROL_ACTIVE" != "true" ]] || build_args=(--build-arg WITH_CRYPTO=true)
+    if docker build -q "${build_args[@]}" -t "$TELEGRAM_IMAGE" "$APP_DIR/telegram-bot" > /dev/null; then
         INSTALL_TELEGRAM_BOT=true
     elif docker image inspect "$TELEGRAM_IMAGE" &> /dev/null; then
         warn "Could not rebuild the Telegram bot image - keeping the existing one"
@@ -1511,6 +1599,16 @@ EOF
       - __STORAGE_MOUNT__/frigate:/media/frigate:ro
 EOF
             [[ "$TELEGRAM_REBOOT_ENABLED" == "true" ]] && printf '      - ./bot-requests:/requests\n'
+            if [[ "$CONTROL_ACTIVE" == "true" ]]; then
+                # fleet control plane: the signing key (read-only), a small state directory,
+                # and the control port published on this node's LAN and Tailscale addresses only
+                printf '      - ./node.key:/run/edge/node.key:ro\n      - ./bot-state:/state\n'
+                printf '    ports:\n'
+                IFS=' ' read -ra _publish <<< "$CONTROL_PUBLISH"
+                for _addr in "${_publish[@]}"; do
+                    printf '      - "%s:%s:%s"\n' "$_addr" "$CONTROL_PORT" "$CONTROL_PORT"
+                done
+            fi
             cat << 'EOF'
     tmpfs:
       - /tmp
@@ -1959,6 +2057,14 @@ show_summary() {
     echo "  - Frigate NVR:    http://${ip_addr}:5000"
     [[ "$INSTALL_HOMEASSISTANT" == "true" ]] && echo "  - Home Assistant: http://${ip_addr}:8123"
     [[ "$INSTALL_TELEGRAM_BOT" == "true" ]] && echo "  - Telegram bot:   send /status or /diag to your bot"
+    if [[ "$CONTROL_ACTIVE" == "true" ]]; then
+        echo
+        echo "Fleet: this node (${FLEET_NODE}) signs its messages with a key made on this machine."
+        echo "  public key: ${NODE_PUBLIC_KEY}"
+        echo "  Put it under nodes.${FLEET_NODE}.public_key in fleet.yaml, copy the file to every"
+        echo "  node and deploy again (or /redeploy) so the others accept this node's messages."
+        echo "  /fleet in Telegram shows who has been heard from."
+    fi
     if [[ "$INSTALL_MQTT" == "true" ]]; then
         echo "  - MQTT Broker:    mqtt://${ip_addr}:1883"
         echo

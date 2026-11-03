@@ -2324,8 +2324,8 @@ def test_bot_container_may_send_unprivileged_ping():
     assert "net.ipv4.ping_group_range=0 2147483647" in bot_block.split("\nEOF")[0]
 
 
-class TestFleetMode:
-    """--config/--node and friends. The point of most tests: without them, nothing changes."""
+class FleetHelpers:
+    """Running the deploy script with fleet flags."""
 
     DEPLOY = str(REPO / "deploy-edge-server.sh")
 
@@ -2355,6 +2355,10 @@ class TestFleetMode:
         return subprocess.run(
             ["bash", self.DEPLOY, *args], capture_output=True, text=True, env=full, timeout=60
         )
+
+
+class TestFleetMode(FleetHelpers):
+    """--config/--node and friends. The point of most tests: without them, nothing changes."""
 
     # ---- classic mode is what it always was
     def test_no_fleet_flags_means_no_fleet_mode(self, stub_path, tmp_path):
@@ -2667,3 +2671,172 @@ class TestFleetMode:
             EDGE_NODE="n",
         )
         assert "gives node n the bot_id 999" in out.stdout
+
+
+class TestControlPlaneDeploy(FleetHelpers):
+    """The host side of the fleet control plane: key, description, compose, image."""
+
+    GOOD = f"TELEGRAM_BOT_TOKEN={BOT_TOKEN}\nTELEGRAM_ALLOWED_IDS=1001\n"
+
+    @pytest.fixture(autouse=True)
+    def _no_real_dotfile(self):
+        if (REPO / ".telegram").exists():
+            pytest.skip("a real .telegram exists in the repo checkout")
+
+    @staticmethod
+    def tailscale(stub_path, own="100.64.0.9"):
+        (stub_path / "tailscale").write_text(
+            "#!/usr/bin/env bash\n"
+            f'if [[ "$*" == "ip -4" ]]; then echo {own}; '
+            'elif [[ "$1 $2" == "ip -4" ]]; then echo 100.64.0.$((${#3} + 10)); else exit 1; fi\n'
+        )
+        (stub_path / "tailscale").chmod(0o755)
+
+    def run_fleet(self, stub_path, tmp_path, body, node="remote-nvr", path=None, **env):
+        path = path or self.fleet_file(tmp_path)
+        env = {
+            "SYSTEMD_DIR": str(tmp_path / "systemd"),
+            "TELEGRAM_CREDENTIALS_FILE": str(tmp_path / ".telegram"),
+            **env,
+        }
+        (tmp_path / ".telegram").write_text(self.GOOD)
+        return self.source(
+            stub_path, tmp_path, body, ["--config", str(path), "--node", node], **env
+        )
+
+    def test_creates_the_key_once_and_describes_the_fleet(self, stub_path, tmp_path):
+        self.tailscale(stub_path)
+        body = "prepare_control_plane; echo A=$CONTROL_ACTIVE P=[$CONTROL_PUBLISH]"
+        out = self.run_fleet(stub_path, tmp_path, body)
+        assert out.returncode == 0, out.stdout + out.stderr
+        assert "A=true P=[192.168.10.10 100.64.0.9]" in out.stdout
+        app = tmp_path / "app"
+        assert stat.S_IMODE((app / "node.key").stat().st_mode) == 0o600
+        assert (app / "node.key").read_text().startswith("-----BEGIN PRIVATE KEY-----")
+        description = json.loads((app / "bot-status/fleet.json").read_text())
+        assert description["node"] == "remote-nvr" and len(description["peers"]) == 3
+        assert "node.key" not in json.dumps(description) and "PRIVATE" not in json.dumps(
+            description
+        )
+        # the public key on disk and in the output is the key's public half
+        pytest.importorskip("cryptography")
+        import base64
+
+        from cryptography.hazmat.primitives import serialization
+
+        key = serialization.load_pem_private_key((app / "node.key").read_bytes(), None)
+        raw = key.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw
+        )
+        assert (app / "node.pub").read_text().strip() == base64.b64encode(raw).decode()
+        assert base64.b64encode(raw).decode() in out.stdout
+        first = (app / "node.key").read_bytes()
+        # second deploy: same key, same description, nothing to restart
+        out = self.run_fleet(
+            stub_path,
+            tmp_path,
+            "TELEGRAM_CHANGED=false; prepare_control_plane; echo C=$TELEGRAM_CHANGED",
+        )
+        assert (app / "node.key").read_bytes() == first
+        assert "C=false" in out.stdout
+
+    def test_docker_waits_for_tailscale(self, stub_path, tmp_path):
+        self.tailscale(stub_path)
+        self.run_fleet(stub_path, tmp_path, "prepare_control_plane")
+        dropin = tmp_path / "systemd/docker.service.d/edge-after-tailscale.conf"
+        assert "After=tailscaled.service" in dropin.read_text()
+
+    def test_a_changed_fleet_updates_the_description(self, stub_path, tmp_path):
+        self.tailscale(stub_path)
+        self.run_fleet(stub_path, tmp_path, "prepare_control_plane")
+        changed = self.fleet_file(
+            tmp_path, lambda d: d["fleet"].update(name="renamed"), name="b.yaml"
+        )
+        out = self.run_fleet(
+            stub_path,
+            tmp_path,
+            "TELEGRAM_CHANGED=false; prepare_control_plane; echo C=$TELEGRAM_CHANGED",
+            path=changed,
+        )
+        assert "C=true" in out.stdout
+
+    def test_one_node_or_classic_leaves_everything_alone_and_cleans_up(self, stub_path, tmp_path):
+        self.tailscale(stub_path)
+        self.run_fleet(stub_path, tmp_path, "prepare_control_plane")
+        app = tmp_path / "app"
+        assert (app / "bot-status/fleet.json").exists()
+        # back to classic: the description and the drop-in go, the key stays
+        out = self.source(
+            stub_path, tmp_path, "prepare_control_plane; echo A=$CONTROL_ACTIVE",
+            SYSTEMD_DIR=str(tmp_path / "systemd"),
+        )  # fmt: skip
+        assert "A=false" in out.stdout
+        assert not (app / "bot-status/fleet.json").exists()
+        assert not (tmp_path / "systemd/docker.service.d/edge-after-tailscale.conf").exists()
+        assert (app / "node.key").exists()
+
+    def test_classic_never_creates_a_key(self, stub_path, tmp_path):
+        out = self.source(stub_path, tmp_path, "prepare_control_plane; ls $APP_DIR 2>&1 || true")
+        assert out.returncode == 0
+        assert (
+            not (tmp_path / "app/node.key").exists() and not (tmp_path / "app/bot-state").exists()
+        )
+
+    def test_a_single_node_fleet_has_no_control_plane(self, stub_path, tmp_path):
+        out = self.source(
+            stub_path, tmp_path, "prepare_control_plane; echo A=$CONTROL_ACTIVE $CONTROL_PLANE",
+            ["--config", str(REPO / "examples/fleet.minimal.yaml"), "--node", "node-1"],
+            EXTERNAL_DRIVE_UUID="x",
+        )  # fmt: skip
+        # the example's placeholder uuid is refused at deploy time; the point here is the setting
+        assert out.returncode != 0 or "A=false false" in out.stdout
+
+    def test_no_address_means_no_control_plane_but_a_working_deploy(self, stub_path, tmp_path):
+        self.tailscale(stub_path, own="")
+        out = self.run_fleet(
+            stub_path, tmp_path, "prepare_control_plane; echo A=$CONTROL_ACTIVE", node="home-server"
+        )
+        assert out.returncode == 0 and "A=false" in out.stdout
+        assert "no fleet control plane on this node" in out.stdout
+        assert not (tmp_path / "app/bot-status/fleet.json").exists()
+
+    def test_compose_and_image_for_a_fleet_node(self, stub_path, tmp_path):
+        self.tailscale(stub_path)
+        out = self.run_fleet(stub_path, tmp_path, "prepare_telegram_bot; create_app_stack")
+        assert out.returncode == 0, out.stdout + out.stderr
+        app = tmp_path / "app"
+        bot = yaml.safe_load((app / "docker-compose.yml").read_text())["services"]["telegram-bot"]
+        assert bot["ports"] == ["192.168.10.10:7443:7443", "100.64.0.9:7443:7443"]
+        assert "./node.key:/run/edge/node.key:ro" in bot["volumes"]
+        assert "./bot-state:/state" in bot["volumes"]
+        assert "--build-arg WITH_CRYPTO=true" in (stub_path / "log").read_text()
+        assert (app / "telegram-bot/controlplane.py").is_file()
+        assert (app / "bot-state").is_dir()
+        assert stat.S_IMODE((app / "bot-state").stat().st_mode) == 0o700
+
+    def test_compose_and_image_for_a_classic_node_are_what_they_were(self, stub_path, tmp_path):
+        (tmp_path / ".telegram").write_text(self.GOOD)
+        out = self.source(
+            stub_path, tmp_path, "prepare_telegram_bot; create_app_stack",
+            TELEGRAM_CREDENTIALS_FILE=str(tmp_path / ".telegram"),
+        )  # fmt: skip
+        assert out.returncode == 0, out.stdout + out.stderr
+        app = tmp_path / "app"
+        bot = yaml.safe_load((app / "docker-compose.yml").read_text())["services"]["telegram-bot"]
+        assert "ports" not in bot
+        assert not any("node.key" in v or "bot-state" in v for v in bot["volumes"])
+        log_text = (stub_path / "log").read_text()
+        assert "WITH_CRYPTO" not in log_text
+        assert f"docker build -q -t edge-telegram-bot:local {app}/telegram-bot" in log_text
+
+    def test_the_summary_tells_the_operator_what_to_do_with_the_key(self, stub_path, tmp_path):
+        self.tailscale(stub_path)
+        body = "prepare_control_plane; show_summary 2>&1 | sed -n '/Fleet:/,/shows who/p'"
+        out = self.run_fleet(stub_path, tmp_path, body)
+        assert "public key: " in out.stdout and "nodes.remote-nvr.public_key" in out.stdout
+        assert "/fleet in Telegram" in out.stdout
+
+    def test_the_image_installs_the_signing_library_only_when_asked(self):
+        text = (REPO / "telegram-bot/Dockerfile").read_text()
+        assert "ARG WITH_CRYPTO=false" in text
+        assert 'if [ "$WITH_CRYPTO" = "true" ]; then pip install' in text

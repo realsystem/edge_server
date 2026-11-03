@@ -113,7 +113,7 @@ jobs:
         run: ruff check --output-format=github src tests tools telegram-bot
 
       - name: Type check with mypy
-        run: mypy src tools telegram-bot/bot.py --ignore-missing-imports
+        run: mypy src tools telegram-bot/bot.py telegram-bot/controlplane.py --ignore-missing-imports
 
   # --------------------------------------------------------------------------
   # BLE plugins (each is its own Python package)
