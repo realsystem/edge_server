@@ -27,10 +27,13 @@ Environment:
   EDGE_SERVER_DIR       default /opt/edge-server (the stack directory)
   STORAGE_PATH          default /media/frigate (recordings, for the disk check)
   STORAGE_LABEL         host path shown in /status for that disk, default /mnt/storage
-  HA_HOST               address of the Home Assistant on the LAN (the Raspberry Pi):
-                        /status shows two lines, ping and HTTP on HA_PORT.
-                        Default 10.0.0.2; set another address, or empty to switch off.
+  HA_HOST               address of a Home Assistant on the LAN: /status shows two
+                        lines, ping and HTTP on HA_PORT. Empty (the default here) = off.
+                        The deploy script sets it for you (bot-defaults.env); a
+                        value in .telegram wins.
   HA_PORT               default 8123
+  EDGE_NODE             this node's name from the fleet file, shown in /status
+  EDGE_OPERATORS        user ids from the fleet file, used when TELEGRAM_ALLOWED_IDS is empty
   ALERT_DISK_FREE_PERCENT, ALERT_INTERVAL, ALERT_REPEAT_HOURS  see above
 """
 
@@ -123,7 +126,8 @@ class Config:
     app_dir: Path = Path("/opt/edge-server")
     storage_path: Path = Path("/media/frigate")
     storage_label: str = "/mnt/storage"  # where the host mounts it; only shown in /status
-    ha_host: str = "10.0.0.2"  # Home Assistant on the LAN checked in /status; "" = off
+    ha_host: str = ""  # Home Assistant on the LAN checked in /status; "" = off
+    node: str = ""  # this node's name in the fleet file, shown in /status
     ha_port: int = 8123
     ha_timeout: float = 3.0
     proc: Path = Path("/proc")
@@ -164,7 +168,9 @@ class Config:
         if not TOKEN_RE.match(token):
             raise ValueError("TELEGRAM_BOT_TOKEN is missing or not a bot token (123456:ABC...)")
         allowed: set[int] = set()
-        for item in re.split(r"[,\s]+", env.get("TELEGRAM_ALLOWED_IDS", "").strip()):
+        # the fleet file's operators are the fallback when .telegram lists nobody
+        ids = env.get("TELEGRAM_ALLOWED_IDS", "").strip() or env.get("EDGE_OPERATORS", "").strip()
+        for item in re.split(r"[,\s]+", ids):
             if not item:
                 continue
             if not item.isdigit():
@@ -206,6 +212,7 @@ class Config:
             storage_label=env.get("STORAGE_LABEL", cls.storage_label).strip() or cls.storage_label,
             ha_host=ha_host,
             ha_port=ha_port,
+            node=env.get("EDGE_NODE", "").strip(),
             proc=Path(env.get("HOST_PROC", str(cls.proc))),
             sys=Path(env.get("HOST_SYS", str(cls.sys))),
             api_url=env.get("TELEGRAM_API_URL", cls.api_url).rstrip("/"),
@@ -770,7 +777,8 @@ def build_status(cfg: Config, sleep: Callable[[float], None] = time.sleep) -> st
     problems += frigate_problems
 
     head = "OK" if not problems else f"{len(problems)} problem(s)"
-    out = [f"{'✅' if not problems else '⚠️'} Edge server: {head}"]
+    who = f" ({cfg.node})" if cfg.node else ""
+    out = [f"{'✅' if not problems else '⚠️'} Edge server{who}: {head}"]
     out += [f"  - {p}" for p in problems]
     out += ["", "Host", *[f"  {line}" for line in host], "", *frigate]
     return "\n".join(out)

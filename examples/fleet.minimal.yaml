@@ -2,7 +2,7 @@
 # One node cannot report its own death; add a second node, ideally at
 # another site, when you can.
 # Names, ids and addresses are placeholders; choose your own.
-# Planned format: the deploy script does not read this file yet.
+# Use it: ./deploy-edge-server.sh --config examples/fleet.minimal.yaml --node node-1 --check
 # See docs/design/edge-system.md (Configuration, Deployment).
 schema_version: 1
 

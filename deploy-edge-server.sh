@@ -15,6 +15,77 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+#-------------------------------------------------------------------------------
+# FLEET MODE: --config fleet.yaml --node NAME (see docs/design/edge-system.md)
+# Read before the defaults below, so a setting comes from the first of: command-line
+# flags, environment variables, the node's entry in the fleet file, deploy.env of the
+# last run (--auto), built-in defaults. Without a fleet file none of this runs and the
+# script behaves exactly as it always has.
+#-------------------------------------------------------------------------------
+FLEET_FILE="" FLEET_NODE="" FLEET_ROLE="" FLEET_WRITE=""
+FLEET_CLASSIC=false FLEET_CHECK=false FLEET_ACTIVE=false FLEET_FROM_SAVED=false
+_fleet_dir="${EDGE_SERVER_DIR:-/opt/edge-server}"
+FLEET_SAVED_FILE="$_fleet_dir/fleet.yaml"    # the last file that deployed successfully
+FLEET_SAVED_STATE="$_fleet_dir/fleet.state"  # node=NAME and, if overridden, roles=LIST
+FLEET_TOOL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/tools/fleet.py"
+
+_fleet_args=("$@")
+for ((_i = 0; _i < ${#_fleet_args[@]}; _i++)); do
+    case "${_fleet_args[_i]}" in
+        --config) FLEET_FILE="${_fleet_args[_i + 1]:-}" _i=$((_i + 1)) ;;
+        --node) FLEET_NODE="${_fleet_args[_i + 1]:-}" _i=$((_i + 1)) ;;
+        --role) FLEET_ROLE="${_fleet_args[_i + 1]:-}" _i=$((_i + 1)) ;;
+        --write-config) FLEET_WRITE="${_fleet_args[_i + 1]:-}" _i=$((_i + 1)) ;;
+        --classic) FLEET_CLASSIC=true ;;
+        --check) FLEET_CHECK=true ;;
+    esac
+done
+
+fleet_state_value() { sed -n "s/^$1=//p" "$FLEET_SAVED_STATE" 2> /dev/null | tail -n 1 || true; }
+
+fleet_require_yaml() {
+    python3 -c 'import yaml' 2> /dev/null && return 0
+    if [[ $EUID -eq 0 ]] && command -v apt-get > /dev/null; then
+        echo "Installing python3-yaml (needed to read the fleet file)..." >&2
+        DEBIAN_FRONTEND=noninteractive apt-get install -y python3-yaml >&2 || true
+    fi
+    python3 -c 'import yaml' 2> /dev/null || {
+        echo "python3-yaml is missing: sudo apt-get install python3-yaml" >&2
+        exit 1
+    }
+}
+
+# An install that was deployed from a fleet file keeps using it: --auto, /redeploy and
+# a plain manual run all read the saved copy (so a run without flags can never flip
+# the node's roles). --classic leaves fleet mode.
+if [[ -z "$FLEET_WRITE" && "$FLEET_CLASSIC" != "true" && -z "$FLEET_FILE" \
+    && -r "$FLEET_SAVED_FILE" && -r "$FLEET_SAVED_STATE" ]]; then
+    FLEET_FILE="$FLEET_SAVED_FILE"
+    FLEET_FROM_SAVED=true
+    [[ -n "$FLEET_NODE" ]] || FLEET_NODE=$(fleet_state_value node)
+    [[ -n "$FLEET_ROLE" ]] || FLEET_ROLE=$(fleet_state_value roles)
+fi
+
+if [[ -n "$FLEET_FILE" && -z "$FLEET_WRITE" && "$FLEET_CLASSIC" != "true" ]]; then
+    if [[ -z "$FLEET_NODE" ]]; then
+        echo "--config needs --node NAME: the entry in the file that is this machine" >&2
+        exit 2
+    fi
+    fleet_require_yaml
+    _fleet_role_args=()
+    [[ -z "$FLEET_ROLE" ]] || _fleet_role_args=(--role "$FLEET_ROLE")
+    if [[ "$FLEET_CHECK" == "true" ]]; then
+        python3 "$FLEET_TOOL" check "$FLEET_FILE" --node "$FLEET_NODE" "${_fleet_role_args[@]}" || exit $?
+        exit 0
+    fi
+    if ! _fleet_env=$(python3 "$FLEET_TOOL" env "$FLEET_FILE" --node "$FLEET_NODE" "${_fleet_role_args[@]}"); then
+        echo "The fleet file was rejected. Nothing has been changed." >&2
+        exit 1
+    fi
+    eval "$_fleet_env"
+    FLEET_ACTIVE=true
+fi
+
 # --auto: redeploy without anyone present (the Telegram bot's /redeploy runs this).
 #   1. fetch the newest release tag (vMAJOR.MINOR or vMAJOR.MINOR.PATCH, nothing
 #      else) from GitHub (REDEPLOY_REPO) into $APP_DIR/source and require green
@@ -27,7 +98,10 @@ IFS=$'\n\t'
 # read before the defaults below are assigned; environment variables still win.
 SETTINGS_FILE="${EDGE_SERVER_DIR:-/opt/edge-server}/deploy.env"
 for _arg in "$@"; do
-    if [[ "$_arg" == "--auto" || "$_arg" == "--auto-apply" ]] && [[ -r "$SETTINGS_FILE" ]]; then
+    # --classic after fleet mode keeps the settings the fleet file produced; --write-config
+    # describes the install as it was last deployed
+    if [[ "$_arg" == "--auto" || "$_arg" == "--auto-apply" || "$_arg" == "--write-config" \
+        || ( "$_arg" == "--classic" && -r "$FLEET_SAVED_FILE" ) ]] && [[ -r "$SETTINGS_FILE" ]]; then
         # shellcheck source=/dev/null
         source "$SETTINGS_FILE"
         break
@@ -60,8 +134,19 @@ SOURCE_DIR="$APP_DIR/source"  # checkout that --auto updates and deploys from
 LOCAL_SUBNET="${LOCAL_SUBNET:-}"
 LOCAL_SUBNET_REQUEST="$LOCAL_SUBNET"  # what gets saved for --auto: empty = keep detecting
 
-# Timezone
-TIMEZONE="${TIMEZONE:-America/Los_Angeles}"
+# Timezone: TIMEZONE, else the one this machine is already set to (an install that
+# was deployed before keeps its zone), else UTC. A fleet file sets it per site.
+system_timezone() {
+    local tz=""
+    tz=$(timedatectl show -p Timezone --value 2> /dev/null) || tz=""
+    [[ -n "$tz" ]] || tz=$(head -n 1 /etc/timezone 2> /dev/null) || tz=""
+    if [[ "$tz" =~ ^[A-Za-z][A-Za-z0-9_+/-]*$ && "$tz" != "n/a" ]]; then
+        echo "$tz"
+    else
+        echo UTC
+    fi
+}
+TIMEZONE="${TIMEZONE:-$(system_timezone)}"
 
 # Optional services (off by default). Turning one off on an existing server
 # removes its container but keeps its data directory, so it can be re-enabled.
@@ -71,6 +156,19 @@ INSTALL_MQTT="${INSTALL_MQTT:-false}"
 # camera streams (e.g. H.264 profile 100) and software decoding always works.
 ENABLE_HWACCEL="${ENABLE_HWACCEL:-false}"
 DRI_DEVICE="${DRI_DEVICE:-/dev/dri/renderD128}"  # overridable for tests
+
+# Home Assistant that the bot's /status pings and probes. A fleet file takes it from the
+# ha node at this node's site. Without one (classic mode) the check keeps watching the
+# address installs made before fleet mode were set up for; HA_HOST= (empty) in the
+# environment or in .telegram switches it off, another address replaces it.
+LEGACY_HA_HOST="10.0.0.2"
+HA_HOST="${HA_HOST-$LEGACY_HA_HOST}"
+HA_PORT="${HA_PORT:-8123}"
+# Who this machine is in the fleet (labels only: never a path, container or unit name)
+EDGE_NODE="${EDGE_NODE:-}"
+EDGE_SITE="${EDGE_SITE:-}"
+EDGE_OPERATORS="${EDGE_OPERATORS:-}"  # Telegram user ids from the fleet file
+EDGE_BOT_ID="${EDGE_BOT_ID:-}"
 
 # Telegram bot (/status, /diag): "auto" installs it when a .telegram file with
 # the bot token exists (see README); "false" never installs it.
@@ -770,6 +868,31 @@ install_if_changed() {
     TELEGRAM_CHANGED=true
 }
 
+# Defaults for the bot that do not belong in the secrets file: the Home Assistant to
+# check and who this node is. The compose file reads this before .telegram, so a
+# setting in .telegram (HA_HOST=, say) still wins. No secrets here.
+write_bot_defaults() {
+    local tmp host="$HA_HOST" port="$HA_PORT"
+    if [[ -n "$host" && ! "$host" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]]; then
+        warn "HA_HOST '$host' is not an address or host name - no Home Assistant check"
+        host=""
+    fi
+    [[ "$port" =~ ^[0-9]{1,5}$ ]] || port=8123
+    tmp=$(mktemp)
+    {
+        echo "# Written by deploy-edge-server.sh. Settings in .telegram win over these."
+        printf 'HA_HOST=%s\nHA_PORT=%s\n' "$host" "$port"
+        if [[ -n "$EDGE_NODE" ]]; then
+            printf 'EDGE_NODE=%s\n' "$EDGE_NODE"
+        fi
+        if [[ -n "$EDGE_OPERATORS" ]]; then
+            printf 'EDGE_OPERATORS=%s\n' "$EDGE_OPERATORS"
+        fi
+    } > "$tmp"
+    install_if_changed "$tmp" "$APP_DIR/bot-defaults.env" 644
+    rm -f "$tmp"
+}
+
 # Telegram bot: needs a .telegram file with TELEGRAM_BOT_TOKEN (and
 # TELEGRAM_ALLOWED_IDS). Sets INSTALL_TELEGRAM_BOT to true only if everything
 # is in place, so a missing or wrong token never stops the rest of the deploy.
@@ -802,7 +925,12 @@ prepare_telegram_bot() {
         warn "$cred: TELEGRAM_BOT_TOKEN is missing or not a bot token (123456:ABC...) - skipping the Telegram bot"
         return 0
     fi
-    if [[ -z "${ids//[[:space:]]/}" ]]; then
+    if [[ -n "$EDGE_BOT_ID" && "${token%%:*}" != "$EDGE_BOT_ID" ]]; then
+        warn "$cred: the token belongs to bot ${token%%:*}, but the fleet file gives node $EDGE_NODE the bot_id $EDGE_BOT_ID"
+    fi
+    if [[ -z "${ids//[[:space:]]/}" && -n "$EDGE_OPERATORS" ]]; then
+        info "TELEGRAM_ALLOWED_IDS is empty in .telegram: using the fleet file's operators ($EDGE_OPERATORS)"
+    elif [[ -z "${ids//[[:space:]]/}" ]]; then
         warn "TELEGRAM_ALLOWED_IDS is empty: nobody can use the bot yet. Send /id to it, then add your id to .telegram and redeploy"
     elif [[ ! "$ids" =~ $ids_re ]]; then
         warn "$cred: TELEGRAM_ALLOWED_IDS must be numeric user ids separated by commas - skipping the Telegram bot"
@@ -833,6 +961,7 @@ prepare_telegram_bot() {
     else
         install_if_changed "$cred" "$APP_DIR/.telegram" 600
     fi
+    write_bot_defaults
 
     # Only OS tools go into the image (the bot code is mounted), so this is
     # quick after the first build.
@@ -1359,7 +1488,9 @@ EOF
       # lets /status ping HA_HOST without the ping binary or NET_RAW: the bot sends
       # echo requests over an unprivileged ICMP socket
       - net.ipv4.ping_group_range=0 2147483647
-    env_file: ./.telegram
+    env_file:
+      - ./bot-defaults.env  # deploy-time defaults (HA_HOST, node name); no secrets
+      - ./.telegram         # secrets and your own settings; wins over the line above
     environment:
       - TZ=${TIMEZONE:-America/Los_Angeles}
       - FRIGATE_URL=http://frigate:5000
@@ -1890,7 +2021,7 @@ SAVED_SETTINGS=(
     TIMEZONE EXTERNAL_DRIVE_UUID FRIGATE_IMAGE
     NUT_POWER_INSTALL NUT_SHUTDOWN_DELAY NUT_LOW_BATTERY
     VICTRON_INSTALL VICTRON_ADDRESS VICTRON_KEY RENOGY_INSTALL RENOGY_ADDRESS
-    REDEPLOY_REPO
+    REDEPLOY_REPO HA_HOST HA_PORT
 )
 
 save_settings() {
@@ -1909,6 +2040,67 @@ save_settings() {
     } > "$tmp"
     chmod 600 "$tmp"
     mv "$tmp" "$SETTINGS_FILE"
+}
+
+# Remember the fleet file that just deployed successfully, and which entry is this node,
+# so --auto and /redeploy keep using them. Only called after a complete deploy, so a
+# rejected or failed file never replaces the last good one.
+save_fleet_state() {
+    [[ "$FLEET_ACTIVE" == "true" ]] || return 0
+    mkdir -p "$APP_DIR"
+    if [[ "$FLEET_FROM_SAVED" != "true" ]]; then
+        if [[ -f "$FLEET_SAVED_FILE" ]] && ! cmp -s "$FLEET_FILE" "$FLEET_SAVED_FILE"; then
+            cp -p "$FLEET_SAVED_FILE" "$FLEET_SAVED_FILE.prev"
+        fi
+        install -m 644 "$FLEET_FILE" "$FLEET_SAVED_FILE.new"
+        mv "$FLEET_SAVED_FILE.new" "$FLEET_SAVED_FILE"
+    fi
+    {
+        echo "node=$FLEET_NODE"
+        [[ -z "$FLEET_ROLE" ]] || echo "roles=$FLEET_ROLE"
+    } > "$FLEET_SAVED_STATE.new"
+    mv "$FLEET_SAVED_STATE.new" "$FLEET_SAVED_STATE"
+    info "Fleet file saved for --auto: node $FLEET_NODE"
+}
+
+# --classic: forget the saved fleet file. deploy.env keeps the settings it produced.
+leave_fleet_mode() {
+    if [[ -e "$FLEET_SAVED_FILE" || -e "$FLEET_SAVED_STATE" ]]; then
+        rm -f "$FLEET_SAVED_FILE" "$FLEET_SAVED_FILE.prev" "$FLEET_SAVED_STATE"
+        info "Left fleet mode: the saved fleet file is gone, the settings it produced stay in $SETTINGS_FILE"
+    fi
+}
+
+# --write-config FILE --node NAME: a one-node fleet file from what this install
+# runs now (deploy.env, .telegram), without secrets.
+write_fleet_config() {
+    if [[ -z "$FLEET_NODE" ]]; then
+        echo "--write-config needs --node NAME (a name for this machine: lowercase letters, digits, hyphens)" >&2
+        return 2
+    fi
+    fleet_require_yaml
+    local script_dir cred="" candidate ha="$HA_HOST" line tg_args=()
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    for candidate in "${TELEGRAM_CREDENTIALS_FILE:-}" "$script_dir/.telegram" "$APP_DIR/.telegram"; do
+        if [[ -n "$candidate" && -f "$candidate" ]]; then
+            cred="$candidate"
+            break
+        fi
+    done
+    if [[ -n "$cred" ]]; then
+        tg_args=(--telegram "$cred")
+        # .telegram wins over the defaults, as it does for the running bot
+        line=$(grep '^HA_HOST=' "$cred" | tail -n 1 || true)
+        [[ -z "$line" ]] || ha=$(echo "${line#HA_HOST=}" | tr -d '\r[:space:]')
+    fi
+    INSTALL_HOMEASSISTANT="$INSTALL_HOMEASSISTANT" INSTALL_MQTT="$INSTALL_MQTT" \
+        ENABLE_HWACCEL="$ENABLE_HWACCEL" TIMEZONE="$TIMEZONE" LOCAL_SUBNET="$LOCAL_SUBNET" \
+        EXTERNAL_DRIVE_UUID="$EXTERNAL_DRIVE_UUID" EDGE_STORAGE_DIR="$STORAGE_MOUNT" \
+        VICTRON_INSTALL="$VICTRON_INSTALL" VICTRON_ADDRESS="$VICTRON_ADDRESS" \
+        RENOGY_INSTALL="$RENOGY_INSTALL" RENOGY_ADDRESS="$RENOGY_ADDRESS" \
+        REDEPLOY_REPO="$REDEPLOY_REPO" HA_PORT="$HA_PORT" \
+        python3 "$FLEET_TOOL" write --node "$FLEET_NODE" --out "$FLEET_WRITE" \
+        "${tg_args[@]}" --ha-host "$ha"
 }
 
 #-------------------------------------------------------------------------------
@@ -2222,6 +2414,10 @@ uninstall_addons() {
 usage() {
     cat << 'EOF'
 Usage: sudo ./deploy-edge-server.sh [--auto | --uninstall]
+       sudo ./deploy-edge-server.sh --config fleet.yaml --node NAME [--role LIST]
+       ./deploy-edge-server.sh --config fleet.yaml --node NAME --check
+       sudo ./deploy-edge-server.sh --write-config fleet.yaml --node NAME
+       sudo ./deploy-edge-server.sh --classic
 
   (no option)  deploy or update this server, asking questions where needed
   --auto       unattended: fetch the newest release tag (v1.0, v1.2.3; nothing
@@ -2232,6 +2428,15 @@ Usage: sudo ./deploy-edge-server.sh [--auto | --uninstall]
   --uninstall  remove add-ons (Victron Smart Shunt, Renogy Rover, power loss
                monitor), asking about each one. Everything else stays. Not
                combinable with --auto.
+  --config F   fleet mode: settings come from this node's entry in the fleet file
+               (examples/fleet.*.yaml, docs/design/edge-system.md). The file is checked
+               first; an invalid one changes nothing. After a successful deploy it is
+               saved and used by --auto and by later runs without flags.
+  --node NAME  which entry of the fleet file is this machine (with --config)
+  --role LIST  roles for this run instead of the node's (nvr,power,ha)
+  --check      with --config: validate the file and print what it would deploy, then stop
+  --write-config F  write a one-node fleet file from this install's current settings
+  --classic    leave fleet mode: forget the saved fleet file, settings stay as deployed
   -h, --help   this text
 EOF
 }
@@ -2239,6 +2444,12 @@ EOF
 run_deploy() {
     info "Starting deployment at $(date)"
     info "Log file: $LOG_FILE"
+    if [[ "$FLEET_ACTIVE" == "true" ]]; then
+        info "Fleet mode: node $FLEET_NODE at site $EDGE_SITE, roles ${FLEET_ROLES:-?}"
+        case ",${FLEET_ROLES:-}," in
+            *,archive,* | *,agent,*) warn "The archive and agent roles are not implemented in this release and are ignored" ;;
+        esac
+    fi
 
     preflight_checks
     resolve_local_subnet # before anything changes: fail early if the network is unknown
@@ -2261,6 +2472,7 @@ run_deploy() {
     install_nut_power
     install_renogy
     save_settings
+    save_fleet_state
     show_summary
 
     info "Deployment completed successfully at $(date)"
@@ -2274,6 +2486,14 @@ main() {
             --auto-apply) mode=apply ;;
             --uninstall) uninstall=true ;;
             --rolled-back) ROLLED_BACK=true ;;
+            --config | --node | --role | --write-config)
+                if (($# < 2)); then
+                    echo "$1 needs a value" >&2
+                    return 2
+                fi
+                shift # the value was read by the fleet block at the top of the file
+                ;;
+            --classic | --check) ;;
             -h | --help)
                 usage
                 return 0
@@ -2286,6 +2506,31 @@ main() {
         esac
         shift
     done
+
+    if [[ "$mode" != "manual" && ( -n "$FLEET_WRITE" || "$FLEET_CLASSIC" == "true" || "$FLEET_CHECK" == "true" ) ]]; then
+        echo "--write-config, --classic and --check are for manual runs and cannot be combined with --auto" >&2
+        return 2
+    fi
+    if [[ "$mode" != "manual" && -n "$FLEET_FILE" && "$FLEET_FROM_SAVED" != "true" ]]; then
+        echo "--auto uses the fleet file saved by the last manual deploy; --config is for manual runs" >&2
+        return 2
+    fi
+    if [[ "$FLEET_CHECK" == "true" && -z "$FLEET_FILE" ]]; then
+        echo "--check needs --config FILE --node NAME" >&2
+        return 2
+    fi
+    if [[ -n "$FLEET_WRITE" ]]; then
+        if [[ -n "$FLEET_FILE" || "$uninstall" == "true" ]]; then
+            echo "--write-config cannot be combined with --config or --uninstall" >&2
+            return 2
+        fi
+        write_fleet_config
+        return $?
+    fi
+    if [[ "$FLEET_CLASSIC" == "true" && -n "$FLEET_FILE" ]]; then
+        echo "--classic and --config exclude each other" >&2
+        return 2
+    fi
 
     if [[ "$uninstall" == "true" && "$mode" != "manual" ]]; then
         echo "--uninstall is for manual runs and cannot be combined with --auto" >&2
@@ -2308,6 +2553,10 @@ main() {
     mkdir -p "$(dirname "$LOG_FILE")"
     touch "$LOG_FILE"
     chmod 644 "$LOG_FILE"
+
+    if [[ "$FLEET_CLASSIC" == "true" ]]; then
+        leave_fleet_mode
+    fi
 
     if [[ "$uninstall" == "true" ]]; then
         uninstall_addons

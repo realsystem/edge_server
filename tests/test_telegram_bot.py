@@ -2020,7 +2020,7 @@ class TestHomeAssistantInStatus:
 
     def test_config(self):
         env = {"TELEGRAM_BOT_TOKEN": TOKEN}
-        assert bot.Config.from_env(env).ha_host == "10.0.0.2"  # built-in default
+        assert bot.Config.from_env(env).ha_host == ""  # off unless the deploy sets it
         assert bot.Config.from_env({**env, "HA_HOST": ""}).ha_host == ""  # switched off
         cfg = bot.Config.from_env({**env, "HA_HOST": " 10.0.0.2 ", "HA_PORT": "8124"})
         assert (cfg.ha_host, cfg.ha_port) == ("10.0.0.2", 8124)
@@ -2030,3 +2030,25 @@ class TestHomeAssistantInStatus:
         for bad in ("abc", "0", "70000"):
             with pytest.raises(ValueError, match="HA_PORT"):
                 bot.Config.from_env({**env, "HA_HOST": "10.0.0.2", "HA_PORT": bad})
+
+
+class TestFleetIdentity:
+    def test_node_name_is_in_the_status_headline(self, telegram, frigate, host):
+        plain = bot.build_status(make_bot(telegram, frigate, host).cfg, lambda s: None)
+        named = bot.build_status(
+            make_bot(telegram, frigate, host, node="site-a").cfg, lambda s: None
+        )
+        assert plain.splitlines()[0].endswith("Edge server: OK")
+        assert named.splitlines()[0].endswith("Edge server (site-a): OK")
+
+    def test_node_name_comes_from_the_environment(self):
+        env = {"TELEGRAM_BOT_TOKEN": TOKEN}
+        assert bot.Config.from_env(env).node == ""
+        assert bot.Config.from_env({**env, "EDGE_NODE": " site-a "}).node == "site-a"
+
+    def test_fleet_operators_are_the_fallback_for_allowed_ids(self):
+        env = {"TELEGRAM_BOT_TOKEN": TOKEN, "EDGE_OPERATORS": "7,8"}
+        assert bot.Config.from_env(env).allowed == {7, 8}
+        # .telegram's own list wins, and an empty line there does not hide the fleet's
+        assert bot.Config.from_env({**env, "TELEGRAM_ALLOWED_IDS": "5"}).allowed == {5}
+        assert bot.Config.from_env({**env, "TELEGRAM_ALLOWED_IDS": ""}).allowed == {7, 8}

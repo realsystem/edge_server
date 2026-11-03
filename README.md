@@ -197,9 +197,11 @@ Setup:
 3. Open your bot in Telegram, send `/id`, put the number it answers into
    `TELEGRAM_ALLOWED_IDS` (several ids: comma-separated) and run the deploy again.
 
-**Home Assistant check.** Built in for the Raspberry Pi at `10.0.0.2`, port 8123, with
-nothing to configure. To change it, put `HA_HOST=<address>` (and `HA_PORT=<port>`) into
-`.telegram` and run the deploy; `HA_HOST=` (empty) switches the check off. `/status`
+**Home Assistant check.** A server deployed the classic way (no fleet file, below) keeps
+checking Home Assistant at `10.0.0.2`, port 8123, as before, with nothing to configure.
+To change it, put `HA_HOST=<address>` (and `HA_PORT=<port>`) into `.telegram` and run the
+deploy; `HA_HOST=` (empty) switches the check off. With a fleet file the address comes
+from the `ha` node at the node's site instead, and no `ha` node means no check. `/status`
 shows two lines under Host, for example
 `home assistant 10.0.0.2 ping: 3/3 replies, avg 1 ms` and
 `home assistant 10.0.0.2:8123 HTTP 200 in 85 ms`. Lost pings, no answer or an HTTP 5xx
@@ -473,6 +475,49 @@ sudo systemctl restart edge-server
 docker compose pull && docker compose up -d
 ```
 
+### Fleet file (`fleet.yaml`, optional)
+
+One small YAML file can describe the whole setup: sites, nodes with their roles, the
+Telegram operators. It is the first step of the design in
+[`docs/design/edge-system.md`](docs/design/edge-system.md). **Nothing changes unless you use
+it**: without `--config` the script reads the environment, `.telegram`, `.cam` and
+`deploy.env` exactly as before.
+
+```bash
+# look at what a file would do on this machine; changes nothing, needs no root
+./deploy-edge-server.sh --config fleet.yaml --node my-node --check
+# deploy from it
+sudo ./deploy-edge-server.sh --config fleet.yaml --node my-node
+```
+
+- **Start from your server:** `sudo ./deploy-edge-server.sh --write-config fleet.yaml --node my-node`
+  writes a one-node file from the current settings (no secrets). If the Telegram bot has been
+  watching a Home Assistant, it is written as a second node so the check keeps working.
+  Deploying that file should change nothing except the node's name in `/status`.
+  Otherwise copy `examples/fleet.minimal.yaml` or `examples/fleet.two-site.yaml`.
+- **Checked before anything changes.** Unknown settings, duplicate keys, unknown roles, an
+  `alert_order` that misses a node, a newer `schema_version` than this release understands
+  and so on are reported with their line numbers, and a bad file stops the deploy with
+  nothing touched. `examples/fleet.schema.json` is the same format as a JSON Schema for your
+  editor; CI checks the examples against it.
+- **Order of precedence:** command-line flags, then environment variables, then the node's
+  entry and its site in the file, then `deploy.env` from the last run (`--auto`), then
+  built-in defaults.
+- **Roles** set what is installed: `nvr` (Frigate, cameras), `power` (the Victron and Renogy
+  add-ons with the Bluetooth addresses under `power:`), `ha` (the Home Assistant container).
+  `base` is always on. `--role nvr,ha` replaces the node's roles for one run.
+  The `archive` and `agent` roles belong to later phases of the design; this release
+  accepts them in the file, says so, and ignores them. A node without `nvr`, or an
+  `ha-addon` node, cannot be deployed by this script yet.
+- **`--auto` and `/redeploy`** keep using the last file that deployed successfully (saved as
+  `/opt/edge-server/fleet.yaml` with the node name; the one before it as `fleet.yaml.prev`).
+  A run without flags on such a server uses the saved file too, so it can never flip the
+  node's roles. `--classic` forgets the saved file and goes back to settings from the
+  environment; what the file produced stays in `deploy.env`.
+- **Names are labels.** Node and site names appear in bot replies (`/status` says
+  `Edge server (my-node)`). They never become paths, container names or systemd units.
+- Needs `python3-yaml`; the script installs it when run as root.
+
 ## Files
 
 **Orchestrator (runs on laptop):**
@@ -481,6 +526,7 @@ docker compose pull && docker compose up -d
 **Target scripts (run on Ubuntu server via SSH):**
 - `initial-setup.sh` — System setup (static IP, Docker, storage)
 - `deploy-edge-server.sh` — Deploy the stack (Frigate, Tailscale, firewall, Telegram bot; optional Home Assistant, MQTT)
+- `tools/fleet.py` — reads and checks the optional `fleet.yaml` for the deploy script (`examples/fleet.*.yaml`)
 - `secrets.sh` — Encrypted secrets management on target
 
 **Plugins:**

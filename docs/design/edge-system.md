@@ -2,6 +2,8 @@
 
 Status: draft · Last updated: 2026-11-03
 
+Implemented so far: the Phase 1 configuration layer (`fleet.yaml`, `--config`/`--node`/`--check`/`--write-config`/`--classic`/`--role`, roles mapped onto the existing install variables, the saved fleet file for `--auto`). Not yet: node keys and signed messages, heartbeats, the fleet hash and version check, the bot split into modules, and the `archive`, `agent` and `ha-addon` parts.
+
 ## Goals and principles
 
 An edge system is a small fleet of machines, called nodes, at one or more sites. The nodes watch each other, fix known problems safely on their own, and report everything else to their operators through Telegram. Every node runs the same code; what it does is set by its roles in a small YAML file, and nothing about any particular deployment is built into the code.
