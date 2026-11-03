@@ -127,6 +127,7 @@ nodes:
 - **One file, one node chosen.** `--node <name>` tells a host which entry is itself and is saved for `--auto`. On Home Assistant OS the add-on reads the file from Home Assistant's `share` folder, and its `node` option names the node.
 - **Deploy:** `sudo ./deploy-edge-server.sh --config fleet.yaml --node site-a-nvr` on the node, or `./bootstrap.sh --config fleet.yaml --node site-a-nvr <address>` from the operator's computer. `--role` overrides the node's roles for one run.
 - **Secrets stay out.** Bot token, TOTP secret and the node's private signing key go into the existing secrets store (`secrets.sh`) on hosts and into password options in the add-on.
+- **Optional fleet settings, with defaults.** `fleet.suspect_after` (5 minutes), `fleet.control_port`, a relay's `owner`, and the incident agent's limits (`turns`, `minutes`, `tokens`).
 - **Bots are known by numeric id.** Replies are labelled with the node name; a bot's display name is whatever the operator chose in @BotFather and appears nowhere in the code. A node's identity is its name and its signing key, not its bot, so a bot can be replaced (new `bot_id`) without changing who the node is.
 - **Validation first.** Every node validates the whole file before changing anything: unique names, known roles and packagings, the settings each node's roles need, `alert_order` covering every node, `archive_target` naming an archive node. Errors name the line. Settings for roles a node does not run are ignored, but an unknown setting is an error, never silently skipped. The file starts with a `schema_version`, and a release refuses a newer one than it understands. Each node's `public_key` (its Ed25519 signing key, not a secret) is added to its entry after the node's first deploy; the shipped examples leave the keys out.
 - **The same file everywhere, checked.** Every heartbeat carries the SHA-256 of the node's fleet file and its edge\_server version. If nodes hold different fleet files for more than 10 minutes, one warning goes to the group naming which nodes hold which version of the file, repeated daily until they match. Different software versions show in `/fleet` and get one daily notice while they differ, because add-on nodes may update later than hosts. A node reports its installed version, its running version and the result of its last deploy; a node whose deploy failed counts as different even when the numbers match. Add-on images are pinned by release tag and image digest.
@@ -138,12 +139,12 @@ nodes:
 
 | Role | Includes | Packaging |
 | --- | --- | --- |
-| `base` (always) | Bot core: group and private chats, command routing by role, auth and TOTP, alerts with confirm and repeat, heartbeats and fleet checks, `/status` `/fleet` `/diag` `/logs` `/mute` `/id`. On hosts also: Tailscale, firewall, Docker, host helpers, SMART, image cleanup, `--auto` redeploy, NUT when a battery or UPS is found | host, ha-addon |
+| `base` (always) | Bot core: group and private chats, command routing by role, auth and TOTP, alerts with confirm and repeat, heartbeats and fleet checks, signing keys, incident store, `/status` `/fleet` `/diag` `/logs` `/mute` `/id`. On hosts also: Tailscale, firewall, Docker, host helpers, SMART, image cleanup, `--auto` redeploy, NUT when a battery or UPS is found | host, ha-addon |
 | `nvr` | Frigate, camera discovery, recording storage, camera and recording alerts, `/cams`, `/events`; with `nvr.archive_target` set, the sending side of the nightly event dump | host |
 | `power` | Battery and solar plugins (Victron shunt, Renogy Rover today), `/power`, low-battery alerts, power stages | host |
 | `archive` | RAID storage, a Samba share, a receive-only target for event dumps and config backups, retention, `/archive` | host |
 | `ha` | Home Assistant status, `/ask` to a conversation agent, `/power` from HA sensors, HA restart and host reboot with a code. On an `ha-addon` node it uses the Supervisor; on a host it uses the HA container's API | host, ha-addon |
-| `agent` (later) | Claude Code incident agent, restricted `site-ops` user, incident log, approvals | host |
+| `agent` (later) | Claude Code incident agent, restricted `site-ops` account with a dispatcher, repair catalog and executor, approvals | host |
 
 **Packaging**
 
@@ -188,7 +189,7 @@ One private group holds the operators and every node's bot, and operators can al
 | `/ask <question>`, or plain text in a private chat | `ha` | Answer from the conversation agent |
 | `/incidents`, `/investigate <text>` | `agent` | Open incidents, start an investigation |
 
-**Machine messages** never go in the group: they travel in private bot-to-bot chats when \`bot\_to\_bot\` is on, and always as HTTPS between nodes over Tailscale and the LAN. HTTPS is the path the fleet depends on and is tested first; the Telegram copy is an extra path, sent every 5 minutes and on any change instead of every 60 s, to stay well inside Telegram's rate limits. Each is one line of JSON, signed with the sending node's own Ed25519 key. A bot accepts one only from a node listed in `fleet`, correctly signed, under 2 minutes old, with an `id` it has not seen before; seen ids are kept on disk, so a restart does not reopen replays.
+**Machine messages** never go in the group: they travel in private bot-to-bot chats when \`bot\_to\_bot\` is on, and always as signed HTTP between nodes over Tailscale and the LAN. That path is the one the fleet depends on and is tested first; the Telegram copy is an extra path, sent every 5 minutes and on any change instead of every 60 s, to stay well inside Telegram's rate limits. Each is one line of JSON, signed with the sending node's own Ed25519 key. A bot accepts one only from a node listed in `fleet`, correctly signed, under 2 minutes old, with an `id` it has not seen before; seen ids are kept on disk, so a restart does not reopen replays.
 
 | Type | Sent | Content |
 | --- | --- | --- |
@@ -199,6 +200,10 @@ One private group holds the operators and every node's bot, and operators can al
 | `repair_request` | When an agent needs another node to act | Target, action, reason |
 
 A machine message never runs anything by itself: the receiving node checks it against its own allowlist, rate limits and power stage, and anything beyond a safe fix still waits for an operator's code.
+
+**Message contract.** Every message carries `id`, `from`, `to` (a node or `fleet`), `created`, `expires`, `seq` (counts up per sender and survives restarts), `type`, an optional `ref` naming the incident or request it belongs to, a `body` and `sig`. Messages that matter (`repair_request`, `dump_sent`, `dump_received`, `alert_claim`) are acknowledged and retried until they expire, and a persistent outbound queue holds them while a path is down. Receiving is not doing: a `repair_request` moves through `created`, `delivered`, `accepted`, `running` and `done` or `failed`, and each step is reported back to the sender. Heartbeats carry each node's clock; a difference of more than 30 s is reported as a warning, and freshness is judged by `expires` against the receiver's own clock, so a node with a wrong clock is flagged, not trusted.
+
+**Control port.** Machine messages go to one fixed port per node (`fleet.control_port`, set once for the fleet). The listener binds only to the node's Tailscale and site LAN addresses, never to every interface, and Tailscale ACLs and the host firewall allow it between nodes only. Tailscale encrypts the traffic; on the LAN messages are signed but not secret, which is why they never carry tokens. Identity comes from the signature, so no certificates are needed. If one path is down, the sender tries the other.
 
 **Approval flow**
 
@@ -413,7 +418,7 @@ Secrets keep their current homes: `TELEGRAM_BOT_TOKEN` and `REBOOT_TOTP_SECRET` 
 
 ## Build plan and drills
 
-Phase 0 tests two things before any code depends on them: that HTTPS heartbeats work between all nodes over Tailscale and the LAN, which the fleet needs, and whether bots can talk to each other through Telegram, which is optional. The Telegram docs describe bot-to-bot messaging at the low-level API, and how the Bot API exposes it needs confirming.
+Phase 0 tests two things before any code depends on them: that signed heartbeats work between all nodes over Tailscale and the LAN, which the fleet needs, and whether bots can talk to each other through Telegram, which is optional. The Telegram docs describe bot-to-bot messaging at the low-level API, and how the Bot API exposes it needs confirming.
 
 ```mermaid
 flowchart TB
