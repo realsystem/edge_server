@@ -1,0 +1,28 @@
+# examples/fleet.minimal.yaml: the smallest fleet, one node.
+# One node cannot report its own death; add a second node, ideally at
+# another site, when you can.
+# Names, ids and addresses are placeholders; choose your own.
+# Planned format: the deploy script does not read this file yet.
+# See docs/design/edge-system.md (Configuration, Deployment).
+fleet:
+  name: my-fleet
+  telegram:
+    group_id: -1000000000000     # the operator group
+    operators: [100000001]       # your Telegram user id (send /id to the bot)
+    bot_to_bot: false
+  alert_order: [node-1]
+
+sites:
+  site-1:
+    timezone: UTC                # your IANA time zone, e.g. Europe/Berlin
+    # lan_subnet: 192.168.1.0/24 # optional; detected when absent
+
+nodes:
+  node-1:                        # lowercase letters, digits and hyphens
+    site: site-1
+    packaging: host
+    roles: [nvr]                 # base is always on
+    bot_id: 200000001            # the number before ":" in the bot's token
+    tailscale: node-1
+    nvr:
+      storage: {uuid: "<filesystem uuid>", mount: /mnt/storage}

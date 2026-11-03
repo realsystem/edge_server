@@ -5,6 +5,11 @@
 Headless Ubuntu edge server for Frigate NVR and Tailscale, with optional Home Assistant and
 Mosquitto MQTT.
 
+**Planned:** a fleet of nodes at one or more sites that watch each other, fix known problems
+on their own and report to a Telegram group, configured from one `fleet.yaml`. See the draft
+design in [docs/design/edge-system.md](docs/design/edge-system.md) and the example configs in
+[examples/](examples/). Not implemented yet; today's deployment works as described below.
+
 ## Components
 
 | Component | Purpose | Alternatives | Cost | Complexity |

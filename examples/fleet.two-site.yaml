@@ -1,0 +1,63 @@
+# examples/fleet.two-site.yaml: a remote off-grid site and a home site.
+# Names, ids and addresses are placeholders; choose your own.
+# Planned format: the deploy script does not read this file yet.
+# See docs/design/edge-system.md (Configuration, Deployment).
+fleet:
+  name: two-site
+  telegram:
+    group_id: -1000000000000
+    operators: [100000001]
+    bot_to_bot: false
+  alert_order: [home-server, remote-nvr, remote-ha, home-ha]
+
+sites:
+  remote:                      # off-grid: solar, battery, satellite uplink
+    timezone: UTC
+    power: {conserve: 40, shed: 25, survive: 15, dark: 10}
+    relays:
+      - {name: uplink, url: http://192.168.10.50, powers: router}
+      - {name: poe,    url: http://192.168.10.52, powers: poe-switch}
+      - {name: ha,     url: http://192.168.10.51, powers: remote-ha}
+  home:
+    timezone: UTC
+
+nodes:
+  remote-nvr:                  # laptop with its own battery
+    site: remote
+    packaging: host
+    roles: [nvr, power, agent]
+    bot_id: 200000001
+    tailscale: remote-nvr
+    lan: 192.168.10.10
+    nvr:
+      storage: {uuid: "<filesystem uuid>", mount: /mnt/storage}
+      archive_target: home-server
+      dump_time: "02:00"
+    power:
+      victron: {address: "AA:BB:CC:DD:EE:01"}
+      renogy: {address: "AA:BB:CC:DD:EE:02"}
+  remote-ha:                   # Raspberry Pi 5, Home Assistant OS
+    site: remote
+    packaging: ha-addon
+    roles: [ha]
+    bot_id: 200000002
+    tailscale: remote-ha
+    lan: 192.168.10.2
+  home-server:                 # desktop on a UPS, replacing a NAS operating system
+    site: home
+    packaging: host
+    roles: [nvr, archive, agent]
+    bot_id: 200000003
+    tailscale: home-server
+    nvr:
+      storage: {uuid: "<filesystem uuid>", mount: /srv/archive/cameras}
+    archive:
+      arrays: [{uuid: "<filesystem uuid>", mount: /srv/archive}]
+      samba: {share: files, user: operator}
+      retention_days: {events: 14, configs: 30}
+  home-ha:                     # Raspberry Pi 3, Home Assistant OS (64-bit)
+    site: home
+    packaging: ha-addon
+    roles: [ha]
+    bot_id: 200000004
+    tailscale: home-ha
