@@ -7,6 +7,7 @@ system tools such as docker/systemctl/chown replaced by stubs on PATH.
 
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -289,9 +290,9 @@ def stub_path(tmp_path):
     return bin_dir
 
 
-def run_sourced(script, body, stub_path, env):
+def run_sourced(script, body, stub_path, env, args=()):
     prelude = (
-        f"source {REPO / script}\n"
+        f"source {REPO / script} {shlex.join(args)}\n"
         # keep logging out of /var/log and /tmp
         "log() { printf '%s\\n' \"$*\"; }\n"
         "info() { printf '%s\\n' \"$*\"; }; warn() { printf '%s\\n' \"$*\"; }\n"
@@ -1060,7 +1061,8 @@ class TestTelegramBotInDeploy:
         assert bot["image"] == "edge-telegram-bot:local" and bot["pull_policy"] == "never"
         assert bot["read_only"] is True and bot["pid"] == "host" and bot["init"] is True
         assert bot["cap_drop"] == ["ALL"] and "no-new-privileges:true" in bot["security_opt"]
-        assert bot["env_file"] == "./.telegram"
+        # deploy-time defaults first, so anything in the secrets file wins over them
+        assert bot["env_file"] == ["./bot-defaults.env", "./.telegram"]
         assert "ports" not in bot and "privileged" not in bot and "devices" not in bot
         assert f"STORAGE_LABEL={tmp_path / 'storage'}" in bot["environment"]  # shown in /status
         # host paths are mounted read-only
@@ -2320,3 +2322,348 @@ def test_bot_container_may_send_unprivileged_ping():
     text = (Path(__file__).resolve().parent.parent / "deploy-edge-server.sh").read_text()
     bot_block = text[text.index("  telegram-bot:") :]
     assert "net.ipv4.ping_group_range=0 2147483647" in bot_block.split("\nEOF")[0]
+
+
+class TestFleetMode:
+    """--config/--node and friends. The point of most tests: without them, nothing changes."""
+
+    DEPLOY = str(REPO / "deploy-edge-server.sh")
+
+    @staticmethod
+    def fleet_file(tmp_path, change=None, name="fleet.yaml"):
+        data = yaml.safe_load((REPO / "examples/fleet.two-site.yaml").read_text())
+        for node in data["nodes"].values():
+            for key in ("storage", "arrays"):
+                for block in (node.get("nvr", {}), node.get("archive", {})):
+                    if key == "storage" and "storage" in block:
+                        block["storage"]["uuid"] = "1234-ABCD"
+                    if key == "arrays" and "arrays" in block:
+                        block["arrays"][0]["uuid"] = "5678-EFGH"
+        if change:
+            change(data)
+        path = tmp_path / name
+        path.write_text(yaml.safe_dump(data, sort_keys=False))
+        return path
+
+    def source(self, stub_path, tmp_path, body, args=(), **env):
+        full = {"EDGE_SERVER_DIR": str(tmp_path / "app"), "EDGE_STORAGE_DIR": str(tmp_path / "s")}
+        full.update(env)
+        return run_sourced("deploy-edge-server.sh", body, stub_path, full, args)
+
+    def script(self, tmp_path, *args, **env):
+        full = {**os.environ, "EDGE_SERVER_DIR": str(tmp_path / "app"), **env}
+        return subprocess.run(
+            ["bash", self.DEPLOY, *args], capture_output=True, text=True, env=full, timeout=60
+        )
+
+    # ---- classic mode is what it always was
+    def test_no_fleet_flags_means_no_fleet_mode(self, stub_path, tmp_path):
+        body = "echo A=$FLEET_ACTIVE B=$HA_HOST C=$HA_PORT D=[$EDGE_NODE] E=$INSTALL_HOMEASSISTANT"
+        out = self.source(stub_path, tmp_path, body)
+        assert out.returncode == 0, out.stderr
+        assert "A=false B=10.0.0.2 C=8123 D=[] E=false" in out.stdout
+
+    def test_the_home_assistant_check_can_still_be_switched_off(self, stub_path, tmp_path):
+        out = self.source(stub_path, tmp_path, "echo [$HA_HOST]", HA_HOST="")
+        assert "[]" in out.stdout
+        out = self.source(stub_path, tmp_path, "echo [$HA_HOST]", HA_HOST="192.168.9.9")
+        assert "[192.168.9.9]" in out.stdout
+
+    def test_an_old_deploy_env_without_ha_settings_keeps_the_check(self, stub_path, tmp_path):
+        app = tmp_path / "app"
+        app.mkdir()
+        (app / "deploy.env").write_text("[[ -v INSTALL_MQTT ]] || INSTALL_MQTT=true\n")
+        out = self.source(stub_path, tmp_path, "echo $INSTALL_MQTT $HA_HOST", args=["--auto"])
+        assert "true 10.0.0.2" in out.stdout
+
+    def test_timezone_env_wins_then_the_machines_own_zone_then_utc(self, stub_path, tmp_path):
+        out = self.source(stub_path, tmp_path, "echo $TIMEZONE", TIMEZONE="Asia/Tokyo")
+        assert out.stdout.strip().endswith("Asia/Tokyo")
+        (stub_path / "timedatectl").write_text("#!/usr/bin/env bash\necho Europe/Paris\n")
+        (stub_path / "timedatectl").chmod(0o755)
+        out = self.source(stub_path, tmp_path, "echo $TIMEZONE")
+        assert out.stdout.strip().endswith("Europe/Paris")
+        (stub_path / "timedatectl").write_text("#!/usr/bin/env bash\necho n/a\n")
+        out = self.source(stub_path, tmp_path, "echo $TIMEZONE")
+        assert out.returncode == 0 and out.stdout.strip().splitlines()[-1] != "n/a"
+
+    def test_saved_settings_carry_the_ha_check_for_auto(self, stub_path, tmp_path):
+        out = self.source(stub_path, tmp_path, "save_settings; cat $SETTINGS_FILE")
+        assert "[[ -v HA_HOST ]] || HA_HOST=10.0.0.2" in out.stdout
+        assert "FLEET" not in out.stdout
+
+    def test_classic_never_writes_fleet_state(self, stub_path, tmp_path):
+        out = self.source(stub_path, tmp_path, "mkdir -p $APP_DIR; save_fleet_state")
+        assert out.returncode == 0
+        assert not (tmp_path / "app/fleet.yaml").exists()
+        assert not (tmp_path / "app/fleet.state").exists()
+
+    # ---- the bot's defaults file
+    def test_classic_bot_defaults(self, stub_path, tmp_path):
+        out = self.source(
+            stub_path,
+            tmp_path,
+            "mkdir -p $APP_DIR; write_bot_defaults; cat $APP_DIR/bot-defaults.env",
+        )
+        assert out.returncode == 0, out.stderr
+        lines = [
+            line for line in out.stdout.splitlines() if "=" in line and not line.startswith("#")
+        ]
+        assert lines == ["HA_HOST=10.0.0.2", "HA_PORT=8123"]
+
+    def test_bot_defaults_in_fleet_mode_carry_the_node_and_operators(self, stub_path, tmp_path):
+        path = self.fleet_file(tmp_path)
+        body = "mkdir -p $APP_DIR; write_bot_defaults; cat $APP_DIR/bot-defaults.env"
+        out = self.source(
+            stub_path, tmp_path, body, ["--config", str(path), "--node", "remote-nvr"]
+        )
+        assert out.returncode == 0, out.stderr
+        for line in ("HA_HOST=192.168.10.2", "EDGE_NODE=remote-nvr", "EDGE_OPERATORS=100000001"):
+            assert line in out.stdout.splitlines()
+
+    @pytest.mark.parametrize("host", ["", "bad host", "x;rm -rf /", "-x"])
+    def test_a_bad_or_empty_ha_host_never_reaches_the_bot(self, stub_path, tmp_path, host):
+        body = "mkdir -p $APP_DIR; write_bot_defaults; cat $APP_DIR/bot-defaults.env"
+        out = self.source(stub_path, tmp_path, body, HA_HOST=host)
+        written = out.stdout.split("# Written by")[-1]  # the file, not the warning before it
+        assert "\nHA_HOST=\n" in written and "rm" not in written
+
+    def test_a_changed_default_recreates_the_bot_and_an_unchanged_one_does_not(
+        self, stub_path, tmp_path
+    ):
+        body = (
+            "mkdir -p $APP_DIR; TELEGRAM_CHANGED=false; write_bot_defaults; echo first=$TELEGRAM_CHANGED;"
+            " TELEGRAM_CHANGED=false; write_bot_defaults; echo again=$TELEGRAM_CHANGED"
+        )
+        out = self.source(stub_path, tmp_path, body)
+        assert "first=true" in out.stdout and "again=false" in out.stdout
+
+    # ---- fleet mode
+    def test_settings_come_from_the_nodes_entry(self, stub_path, tmp_path):
+        path = self.fleet_file(
+            tmp_path, lambda d: d["nodes"]["remote-nvr"].update(options={"mqtt": True})
+        )
+        body = "echo $FLEET_ACTIVE $INSTALL_MQTT $TIMEZONE $HA_HOST $VICTRON_ADDRESS $EDGE_NODE $EDGE_SITE"
+        out = self.source(
+            stub_path, tmp_path, body, ["--config", str(path), "--node", "remote-nvr"]
+        )
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip().endswith(
+            "true true UTC 192.168.10.2 AA:BB:CC:DD:EE:01 remote-nvr remote"
+        )
+
+    def test_environment_variables_beat_the_fleet_file(self, stub_path, tmp_path):
+        path = self.fleet_file(
+            tmp_path, lambda d: d["nodes"]["remote-nvr"].update(options={"mqtt": True})
+        )
+        out = self.source(
+            stub_path,
+            tmp_path,
+            "echo $INSTALL_MQTT $TIMEZONE $HA_HOST",
+            ["--config", str(path), "--node", "remote-nvr"],
+            INSTALL_MQTT="false",
+            TIMEZONE="Asia/Tokyo",
+            HA_HOST="",
+        )
+        assert out.stdout.strip().endswith("false Asia/Tokyo")
+
+    def test_the_fleet_file_beats_deploy_env(self, stub_path, tmp_path):
+        path = self.fleet_file(tmp_path)
+        app = tmp_path / "app"
+        app.mkdir()
+        (app / "deploy.env").write_text("[[ -v TIMEZONE ]] || TIMEZONE=Asia/Tokyo\n")
+        body = "echo $TIMEZONE"
+        out = self.source(stub_path, tmp_path, body, ["--auto"])
+        assert out.stdout.strip().endswith("Asia/Tokyo")  # classic --auto: deploy.env decides
+        (app / "fleet.yaml").write_text(path.read_text())
+        (app / "fleet.state").write_text("node=remote-nvr\n")
+        out = self.source(stub_path, tmp_path, body, ["--auto"])
+        assert out.stdout.strip().endswith("UTC")  # fleet mode: the file decides
+
+    def test_role_flag_replaces_the_nodes_roles_for_the_run(self, stub_path, tmp_path):
+        path = self.fleet_file(tmp_path)
+        body = "echo $INSTALL_HOMEASSISTANT $VICTRON_INSTALL $FLEET_ROLES"
+        args = ["--config", str(path), "--node", "remote-nvr", "--role", "nvr,ha"]
+        out = self.source(stub_path, tmp_path, body, args)
+        assert out.stdout.strip().endswith("true false base,nvr,ha")
+
+    def test_an_invalid_file_changes_nothing(self, tmp_path):
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("schema_version: 9\n")
+        result = self.script(tmp_path, "--config", str(bad), "--node", "n")
+        assert result.returncode == 1
+        assert (
+            "Nothing has been changed" in result.stderr
+            and "newer than this release" in result.stderr
+        )
+        assert not (tmp_path / "app").exists()
+
+    def test_check_needs_no_root_and_changes_nothing(self, tmp_path):
+        path = self.fleet_file(tmp_path)
+        result = self.script(tmp_path, "--config", str(path), "--node", "remote-nvr", "--check")
+        assert result.returncode == 0, result.stderr
+        assert "node remote-nvr at site remote" in result.stdout
+        assert "HA_HOST=192.168.10.2" in result.stdout
+        assert not (tmp_path / "app").exists()
+
+    def test_check_reports_a_file_it_cannot_deploy(self, tmp_path):
+        path = self.fleet_file(tmp_path)
+        result = self.script(tmp_path, "--config", str(path), "--node", "remote-ha", "--check")
+        assert result.returncode == 0 and "not a host" in result.stdout
+        result = self.script(tmp_path, "--config", str(path), "--node", "remote-ha")
+        assert result.returncode == 1 and "deploy it through its add-on" in result.stderr
+
+    def test_the_example_placeholders_are_not_deployed(self, tmp_path):
+        result = self.script(
+            tmp_path, "--config", str(REPO / "examples/fleet.minimal.yaml"), "--node", "node-1"
+        )
+        assert result.returncode == 1 and "replace the <placeholder>" in result.stderr
+
+    @pytest.mark.parametrize(
+        "args, message",
+        [
+            (["--config", "f.yaml"], "--config needs --node"),
+            (["--check"], "--check needs --config"),
+            (["--auto", "--check"], "cannot be combined with --auto"),
+            (["--auto", "--classic"], "cannot be combined with --auto"),
+            (["--write-config", "x.yaml", "--uninstall", "--node", "n"], "cannot be combined"),
+            (["--bogus"], "Unknown option"),
+        ],
+    )
+    def test_flag_mistakes_are_refused_before_anything_happens(self, tmp_path, args, message):
+        result = self.script(tmp_path, *args)
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert message in result.stderr
+        assert not (tmp_path / "app").exists()
+
+    def test_auto_refuses_a_new_config_file(self, tmp_path):
+        path = self.fleet_file(tmp_path)
+        result = self.script(tmp_path, "--auto", "--config", str(path), "--node", "remote-nvr")
+        assert result.returncode == 2 and "uses the fleet file saved" in result.stderr
+
+    def test_usage_lists_the_new_options(self, stub_path, tmp_path):
+        out = self.source(stub_path, tmp_path, "usage")
+        for flag in ("--config", "--node", "--role", "--check", "--write-config", "--classic"):
+            assert flag in out.stdout
+
+    # ---- the saved copy
+    def deployed(self, stub_path, tmp_path, path, extra_body="", args=None, **env):
+        args = args or ["--config", str(path), "--node", "remote-nvr"]
+        body = "mkdir -p $APP_DIR; save_fleet_state; " + extra_body
+        return self.source(stub_path, tmp_path, body, args, **env)
+
+    def test_a_successful_deploy_saves_the_file_and_the_node(self, stub_path, tmp_path):
+        path = self.fleet_file(tmp_path)
+        out = self.deployed(stub_path, tmp_path, path)
+        assert out.returncode == 0, out.stderr
+        assert (tmp_path / "app/fleet.yaml").read_text() == path.read_text()
+        assert (tmp_path / "app/fleet.state").read_text() == "node=remote-nvr\n"
+
+    def test_the_previous_file_is_kept_when_it_changes(self, stub_path, tmp_path):
+        first = self.fleet_file(tmp_path, name="a.yaml")
+        self.deployed(stub_path, tmp_path, first)
+        second = self.fleet_file(
+            tmp_path, lambda d: d["fleet"].update(name="renamed"), name="b.yaml"
+        )
+        self.deployed(stub_path, tmp_path, second)
+        assert (tmp_path / "app/fleet.yaml").read_text() == second.read_text()
+        assert (tmp_path / "app/fleet.yaml.prev").read_text() == first.read_text()
+
+    def test_role_override_is_saved_for_auto(self, stub_path, tmp_path):
+        path = self.fleet_file(tmp_path)
+        args = ["--config", str(path), "--node", "remote-nvr", "--role", "nvr,ha"]
+        self.deployed(stub_path, tmp_path, path, args=args)
+        assert (tmp_path / "app/fleet.state").read_text() == "node=remote-nvr\nroles=nvr,ha\n"
+        out = self.source(stub_path, tmp_path, "echo $FLEET_ROLES $FLEET_FROM_SAVED", ["--auto"])
+        assert out.stdout.strip().endswith("base,nvr,ha true")
+
+    def test_later_runs_without_flags_use_the_saved_file(self, stub_path, tmp_path):
+        path = self.fleet_file(
+            tmp_path, lambda d: d["nodes"]["remote-nvr"].update(options={"mqtt": True})
+        )
+        self.deployed(stub_path, tmp_path, path)
+        path.unlink()  # the original is gone; the saved copy is what counts
+        out = self.source(stub_path, tmp_path, "echo $FLEET_ACTIVE $FLEET_NODE $INSTALL_MQTT")
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip().endswith("true remote-nvr true")
+
+    def test_classic_leaves_fleet_mode_and_keeps_the_settings(self, stub_path, tmp_path):
+        path = self.fleet_file(tmp_path)
+        self.deployed(stub_path, tmp_path, path, extra_body="save_settings")
+        body = "echo $FLEET_ACTIVE $TIMEZONE; leave_fleet_mode; ls $APP_DIR"
+        out = self.source(stub_path, tmp_path, body, ["--classic"])
+        assert out.returncode == 0, out.stderr
+        assert "false UTC" in out.stdout  # the fleet's zone survives in deploy.env
+        assert "fleet.yaml" not in out.stdout.split("Left fleet mode")[-1]
+        assert not (tmp_path / "app/fleet.state").exists()
+        assert (tmp_path / "app/deploy.env").exists()
+
+    # ---- --write-config
+    def test_write_config_end_to_end(self, tmp_path):
+        tele = tmp_path / ".telegram"
+        tele.write_text(
+            "TELEGRAM_BOT_TOKEN=123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"
+            "TELEGRAM_ALLOWED_IDS=42\nHA_HOST=192.168.5.5\n"
+        )
+        target = tmp_path / "out.yaml"
+        result = self.script(
+            tmp_path,
+            "--write-config",
+            str(target),
+            "--node",
+            "edge-1",
+            TELEGRAM_CREDENTIALS_FILE=str(tele),
+            TIMEZONE="Europe/Berlin",
+        )
+        assert result.returncode == 0, result.stderr
+        text = target.read_text()
+        assert "AAAAAAAAAA" not in text  # no secret
+        data = yaml.safe_load(text)
+        assert data["fleet"]["telegram"]["operators"] == [42]
+        assert data["nodes"]["edge-1"]["bot_id"] == 123456789
+        assert data["nodes"]["home-assistant"]["lan"] == "192.168.5.5"  # .telegram beat the default
+        assert data["sites"]["site-1"]["timezone"] == "Europe/Berlin"
+        checked = self.script(tmp_path, "--config", str(target), "--node", "edge-1", "--check")
+        assert checked.returncode == 0, checked.stderr
+
+    def test_write_config_uses_the_legacy_check_when_nothing_else_is_set(self, tmp_path):
+        target = tmp_path / "out.yaml"
+        result = self.script(tmp_path, "--write-config", str(target), "--node", "edge-1")
+        assert result.returncode == 0, result.stderr
+        assert yaml.safe_load(target.read_text())["nodes"]["home-assistant"]["lan"] == "10.0.0.2"
+
+    def test_write_config_does_not_overwrite(self, tmp_path):
+        target = tmp_path / "out.yaml"
+        target.write_text("mine")
+        result = self.script(tmp_path, "--write-config", str(target), "--node", "edge-1")
+        assert result.returncode == 1 and target.read_text() == "mine"
+
+    # ---- the Telegram bot's checks
+    def test_fleet_operators_stand_in_for_an_empty_id_list(self, stub_path, tmp_path):
+        tele = f"TELEGRAM_BOT_TOKEN={BOT_TOKEN}\nTELEGRAM_ALLOWED_IDS=\n"
+        (tmp_path / ".telegram").write_text(tele)
+        out = self.source(
+            stub_path,
+            tmp_path,
+            "prepare_telegram_bot",
+            TELEGRAM_CREDENTIALS_FILE=str(tmp_path / ".telegram"),
+            EDGE_OPERATORS="7,8",
+        )
+        assert "using the fleet file's operators (7,8)" in out.stdout
+        assert "nobody can use the bot" not in out.stdout
+
+    def test_a_token_for_another_bot_than_the_fleet_file_names_is_a_warning(
+        self, stub_path, tmp_path
+    ):
+        (tmp_path / ".telegram").write_text(
+            f"TELEGRAM_BOT_TOKEN={BOT_TOKEN}\nTELEGRAM_ALLOWED_IDS=1\n"
+        )
+        out = self.source(
+            stub_path,
+            tmp_path,
+            "prepare_telegram_bot",
+            TELEGRAM_CREDENTIALS_FILE=str(tmp_path / ".telegram"),
+            EDGE_BOT_ID="999",
+            EDGE_NODE="n",
+        )
+        assert "gives node n the bot_id 999" in out.stdout

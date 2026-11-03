@@ -38,6 +38,7 @@ dev = [
     "ruff>=0.1.0",
     "mypy>=1.0.0",
     "pyyaml>=6.0",  # tests parse the configs the deploy scripts generate
+    "jsonschema>=4.0",  # CI checks examples/fleet.*.yaml against examples/fleet.schema.json
 ]
 
 [project.scripts]

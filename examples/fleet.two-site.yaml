@@ -1,6 +1,6 @@
 # examples/fleet.two-site.yaml: a remote off-grid site and a home site.
 # Names, ids and addresses are placeholders; choose your own.
-# Planned format: the deploy script does not read this file yet.
+# Use it: ./deploy-edge-server.sh --config examples/fleet.two-site.yaml --node remote-nvr --check
 # See docs/design/edge-system.md (Configuration, Deployment).
 schema_version: 1
 

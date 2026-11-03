@@ -35,7 +35,9 @@ sudo -E ./deploy-edge-server.sh
 | `TAILSCALE_AUTH_KEY` | Reusable auth key from Tailscale admin | (prompted) |
 | `EXTERNAL_DRIVE_UUID` | UUID of external storage drive | (prompted) |
 | `LOCAL_SUBNET` | Allowed subnet for firewall | (detected from the ethernet interface) |
-| `TIMEZONE` | Server timezone | `America/Los_Angeles` |
+| `TIMEZONE` | Server timezone | the zone the machine is already set to, else `UTC` |
+| `HA_HOST`, `HA_PORT` | Home Assistant the bot's `/status` pings (empty `HA_HOST` = off) | `10.0.0.2`, `8123` (classic mode; fleet mode: the `ha` node at the site) |
+| `--config FILE --node NAME` | Fleet mode: settings from the node's entry in a fleet file (see the README) | off |
 | `MQTT_USER` | MQTT broker username | `admin` |
 | `MQTT_PASS` | MQTT broker password | (auto-generated) |
 
