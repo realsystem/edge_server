@@ -186,7 +186,7 @@ One private group holds the operators and every node's bot, and operators can al
 | `/ask <question>`, or plain text in a private chat | `ha` | Answer from the conversation agent |
 | `/incidents`, `/investigate <text>` | `agent` | Open incidents, start an investigation |
 
-**Machine messages** never go in the group: they travel in private bot-to-bot chats when \`bot\_to\_bot\` is on, otherwise as HTTPS between nodes over Tailscale and the LAN. Each is one line: a type, a compact JSON body and an HMAC-SHA256 signature made with the fleet key. A bot accepts one only from a node listed in `fleet`, correctly signed, under 2 minutes old, with an `id` it has not seen before.
+**Machine messages** never go in the group: they travel in private bot-to-bot chats when \`bot\_to\_bot\` is on, and always as HTTPS between nodes over Tailscale and the LAN. HTTPS is the path the fleet depends on and is tested first; the Telegram copy is an extra path, sent every 5 minutes and on any change instead of every 60 s, to stay well inside Telegram's rate limits. Each is one line: a type, a compact JSON body and an HMAC-SHA256 signature made with the fleet key. A bot accepts one only from a node listed in `fleet`, correctly signed, under 2 minutes old, with an `id` it has not seen before.
 
 | Type | Sent | Content |
 | --- | --- | --- |
@@ -211,7 +211,7 @@ A machine message never runs anything by itself: the receiving node checks it ag
 
 Most checks already exist in the edge\_server bot; new are the heartbeats, the uplink, Tailscale and Telegram checks, and the RAID and dump checks. Nothing here needs the AI.
 
-**Heartbeats.** Every 60 s each bot sends a signed heartbeat to every other bot. Every 5 minutes each node also checks the others over Tailscale, and nodes at the same site over the LAN. A node is down after 5 minutes with no heartbeat and no Tailscale or LAN answer; one silent path alone is a path warning.
+**Heartbeats.** Every 60 s each bot sends a signed heartbeat to every other bot. Every 5 minutes each node also checks the others over Tailscale, and nodes at the same site over the LAN. A node is down after 5 minutes with no heartbeat and no Tailscale or LAN answer; one silent path alone is a path warning. When every node of a site goes silent at once, the alert says "site unreachable" (uplink or power; from outside the cause cannot be known) with each node's last battery level and stage, instead of one node-down alert per node. Meanwhile the site's nodes keep checking each other over the LAN and queue their reports. When the site returns, they send the outage length and their uptimes: uptimes that span the outage mean the link failed, uptimes that restarted mean power was lost.
 
 | Check | Runs on | Every | Alert when | Exists today |
 | --- | --- | --- | --- | --- |
@@ -253,6 +253,8 @@ Repairs climb four layers; each acts only when the one below has failed or does 
 | Person detected, camera tampered | `nvr` | None; never automatic | That node's bot at once, with snapshot |
 
 A node with its own battery, such as a laptop, rides through power cuts but cannot be rebooted by cutting its power; where that matters, prefer hardware without a battery behind a relay.
+
+**Sudden power loss.** State the bots keep (queues, counters, message ids already seen) is small and written atomically: a temporary file is flushed, then renamed, so a power cut loses at most the last update. Logs are capped. Where the board allows, `ha-addon` nodes should boot from an SSD instead of a memory card. A read-only root filesystem is not required: Home Assistant OS manages its own storage, and `nvr` hosts write recordings anyway. The Survive and Dark stages shut nodes down cleanly before the battery cuts out.
 
 ## Power-aware operation
 
@@ -318,7 +320,7 @@ Automatic fixes must be reversible, listed in advance and limited in how often t
 - Uses `dontAsk` permission mode with an explicit allow list, so a step outside the list is denied and becomes a report. Never `--dangerously-skip-permissions`.
 - Reads a runbook generated from `fleet.yaml`: the fleet, roles, tiers and these rules.
 - Never gets a root shell: on other hosts a restricted `site-ops` user whose `sudo` allows only the host helpers; on `ha-addon` nodes a signed `repair_request` to that node's bot.
-- Each run has a turn limit and a wall-clock timeout.
+- Each run has three limits, a turn limit (default 20), a wall-clock timeout (default 10 minutes) and a token ceiling, all set in the agent section of fleet.yaml. Reaching any of them stops the run, sends what it found so far to the operators (L3) and counts toward the circuit breaker; a run that loops is cut off and never restarted by itself.
 
 **Security**
 
@@ -337,13 +339,13 @@ The goal is that someone who clones edge\_server can build their own fleet from 
 
 **edge\_server**
 
-- Read and validate `fleet.yaml` (`--config`, `--node`, `--write-config`) and add the fleet hash and version check; the script installs `python3-yaml` if it is missing.
+- Read and validate `fleet.yaml` (`--config`, `--node`, `--write-config`) add a `--check` that validates a file without deploying it, and add the fleet hash and version check; the script installs `python3-yaml` if it is missing.
 - `--role` and `node.roles` set the defaults of the existing `INSTALL_*`, `VICTRON_INSTALL` and `RENOGY_INSTALL` variables; an explicit variable still wins. Roles are saved for `--auto`. No config means today's behavior.
 - Dropping a role removes its containers and services but keeps their data, as the script already does for Home Assistant and MQTT.
 - Split `telegram-bot/bot.py` (about 1,900 lines) into an installable package: a core plus one module per role, versioned with the release tags.
 - Remove deployment-specific defaults: `HA_HOST=10.0.0.2` (comes from `fleet.yaml` now), the fixed `TIMEZONE` default (from the site's timezone, else the system's), and README wording about "the laptop" and "the Raspberry Pi". `REDEPLOY_REPO` keeps the upstream default and becomes settable in `fleet.yaml` for forks.
 - Replace the README's advice to use an outside dead-man's switch with the fleet heartbeats.
-- Add `examples/edge.minimal.yaml`, `examples/edge.two-site.yaml`, and a document describing the add-on contract.
+- Add `examples/fleet.minimal.yaml`, `examples/fleet.two-site.yaml`, a JSON Schema for the file (`examples/fleet.schema.json`) that CI checks the examples against, and a document describing the add-on contract.
 
 **Home Assistant add-on (example: farm\_agent)**
 
@@ -358,7 +360,7 @@ The deploy script keeps working exactly as it does today and gains a fleet mode.
 | Mode | Started with | Behavior |
 | --- | --- | --- |
 | Classic (default) | `sudo ./deploy-edge-server.sh`, and `--auto` or `/redeploy` on an install without a fleet file | Unchanged: environment variables, `.telegram`, `.cam`, prompts and `deploy.env`, as today |
-| Fleet | `sudo ./deploy-edge-server.sh --config fleet.yaml --node <name>` | Settings come from the node's entry and its site; the file and node name are saved, so `--auto` and `/redeploy` keep using them |
+| Fleet | `sudo ./deploy-edge-server.sh --config fleet.yaml --node <name>` | The file is checked first (the same check as `--check`), and an invalid file stops the deploy with nothing changed. Settings come from the node's entry and its site; the last good file and node name are saved (a rejected new file never replaces it, and the heartbeat reports the rejection), so `--auto` and `/redeploy` keep using them |
 
 **Where a setting comes from in fleet mode**, first match wins:
 
@@ -399,7 +401,7 @@ Secrets keep their current homes: `TELEGRAM_BOT_TOKEN` and `REBOOT_TOTP_SECRET` 
 
 ## Build plan and drills
 
-Phase 0 tests the one assumption everything rests on, that bots can talk to each other through Telegram, before any code depends on it. The Telegram docs describe bot-to-bot messaging at the low-level API, and how the Bot API exposes it needs confirming.
+Phase 0 tests two things before any code depends on them: that HTTPS heartbeats work between all nodes over Tailscale and the LAN, which the fleet needs, and whether bots can talk to each other through Telegram, which is optional. The Telegram docs describe bot-to-bot messaging at the low-level API, and how the Bot API exposes it needs confirming.
 
 ```mermaid
 flowchart TB
@@ -423,6 +425,9 @@ flowchart TB
 - [ ] Unplug a site's router: one alert from another site, the uplink relay cycles, the site reports the outage length
 - [ ] Stop Tailscale on one node: one path warning, no node-down alert
 - [ ] Block Telegram on one node's firewall: checks continue over Tailscale, one summary when unblocked
+- [ ] Cut a whole site's uplink: one "site unreachable" alert, and on return the outage length and whether the link or the power failed
+- [ ] Give a node a broken fleet.yaml: the deploy stops, the old file stays, the heartbeat reports it
+- [ ] Make the incident agent loop: it is cut off at its limit and the operators get what it found
 - [ ] Stop Home Assistant on an `ha` node: restarted within 5 minutes
 - [ ] Stop one bot: the first healthy node in `alert_order` reports it while LAN and Tailscale still answer
 - [ ] Unplug a camera: the right bot names it
