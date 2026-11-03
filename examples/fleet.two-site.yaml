@@ -2,6 +2,8 @@
 # Names, ids and addresses are placeholders; choose your own.
 # Planned format: the deploy script does not read this file yet.
 # See docs/design/edge-system.md (Configuration, Deployment).
+schema_version: 1
+
 fleet:
   name: two-site
   telegram:
