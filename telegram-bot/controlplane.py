@@ -30,6 +30,13 @@ original form again. ``"envelope": false`` in fleet.json turns envelopes off. No
 signs as ``cell:x``; the heartbeat is ``health.heartbeat``, the ack ``control.ack`` (its
 ``causationid`` is the acked id), and the addressee goes in ``data.to``.
 
+Signed registry. When the fleet file is an Autonomy registry, fleet.json carries it and
+its owner signature; the node verifies them (``autonomy_core.RegistryStore``) against the
+root key it pinned on first use, refuses older serials, and keeps the last valid registry
+when an update is refused. Peer keys then come only from the verified registry, and the
+components it lists for this node may send ``health.reported`` / ``health.heartbeat``
+envelopes, shown under /fleet. Unknown and revoked identities are refused.
+
 Needs the ``cryptography`` and ``autonomy-core`` packages (the bot image installs them
 for fleets).
 """
@@ -148,6 +155,24 @@ class SeenStore(core.SeenStore):
 
 Counter = core.Counter  # a number that only goes up and survives restarts (seq)
 Outbox = core.Outbox  # messages kept on disk and retried until acked or expired
+
+
+@dataclass
+class ComponentState:
+    """A component the registry lists for this node, and what it last reported."""
+
+    id: str
+    version: str
+    last_seen: float = 0.0
+    status: str = ""
+    reported_version: str = ""
+    failing: list[str] = field(default_factory=list)
+    rejected: int = 0
+    last_reject: str = ""
+
+
+COMPONENT_TYPES = ("health.reported", "health.heartbeat")
+COMPONENT_FRESHNESS = core.Freshness(max_lifetime=MAX_LIFETIME, future_slack=FUTURE_SLACK)
 
 
 @dataclass
@@ -307,10 +332,19 @@ class ControlPlane:
         # envelopes: node x signs as cell:x; names the contracts cannot carry stay legacy
         self.source = f"cell:{self.me}"
         self.use_envelope = config.get("envelope", True) is not False and core.is_name(self.me)
+        self.registry: Any = None  # core.Registry when the fleet file is a signed registry
+        self.registry_problem = ""
+        self.components: dict[str, ComponentState] = {}
+        self.revoked_ids: set[str] = set()
+        if config.get("registry") is not None:
+            self._load_registry(config, state_dir / "registry")
         self.keyring = core.KeyRing()
         for peer in self.peers.values():
             if peer.key is not None and core.is_name(peer.name):
                 self.keyring.add(f"cell:{peer.name}", peer.key)
+        if self.registry is not None:
+            for comp in self.registry.components_for(self.me):
+                self.keyring.add(comp.id, comp.key)
         self.freshness = core.Freshness(
             max_lifetime=MAX_LIFETIME, future_slack=FUTURE_SLACK, require_expires=True
         )
@@ -369,6 +403,81 @@ class ControlPlane:
         )
         return 200, ack
 
+    def _load_registry(self, config: dict, store_dir: Path) -> None:
+        """Verify the registry from fleet.json; peer keys and components come from it."""
+        store = core.RegistryStore(store_dir)
+        offered, signature = config["registry"], config.get("registry_signature") or {}
+        try:
+            reg = store.accept(offered, signature, now=self.clock())
+        except Reject as why:
+            held = store.current(now=self.clock())
+            if held is None:
+                raise ValueError(f"the registry was refused: {why}") from None
+            reg = held
+            self.registry_problem = f"registry update refused ({why}); using serial {held.serial}"
+            log.warning("control: %s", self.registry_problem)
+        self.registry = reg
+        for peer in self.peers.values():
+            key = reg.cell_keys.get(peer.name)
+            if key is None and peer.key is not None:
+                log.warning("control: %s is not in the verified registry; refusing it", peer.name)
+            peer.key = key
+        for comp in reg.components_for(self.me):
+            self.components[comp.id] = ComponentState(comp.id, comp.version)
+        self.revoked_ids = {str(r.get("id", "")).split("@")[0] for r in reg.doc.get("revoked", [])}
+        log.info(
+            "control: registry serial %d (%s), %d component(s) for this node",
+            reg.serial,
+            reg.signer,
+            len(self.components),
+        )
+
+    def _receive_component(self, env: dict, source: str, now: float) -> tuple[int, dict]:
+        base, _, cell = source.partition("@")
+        state = self.components.get(base)
+        try:
+            if state is None:
+                raise Reject("revoked" if base in self.revoked_ids else "unknown sender")
+            if cell and cell != self.me:
+                raise Reject("not addressed to this node")
+            core.verify_envelope(
+                env, self.keyring, now=now, freshness=COMPONENT_FRESHNESS, seen=self.seen
+            )
+            if env["type"] not in COMPONENT_TYPES:
+                raise Reject("unknown message type")
+            data = env.get("data")
+            with self.lock:
+                state.last_seen = now
+                if env["type"] == "health.reported" and isinstance(data, dict):
+                    state.status = str(data.get("status", ""))
+                    state.reported_version = str(data.get("version", ""))
+                    state.failing = [
+                        str(c.get("name"))
+                        for c in data.get("checks", [])
+                        if isinstance(c, dict) and c.get("ok") is False
+                    ]
+        except Reject as why:
+            if state is not None:
+                with self.lock:
+                    state.rejected += 1
+                    state.last_reject = why.reason
+            log.warning("control: refused a message from %s: %s", source[:64], why.reason)
+            status = 400 if why.reason in ("malformed", "too large") else 403
+            return status, {"error": why.reason}
+        ack = core.make_envelope(
+            self.key,
+            source=self.source,
+            type=envelope_type("ack"),
+            data={"to": source},
+            seq=self.counter.next(),
+            now=now,
+            ttl=60,
+            correlationid=str(env["correlationid"]),
+            causationid=str(env["id"]),
+            traceparent=core.child_traceparent(str(env["traceparent"])),
+        )
+        return 200, ack
+
     def _refuse(self, claimed: Any, why: Reject, now: float) -> tuple[int, dict]:
         self._rejected(claimed, why.reason, now)
         status = 400 if why.reason in ("malformed", "too large") else 403
@@ -393,6 +502,12 @@ class ControlPlane:
 
     def _receive_envelope(self, env: dict, now: float) -> tuple[int, dict]:
         source = env.get("source")
+        if (
+            isinstance(source, str)
+            and not source.startswith("cell:")
+            and core.is_component_ref(source)
+        ):
+            return self._receive_component(env, source, now)
         claimed: Any = source[len("cell:") :] if isinstance(source, str) else None
         try:
             peer = self._envelope_peer(env)
@@ -680,6 +795,14 @@ class ControlPlane:
             f"Fleet: {self.me} (site {self.site or '-'}), {len(self.peers)} other node(s)",
             f"  this node: edge_server {self.version or '?'}, fleet file {self.fleet_hash[:8] or '?'}",
         ]
+        if self.registry is not None:
+            reg = self.registry
+            lines.append(
+                f"  registry serial {reg.serial}, signed by {reg.signer}, "
+                f"root {core.fingerprint(reg.root)[:19]}"
+            )
+        if self.registry_problem:
+            lines.append(f"  WARNING: {self.registry_problem}")
         for peer in sorted(self.peers.values(), key=lambda p: p.name):
             lines.append("")
             if peer.key is None:
@@ -716,6 +839,19 @@ class ControlPlane:
                 lines.append("  " + ", ".join(details))
             if peer.rejected:
                 lines.append(f"  {peer.rejected} message(s) refused, last: {peer.last_reject}")
+        if self.components:
+            lines.append("")
+            lines.append(f"Components ({len(self.components)}):")
+            for comp in sorted(self.components.values(), key=lambda c: c.id):
+                if not comp.last_seen:
+                    text = f"  {comp.id} {comp.version}: never reported"
+                else:
+                    text = f"  {comp.id} {comp.reported_version or comp.version}: {comp.status or 'alive'}, {human_age(now - comp.last_seen)} ago"
+                    if comp.failing:
+                        text += f", failing: {', '.join(comp.failing)}"
+                if comp.rejected:
+                    text += f"; {comp.rejected} refused, last: {comp.last_reject}"
+                lines.append(text)
         return "\n".join(lines)
 
     @staticmethod

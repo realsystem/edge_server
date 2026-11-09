@@ -2160,6 +2160,14 @@ save_fleet_state() {
         fi
         install -m 644 "$FLEET_FILE" "$FLEET_SAVED_FILE.new"
         mv "$FLEET_SAVED_FILE.new" "$FLEET_SAVED_FILE"
+        # a signed registry travels with its signature (registry.json -> registry.sig.json)
+        local sig_src="${FLEET_FILE%.*}.sig.json" sig_dst="${FLEET_SAVED_FILE%.*}.sig.json"
+        if [[ -f "$sig_src" ]]; then
+            install -m 644 "$sig_src" "$sig_dst.new"
+            mv "$sig_dst.new" "$sig_dst"
+        else
+            rm -f "$sig_dst"
+        fi
     fi
     {
         echo "node=$FLEET_NODE"

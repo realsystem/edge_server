@@ -41,6 +41,11 @@ DEFAULT_CONTROL_PORT = 7443  # fleet.control_port; TCP, Tailscale and site LAN o
 
 # --- the known keys at every level. An unknown key is an error, never silently skipped.
 TOP_KEYS = {"schema_version", "fleet", "sites", "nodes"}
+# An Autonomy registry (realsystem/autonomy spec, registry schema) is a fleet file with
+# owner keys, components and revocations added, signed by the owner. The node's bot
+# verifies the signature (autonomy-core); this tool checks the structure.
+REGISTRY_KEYS = {"registry_format", "owners", "components", "revoked"}
+REGISTRY_FORMAT = 1
 FLEET_KEYS = {
     "name",
     "telegram",
@@ -203,7 +208,7 @@ class Validator:
         return True
 
     def run(self) -> None:
-        top = self.mapping((), self.data, TOP_KEYS, "the file")
+        top = self.mapping((), self.data, TOP_KEYS | REGISTRY_KEYS, "the file")
         if top is None:
             return
         version = top.get("schema_version")
@@ -412,11 +417,7 @@ class Validator:
             if "public_key" in node and self.need(
                 path + ("public_key",), node["public_key"], str, "public_key"
             ):
-                try:
-                    ok = len(base64.b64decode(node["public_key"], validate=True)) == 32
-                except (binascii.Error, ValueError):
-                    ok = False
-                if not ok:
+                if not public_key_ok(node["public_key"]):
                     self.err(
                         path + ("public_key",),
                         "public_key must be the node's Ed25519 key: base64 of 32 bytes "
@@ -546,7 +547,9 @@ class Validator:
                         ("sites", site_name, "relays", i, "owner"),
                         f"relay owner '{owner}' is not a node at site {site_name}",
                     )
-        if len(nodes) > 1:
+        if isinstance(self.data, dict) and "registry_format" in self.data:
+            self.registry(self.data, nodes)
+        elif len(nodes) > 1:
             for name, node in nodes.items():
                 if isinstance(node, dict) and "public_key" not in node:
                     self.warn(
@@ -568,6 +571,97 @@ class Validator:
                     ("nodes", names[1]),
                     f"site {site_name} has several ha nodes ({', '.join(names)}); the first is checked by /status",
                 )
+
+    def registry(self, top: dict, nodes: dict) -> None:
+        """Structure of the registry sections; signatures are the bot's job."""
+        if top["registry_format"] != REGISTRY_FORMAT:
+            self.err(
+                ("registry_format",),
+                f"registry_format {top['registry_format']!r} is not understood (this release: {REGISTRY_FORMAT})",
+            )
+        owners = top.get("owners")
+        if not isinstance(owners, dict) or not {"root", "ops", "signature"} <= set(owners):
+            self.err(
+                ("owners",), "owners must have root, ops and signature (autonomy registry init)"
+            )
+        if not isinstance(top.get("components", {}), dict):
+            self.err(("components",), "components must be a mapping")
+        if not isinstance(top.get("revoked", []), list):
+            self.err(("revoked",), "revoked must be a list")
+        for name, node in nodes.items():
+            if isinstance(node, dict) and "public_key" not in node:
+                self.err(
+                    ("nodes", name),
+                    f"node {name} has no public_key: every node of a registry needs one",
+                )
+
+
+def public_key_ok(text: Any) -> bool:
+    """An Ed25519 public key as base64 of 32 bytes, or ed25519:<base64url>."""
+    if not isinstance(text, str):
+        return False
+    try:
+        if text.startswith("ed25519:"):
+            raw = base64.urlsafe_b64decode(text[8:] + "=" * (-len(text[8:]) % 4))
+        else:
+            raw = base64.b64decode(text, validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return len(raw) == 32
+
+
+def is_registry(fleet: dict) -> bool:
+    return "registry_format" in fleet
+
+
+def signature_path(path: str | Path) -> Path:
+    """registry.json -> registry.sig.json (as `autonomy registry sign` writes it)."""
+    p = Path(path)
+    return p.with_name(p.with_suffix("").name + ".sig.json")
+
+
+def registry_parts(path: str | Path, raw: bytes) -> tuple[dict, dict]:
+    """The registry exactly as signed (JSON) and its signature. Raises FleetError."""
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        raise FleetError(
+            [
+                (
+                    0,
+                    "a registry must be the JSON file written by `autonomy registry sign` (registry.json)",
+                )
+            ]
+        ) from None
+    sig_file = signature_path(path)
+    try:
+        sig = json.loads(sig_file.read_text())
+    except OSError:
+        raise FleetError(
+            [(0, f"{sig_file} is missing: sign the registry with `autonomy registry sign`")]
+        ) from None
+    except ValueError:
+        raise FleetError([(0, f"{sig_file} is not JSON")]) from None
+    if not isinstance(doc, dict) or not isinstance(sig, dict):
+        raise FleetError([(0, "registry and signature must be JSON objects")])
+    return doc, sig
+
+
+def registry_summary(doc: dict, sig: dict) -> str:
+    """One line for --check; verifies the signature when autonomy-core is installed here."""
+    line = (
+        f"registry serial {sig.get('serial')} signed by {sig.get('signer')} at {sig.get('signed_at')}, "
+        f"{len(doc.get('components', {}))} component(s), {len(doc.get('revoked', []))} revoked"
+    )
+    try:
+        import autonomy_core as core
+    except ImportError:
+        return line + " (signature checked by each node's bot)"
+    try:
+        reg = core.verify_registry(doc, sig, root=None)
+    except core.Reject as why:
+        raise FleetError([(0, f"the registry signature is not valid: {why}")]) from None
+    return line + f"; signature OK, root fingerprint {core.fingerprint(reg.root)}"
 
 
 def parse(text: str) -> tuple[dict, list[tuple[int, str]]]:
@@ -757,6 +851,7 @@ def bot_config(
     raw: bytes,
     version: str = "",
     resolve: Any = _tailscale_ip,
+    registry: tuple[dict, dict] | None = None,
 ) -> tuple[dict, list[str]]:
     """What the bot reads about the fleet: this node, its peers and their addresses.
 
@@ -792,6 +887,9 @@ def bot_config(
         "fleet_hash": file_hash(raw),
         "peers": peers,
     }
+    if registry is not None:
+        # the bot verifies these against the root key it pinned (autonomy-core)
+        config["registry"], config["registry_signature"] = registry
     own = [a for a in (entry.get("lan"), resolve(None)) if a]
     return config, own
 
@@ -941,7 +1039,12 @@ def main(argv: list[str] | None = None) -> int:
         except FleetError as exc:
             report(exc.errors, args.file)
             return 1
-        config, own = bot_config(fleet_data, args.node, raw, args.version)
+        try:
+            parts = registry_parts(args.file, raw) if is_registry(fleet_data) else None
+        except FleetError as exc:
+            report(exc.errors, args.file)
+            return 1
+        config, own = bot_config(fleet_data, args.node, raw, args.version, registry=parts)
         tmp = Path(args.out + ".tmp")
         tmp.write_text(json.dumps(config, indent=2) + "\n")
         tmp.replace(args.out)
@@ -965,6 +1068,10 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         fleet, warnings = parse_file(args.file)
+        summary = ""
+        if is_registry(fleet):
+            raw_file = Path(args.file).read_bytes()
+            summary = registry_summary(*registry_parts(args.file, raw_file))
         override = parse_roles(args.role) if args.role else None
         if args.node and args.node not in fleet["nodes"]:
             raise FleetError(
@@ -974,6 +1081,8 @@ def main(argv: list[str] | None = None) -> int:
         report(exc.errors, args.file)
         return 1
     if args.cmd == "check":
+        if summary:
+            print(summary)
         if args.node:
             print(plan(fleet, args.node, override, warnings))
         else:

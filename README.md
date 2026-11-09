@@ -544,6 +544,36 @@ limits those to the local network and Tailscale. The deploy also starts Docker a
 `tailscaled`, so the Tailscale address exists when the container starts at boot.
 Alerts ("node down", "site unreachable") come in a later phase; this one only observes.
 
+#### Signed registry (optional): owner-signed fleet file and components
+
+Instead of a plain `fleet.yaml` the deploy also takes an **Autonomy registry**: the same
+file plus owner keys, components and revocations, signed with the `autonomy` tool from
+[`autonomy-core`](https://github.com/realsystem/autonomy/tree/main/core) (`pip install
+"autonomy-core[cli] @ https://github.com/realsystem/autonomy/archive/main.tar.gz#subdirectory=core/python"`,
+on your own machine).
+
+```bash
+autonomy keygen owner-root.pem          # keep offline; it only signs who the owners are
+autonomy keygen owner-ops.pem           # signs day-to-day changes
+autonomy registry migrate fleet.yaml registry.yaml --root-key owner-root.pem --ops-key owner-ops.pub
+autonomy registry sign registry.yaml --key owner-ops.pem   # writes registry.json + registry.sig.json
+./deploy-edge-server.sh --config registry.json --node <name> --check
+```
+
+Copy both `registry.json` and `registry.sig.json` to every node and deploy with
+`--config registry.json` (`--auto` and `/redeploy` keep using them). The node's bot checks
+the signature: the first registry it accepts fixes the owner root key (compare the
+fingerprint `/fleet` shows with `autonomy fingerprint owner-root.pub`); after that it only
+accepts registries signed under that root with a higher `serial`, and keeps the last valid
+one if an update is refused (`/fleet` then shows a warning). Node keys then come only from
+the verified registry.
+
+Components the registry lists for a node (`autonomy registry add-component registry.yaml
+--manifest autonomy.manifest.json --key <its public key> --cells <node>`, then sign and
+deploy) may send it signed `health.reported` messages; `/fleet` shows their status.
+Unknown and revoked ones (`autonomy registry revoke`) are refused. Adding a component needs
+no new software on the node, only the newly signed registry.
+
 ## Files
 
 **Orchestrator (runs on laptop):**
@@ -552,7 +582,7 @@ Alerts ("node down", "site unreachable") come in a later phase; this one only ob
 **Target scripts (run on Ubuntu server via SSH):**
 - `initial-setup.sh` — System setup (static IP, Docker, storage)
 - `deploy-edge-server.sh` — Deploy the stack (Frigate, Tailscale, firewall, Telegram bot; optional Home Assistant, MQTT)
-- `tools/fleet.py` — reads and checks the optional `fleet.yaml` for the deploy script (`examples/fleet.*.yaml`)
+- `tools/fleet.py` — reads and checks the optional `fleet.yaml` (or signed registry) for the deploy script (`examples/fleet.*.yaml`)
 - `telegram-bot/controlplane.py` — signed heartbeats between the nodes of a fleet (only used with two or more nodes); built on [`autonomy-core`](https://github.com/realsystem/autonomy/tree/main/core), and speaks Autonomy envelopes to peers that support them
 - `secrets.sh` — Encrypted secrets management on target
 
