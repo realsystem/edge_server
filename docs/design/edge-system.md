@@ -2,7 +2,7 @@
 
 Status: draft · Last updated: 2026-11-03
 
-Implemented so far: the Phase 1 configuration layer (`fleet.yaml`, `--config`/`--node`/`--check`/`--write-config`/`--classic`/`--role`, roles mapped onto the existing install variables, the saved fleet file for `--auto`). Also in: per-node Ed25519 keys, signed node-to-node heartbeats with acknowledgements, replay protection, a persistent outbox and the `/fleet` view with the fleet-file hash and version check (`telegram-bot/controlplane.py`; the Telegram copy of machine messages and the 10-minute warnings are not built). Not yet: the bot split into modules, alerts and incidents, and the `archive`, `agent` and `ha-addon` parts.
+Implemented so far: the Phase 1 configuration layer (`fleet.yaml`, `--config`/`--node`/`--check`/`--write-config`/`--classic`/`--role`, roles mapped onto the existing install variables, the saved fleet file for `--auto`). Also in: per-node Ed25519 keys, signed node-to-node heartbeats with acknowledgements, replay protection, a persistent outbox and the `/fleet` view with the fleet-file hash and version check (`telegram-bot/controlplane.py`, on the `autonomy-core` library; nodes that both support it exchange Autonomy v0.1 envelopes, others the original messages; the Telegram copy of machine messages and the 10-minute warnings are not built). Not yet: the bot split into modules, alerts and incidents, and the `archive`, `agent` and `ha-addon` parts.
 
 ## Goals and principles
 
