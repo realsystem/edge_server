@@ -586,6 +586,15 @@ bundle in `bot-state/policy-bundle.json` can forbid actions (Cedar policies need
 `cedarpy` in the image; without it a bundle with policies denies everything). Without
 `autonomy-core` the bot keeps its direct path.
 
+**Approvals and emergency controls** (Autonomy M6). `/reboot` and `/redeploy` are R2: the
+policy check requires an approval, which your authenticator code in a private chat
+provides (the node's approval service signs it, bound to that exact action). Actions
+proposed by components wait in `/pending` until you `/approve <id> <code>` (private chat,
+allowed user, unexpired, same parameters) or `/deny <id>`. `/suspend <all|cell|component>
+[reason]` and `/hold [reason]` stop automatic actions at once, need no code, survive
+restarts and work without internet; your own commands keep working. `/resume [scope]
+<code>` lifts them. Everything is in `/audit`.
+
 ## Files
 
 **Orchestrator (runs on laptop):**

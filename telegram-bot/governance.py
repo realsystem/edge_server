@@ -88,6 +88,7 @@ class Governance:
         bundle_file: Path | None = None,
         clock: Callable[[], float] = time.time,
         suspended: Callable[[], bool] = lambda: False,
+        operators: Any = (),
     ):
         self.cell = cell
         self.clock = clock
@@ -95,7 +96,17 @@ class Governance:
         self.issuer = f"svc:pdp@{cell}"
         self.executor = f"svc:action-gateway@{cell}"
         public = core.encode_public_key(key)
-        self.keys = core.KeyRing({"svc:pdp": public, "svc:action-gateway": public})
+        self.attester = f"svc:approval@{cell}"
+        self.keys = core.KeyRing(
+            {"svc:pdp": public, "svc:action-gateway": public, "svc:approval": public}
+        )
+        # C05: approvals and emergency controls (Autonomy M6), signed with the node key
+        self.approvals = core.ApprovalService(
+            state_dir, key=key, attester=self.attester, operators=operators, clock=clock
+        )
+        self.control = core.ControlState(
+            state_dir, key=key, attester=self.attester, cell=cell, clock=clock
+        )
         bundle = PolicyBundle.baseline()
         self.bundle_problem = ""
         if bundle_file is not None and bundle_file.exists():
@@ -119,6 +130,8 @@ class Governance:
             audit=self.audit,
             clock=clock,
             suspended=suspended,
+            blocked=self.control.blocked,
+            approval_keys=core.KeyRing({"svc:approval": public}),
         )
         for rec in self.gateway.reconcile():
             log.warning(
@@ -126,7 +139,13 @@ class Governance:
             )
 
     def request(
-        self, action_type: str, target: str, *, requested_by: int, message_id: Any
+        self,
+        action_type: str,
+        target: str,
+        *,
+        requested_by: int,
+        message_id: Any,
+        private_chat: bool = True,
     ) -> dict[str, Any]:
         """The owner asked (TOTP checked) for an action: propose, decide, execute. Returns the
         ExecutionRecord: status ``started`` (the host helper has the request) or ``rejected``."""
@@ -160,6 +179,16 @@ class Governance:
             correlationid=f"corr_{proposal['proposal_id'][4:]}",
             refs={"proposal": proposal["proposal_id"], "decision": decision["decision_id"]},
         )
+        approval = None
+        if decision["effect"] == "require_approval":
+            # R2 needs an approval artifact even for the owner: this command carried a checked
+            # authenticator code in a private chat, so the approval service attests it now
+            try:
+                approval = self.approvals.attest(
+                    decision, operator=requested_by, private_chat=private_chat, code_ok=True
+                )
+            except core.Reject as why:
+                log.warning("governance: approval refused: %s", why)
         record: dict[str, Any] = self.gateway.execute(
             {
                 "action_id": core.prefixed_id("act", now),
@@ -167,9 +196,79 @@ class Governance:
                 "decision": decision,
                 "idempotency_key": proposal["idempotency_key"],
                 "correlationid": f"corr_{proposal['proposal_id'][4:]}",
+                **({"approval": approval} if approval else {}),
             }
         )
         return record
+
+    def ask(
+        self, proposal: dict[str, Any], decision: dict[str, Any], summary: str
+    ) -> dict[str, Any]:
+        """A pending approval request (for proposals by components, e.g. agents)."""
+        q: dict[str, Any] = self.approvals.request(proposal, decision, summary)
+        self.audit.append(
+            "approval.requested",
+            summary=f"{q['request_id']}: {summary}"[:1000],
+            correlationid=f"corr_{proposal['proposal_id'][4:]}",
+            refs={"proposal": proposal["proposal_id"], "decision": decision["decision_id"]},
+        )
+        return q
+
+    def approve(self, request_id: str, *, operator: int, private_chat: bool) -> dict[str, Any]:
+        """The owner approved (code checked by the caller): execute through the gateway."""
+        q, approval = self.approvals.approve(
+            request_id, operator=operator, private_chat=private_chat, code_ok=True
+        )
+        p, d = q["proposal"], q["decision"]
+        return dict(
+            self.gateway.execute(
+                {
+                    "action_id": core.prefixed_id("act", self.clock()),
+                    "proposal": p,
+                    "decision": d,
+                    "approval": approval,
+                    "idempotency_key": p["idempotency_key"],
+                    "correlationid": f"corr_{p['proposal_id'][4:]}",
+                }
+            )
+        )
+
+    def deny(self, request_id: str, operator: int) -> bool:
+        q = self.approvals.deny(request_id)
+        if q is None:
+            return False
+        self.audit.append(
+            "approval.denied",
+            summary=f"{request_id} denied by Telegram user {operator}",
+            correlationid=f"corr_{q['proposal']['proposal_id'][4:]}",
+            refs={
+                "proposal": q["proposal"]["proposal_id"],
+                "decision": q["decision"]["decision_id"],
+            },
+        )
+        return True
+
+    def pending_text(self) -> str:
+        pending = self.approvals.pending()
+        if not pending:
+            return "No approvals waiting."
+        lines = [f"{len(pending)} approval(s) waiting:"]
+        for q in pending:
+            left = max(0, int(q["expires_at"] - self.clock()))
+            lines.append(f"{q['request_id']}: {q['summary']} (expires in {left // 60} min)")
+        lines.append("Answer with /approve <id> <code> or /deny <id>.")
+        return "\n".join(lines)
+
+    def order(self, kind: str, scope: str, reason: str, operator: int) -> dict[str, Any]:
+        """suspend / hold / resume, for the owner (checked by the caller); audited."""
+        o: dict[str, Any] = self.control.order(kind, scope, f"{reason} (Telegram user {operator})")
+        self.audit.append(
+            "system.resumed" if kind == "resume" else "system.suspended",
+            summary=f"{kind} {o['scope']}: {reason}"[:1000],
+            correlationid=f"corr_{o['order_id'][4:]}",
+            refs={"order": o["order_id"]},
+        )
+        return o
 
     def finished(self, action_id: str | None, ok: bool, detail: str = "") -> None:
         """The host helper's result for an action this gateway started."""
@@ -201,6 +300,10 @@ class Governance:
         if self.bundle_problem:
             lines.append(f"  WARNING: {self.bundle_problem}")
         lines.append(f"  policy bundle {self.pdp.bundle.version}")
+        for o in self.control.active():
+            lines.append(
+                f"  ACTIVE: {o['kind']} {o['scope']} since {o['issued_at']}: {o['reason']}"
+            )
         for rec in records[-n:]:
             lines.append(f"{rec['time']} {rec['kind']}: {rec['summary']}")
         return "\n".join(lines)
