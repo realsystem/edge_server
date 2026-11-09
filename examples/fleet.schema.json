@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "fleet.schema.json",
   "title": "edge_server fleet file (schema_version 1)",
-  "description": "Structure only. Cross-references (alert_order covers every node, archive_target names an archive node, ...) are checked by tools/fleet.py.",
+  "description": "Structure only. Cross-references (alert_order covers every node, archive_target names an archive node, ...) are checked by tools/fleet.py. With registry_format, the file is a signed Autonomy registry (structure here; full rules in realsystem/autonomy spec/schemas/v0/registry.schema.json).",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -376,6 +376,27 @@
           }
         }
       }
+    },
+    "registry_format": {
+      "description": "Present when this file is a signed Autonomy registry (realsystem/autonomy spec, registry schema); the node's bot verifies the owner signature in <name>.sig.json.",
+      "const": 1
+    },
+    "owners": {
+      "description": "Autonomy registry: owner root and ops keys, signed by root.",
+      "type": "object",
+      "required": [
+        "root",
+        "ops",
+        "signature"
+      ]
+    },
+    "components": {
+      "description": "Autonomy registry: components by component_id, with key, version, manifest hash and the nodes they report to.",
+      "type": "object"
+    },
+    "revoked": {
+      "description": "Autonomy registry: identities that are never accepted again.",
+      "type": "array"
     }
   }
 }
