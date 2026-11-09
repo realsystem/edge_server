@@ -87,7 +87,11 @@ FLEET_COMMAND = {
     "command": "fleet",
     "description": "The other nodes: contact, versions, fleet file",
 }
-AUDIT_HELP = "\n/audit - recent governed actions (signed, hash-chained audit log)"
+AUDIT_HELP = (
+    "\n/audit - recent governed actions (signed, hash-chained audit log)"
+    "\n/pending, /approve <id> <code>, /deny <id> - actions waiting for your approval"
+    "\n/suspend <all|cell|component> [reason], /hold [reason] - stop automatic actions; /resume [scope] <code>"
+)
 FLEET_HELP = "\n/fleet - the other nodes of the fleet: last contact, versions, fleet file"
 REBOOT_COMMAND = {"command": "reboot", "description": "Reboot the laptop (authenticator code)"}
 REBOOT_HELP = "\n/reboot <code> - reboot the laptop; code from your authenticator app"
@@ -1267,6 +1271,7 @@ class Bot:
                 registry=getattr(self.control, "registry", None),
                 bundle_file=cfg.control_state / "policy-bundle.json",
                 clock=self.clock,
+                operators=cfg.allowed,
             )
         except Exception as e:  # noqa: BLE001 - the bot keeps the direct path
             log.warning("governed actions off (%s): %s", type(e).__name__, e)
@@ -1292,7 +1297,11 @@ class Bot:
         host helper has the request."""
         try:
             rec = self.governance.request(
-                action, target, requested_by=user_id, message_id=message.get("message_id")
+                action,
+                target,
+                requested_by=user_id,
+                message_id=message.get("message_id"),
+                private_chat=(message.get("chat") or {}).get("type") == "private",
             )
         except Exception as e:  # noqa: BLE001
             log.exception("governed %s failed", kind)
@@ -1316,6 +1325,93 @@ class Bot:
             self.governance.finished(aid, ok, detail)
         except Exception:  # noqa: BLE001 - the owner still gets the result
             log.exception("could not record the %s outcome", kind)
+
+    def _governance_on(self, chat_id: int) -> bool:
+        if self.governance is None:
+            self.reply(
+                chat_id,
+                "Approvals and controls are off on this node (needs /reboot set up and autonomy-core).",
+            )
+            return False
+        return True
+
+    def cmd_pending(self, chat_id: int) -> None:
+        if self._governance_on(chat_id):
+            self.reply(chat_id, self.governance.pending_text())
+
+    def cmd_approve(self, chat_id: int, user_id: int, message: dict, args: list[str]) -> None:
+        """/approve <id> <code>: the owner approves a waiting action (IT-12)."""
+        if not self._governance_on(chat_id):
+            return
+        if len(args) < 2:
+            self.reply(chat_id, "Send /approve <id> <code>. /pending lists what is waiting.")
+            return
+        if self._totp_gate(chat_id, user_id, message, args[1:], "approve", lambda: None) is None:
+            return
+        try:
+            rec = self.governance.approve(
+                args[0],
+                operator=user_id,
+                private_chat=(message.get("chat") or {}).get("type") == "private",
+            )
+        except Exception as e:  # noqa: BLE001 - Reject explains itself
+            self.reply(chat_id, f"Not approved: {e}")
+            return
+        if rec["status"] == "rejected":
+            err = rec.get("error", {})
+            self.reply(
+                chat_id,
+                f"Approved, but the gateway refused it: {err.get('code')}: {err.get('message')}",
+            )
+        else:
+            self.reply(chat_id, f"Approved; the action is {rec['status']}.")
+
+    def cmd_deny(self, chat_id: int, user_id: int, args: list[str]) -> None:
+        if not self._governance_on(chat_id):
+            return
+        if not args:
+            self.reply(chat_id, "Send /deny <id>. /pending lists what is waiting.")
+        elif self.governance.deny(args[0], user_id):
+            self.reply(chat_id, f"Denied {args[0]}; it will not run.")
+        else:
+            self.reply(chat_id, f"{args[0]} is not waiting (answered or expired).")
+
+    def cmd_suspend(self, chat_id: int, user_id: int, args: list[str], kind: str) -> None:
+        """/suspend <scope> [reason] and /hold [reason]: stop automatic actions at once. No code:
+        making things safer must be quick; resuming needs one."""
+        if not self._governance_on(chat_id):
+            return
+        if kind == "suspend" and not args:
+            self.reply(
+                chat_id, "Send /suspend <all | cell | component id> [reason], or /hold [reason]."
+            )
+            return
+        scope = "all" if kind == "hold" else args[0]
+        if scope == "cell":
+            scope = f"cell:{self.governance.cell}"
+        reason = " ".join(args if kind == "hold" else args[1:]) or kind
+        try:
+            o = self.governance.order(kind, scope, reason, user_id)
+        except Exception as e:  # noqa: BLE001
+            self.reply(chat_id, f"Not done: {e}")
+            return
+        self.reply(
+            chat_id,
+            f"{o['kind'].capitalize()} {o['scope']}: automatic actions are refused until /resume. "
+            "Owner commands still work.",
+        )
+
+    def cmd_resume(self, chat_id: int, user_id: int, message: dict, args: list[str]) -> None:
+        """/resume [scope] <code>"""
+        if not self._governance_on(chat_id):
+            return
+        scope = args[0] if len(args) >= 2 else "all"
+        if scope == "cell":
+            scope = f"cell:{self.governance.cell}"
+        if self._totp_gate(chat_id, user_id, message, args[-1:], "resume", lambda: None) is None:
+            return
+        self.governance.order("resume", scope, "resumed by the owner", user_id)
+        self.reply(chat_id, f"Resumed {scope}.")
 
     def cmd_audit(self, chat_id: int) -> None:
         if self.governance is None:
@@ -1966,6 +2062,16 @@ class Bot:
             self.cmd_fleet(chat_id)
         elif command == "/audit":
             self.cmd_audit(chat_id)
+        elif command == "/pending":
+            self.cmd_pending(chat_id)
+        elif command == "/approve":
+            self.cmd_approve(chat_id, user_id, message, args)
+        elif command == "/deny":
+            self.cmd_deny(chat_id, user_id, args)
+        elif command in ("/suspend", "/hold"):
+            self.cmd_suspend(chat_id, user_id, args, command[1:])
+        elif command == "/resume":
+            self.cmd_resume(chat_id, user_id, message, args)
         elif command == "/testalert":
             self.cmd_testalert(chat_id, args)
         elif command == "/reboot":

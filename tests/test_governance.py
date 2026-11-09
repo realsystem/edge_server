@@ -102,7 +102,10 @@ class TestGovernedCommands:
         decision = [
             r for r in governed.governance.audit.records() if r["kind"] == "action.decided"
         ][0]
-        assert "permit" in decision["summary"]
+        assert (
+            "require_approval" in decision["summary"]
+        )  # R2: the code becomes an attested approval
+        assert governed.governance.approvals.pending() == []
         # the bot comes back after the reboot: a new process, same state
         governed.governance = None
         governed._governed.clear()
@@ -160,6 +163,7 @@ class TestGovernanceUnit:
             cell="field-station",
             submit={"restart": lambda p: submitted.append(p) or True, "reboot": lambda p: False},
             clock=clock,
+            operators=[1],
             **kw,
         )
 
@@ -204,3 +208,95 @@ class TestGovernanceUnit:
     def test_cell_names(self):
         assert gov.cell_name({"node": "Home_Hub"}) == "home-hub"
         assert gov.cell_name({"node": "!!!"}) == "local"
+
+
+def agent_wants_restart(g):
+    """An agent's proposal that an approvable policy sends to the owner."""
+    g.pdp.bundle = core.PolicyBundle(
+        "2026.11.09-1",
+        (core.Policy("ask-owner", "permit (principal, action, resource);", approvable=True),),
+    )
+    g.pdp._cedar = lambda request, policies, entities: (
+        (True, ["policy0"], []) if "approval" in request["context"] else (False, [], [])
+    )
+    p = {
+        "proposal_id": core.prefixed_id("prp"),
+        "proposer": "agent:fleet-doctor",
+        "objective": {"id": "obj_frigate_up", "text": "keep Frigate recording"},
+        "action": {"type": "host.restart_service", "target": "frigate", "params": {}},
+        "rationale": "frigate stopped answering",
+        "inputs": [],
+        "expected_effect": {"kind": "service_running", "within_s": 300},
+        "verification": {"probe": "host.service_state", "independent": False},
+        "reversibility": {"irreversible": True},
+        "freshness_s": 300,
+        "idempotency_key": "doctor:frigate:1",
+    }
+    d = g.pdp.decide(core.decision_request(p, cell=g.cell, risk_class="R1"))
+    assert d["effect"] == "require_approval"
+    return g.ask(p, d, "restart frigate (fleet doctor)")
+
+
+class TestApprovalsAndControls:
+    def test_pending_approve_executes(self, governed, telegram):
+        q = agent_wants_restart(governed.governance)
+        send(governed, "/pending")
+        assert q["request_id"] in telegram.texts()[-1] and "restart frigate" in telegram.texts()[-1]
+        send(governed, f"/approve {q['request_id']} {code_now()}")
+        assert "Approved; the action is started" in telegram.texts()[-1]
+        assert json.loads(req(governed, "restart-request").read_text()) == {"service": "frigate"}
+        assert audit_kinds(governed)[:2] == ["approval.requested", "action.started"]
+
+    def test_approve_needs_a_good_code_and_a_known_id(self, governed, telegram):
+        agent_wants_restart(governed.governance)
+        send(governed, "/approve apq_x 000000")
+        assert not req(governed, "restart-request").exists()
+        send(governed, f"/approve apq_unknown {code_now()}")
+        assert "Not approved" in telegram.texts()[-1] and "not pending" in telegram.texts()[-1]
+        assert governed.governance.approvals.pending()  # still waiting
+
+    def test_approve_in_a_group_is_refused(self, governed, telegram):
+        q = agent_wants_restart(governed.governance)
+        send(governed, f"/approve {q['request_id']} {code_now()}", chat=-500, chat_type="group")
+        assert "private chat" in telegram.texts()[-1]
+        assert not req(governed, "restart-request").exists()
+
+    def test_deny(self, governed, telegram):
+        q = agent_wants_restart(governed.governance)
+        send(governed, f"/deny {q['request_id']}")
+        assert "will not run" in telegram.texts()[-1]
+        assert governed.governance.approvals.pending() == []
+        assert audit_kinds(governed)[-1] == "approval.denied"
+        send(governed, f"/deny {q['request_id']}")
+        assert "not waiting" in telegram.texts()[-1]
+
+    def test_hold_stops_automatic_actions_not_the_owner(self, governed, telegram):
+        send(governed, "/hold storm coming")
+        assert "Hold all" in telegram.texts()[-1]
+        q = agent_wants_restart(governed.governance)
+        send(governed, f"/approve {q['request_id']} {code_now()}")
+        assert "policy.suspended" in telegram.texts()[-1] and "on hold" in telegram.texts()[-1]
+        assert not req(governed, "restart-request").exists()
+        send(governed, f"/restart frigate {code_now(1)}")  # the owner's own command still works
+        assert req(governed, "restart-request").exists()
+        send(governed, "/audit")
+        assert "ACTIVE: hold all" in telegram.texts()[-1]
+
+    def test_suspend_survives_a_restart_and_resume_needs_a_code(self, governed, telegram):
+        send(governed, "/suspend agent:fleet-doctor misbehaving")
+        assert "Suspend agent:fleet-doctor" in telegram.texts()[-1]
+        governed.governance = None
+        governed.setup_governance()
+        assert governed.governance.control.blocked("agent:fleet-doctor")
+        send(governed, "/resume agent:fleet-doctor 000000")
+        assert governed.governance.control.blocked("agent:fleet-doctor")
+        send(governed, f"/resume agent:fleet-doctor {code_now()}")
+        assert "Resumed agent:fleet-doctor" in telegram.texts()[-1]
+        assert governed.governance.control.blocked("agent:fleet-doctor") is None
+        assert audit_kinds(governed)[-1] == "system.resumed"
+
+    def test_usage(self, governed, telegram):
+        send(governed, "/suspend")
+        assert "Send /suspend" in telegram.texts()[-1]
+        send(governed, "/approve")
+        assert "Send /approve" in telegram.texts()[-1]

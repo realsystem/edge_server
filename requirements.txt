@@ -1,6 +1,6 @@
 # Core dependencies
 cryptography>=41.0.0
-autonomy-core @ https://github.com/realsystem/autonomy/archive/e2e40bd4b0fbae3a895392a534a33a4fea180a2e.tar.gz#subdirectory=core/python
+autonomy-core @ https://github.com/realsystem/autonomy/archive/f0141361d9c483ffd601e3cc31426c29d05e8195.tar.gz#subdirectory=core/python
 
 # Development dependencies
 pytest>=7.0.0
