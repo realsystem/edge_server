@@ -19,16 +19,26 @@ treats a valid ack as proof that the peer is alive on that path. A message that 
 can go through the persistent ``Outbox``: it is retried until acked or expired.
 
 A message never runs anything: the heartbeat only updates what ``/fleet`` shows.
-Needs the ``cryptography`` package (the bot image installs it for fleets).
+
+Autonomy envelopes. The same messages can travel as Autonomy envelopes (CloudEvents with
+an Ed25519 signature over RFC 8785 canonical JSON; spec v0 in realsystem/autonomy). The
+primitives - envelope build and verify, seen ids, sequence counter, outbox - come from
+the ``autonomy_core`` library. A node accepts both forms, advertises
+``"envelope": "0.1"`` in its heartbeat, and sends envelopes only to peers that advertise
+it too; a peer that answers HTTP 400 to an envelope, or stops advertising, gets the
+original form again. ``"envelope": false`` in fleet.json turns envelopes off. Node ``x``
+signs as ``cell:x``; the heartbeat is ``health.heartbeat``, the ack ``control.ack`` (its
+``causationid`` is the acked id), and the addressee goes in ``data.to``.
+
+Needs the ``cryptography`` and ``autonomy-core`` packages (the bot image installs them
+for fleets).
 """
 
 from __future__ import annotations
 
 import base64
-import binascii
 import json
 import logging
-import os
 import threading
 import time
 import urllib.error
@@ -39,6 +49,9 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+
+import autonomy_core as core
+from autonomy_core import Reject
 
 log = logging.getLogger("edge-bot.control")
 
@@ -52,10 +65,8 @@ PATH_CHECK_INTERVAL = 300.0  # every path of every peer is probed this often
 PATHS = ("tailscale", "lan")
 MAX_SEEN = 10000
 SEND_TIMEOUT = 5.0
-
-
-class Reject(Exception):
-    """A message that must not be acted on; the text is the reason (logged, sent back)."""
+ENVELOPE = "0.1"  # spec version advertised in heartbeats
+ENVELOPE_TYPES = {"heartbeat": "health.heartbeat", "ack": "control.ack"}  # others: control.<type>
 
 
 def b64(data: bytes) -> str:
@@ -92,107 +103,51 @@ def public_b64(private_key: Any) -> str:
 
 
 def load_public_key(text: str) -> Any:
-    """A node's public key as written in fleet.yaml: base64 of the 32 raw bytes."""
-    ed25519, _ = _crypto()
+    """A node's public key as written in fleet.yaml: base64 of the 32 raw bytes (the
+    ``ed25519:<base64url>`` form is accepted too)."""
     try:
-        raw = base64.b64decode(text.strip(), validate=True)
-        return ed25519.Ed25519PublicKey.from_public_bytes(raw)
-    except (binascii.Error, ValueError) as exc:
+        return core.decode_public_key(text)
+    except ValueError as exc:
         raise ValueError("not a base64 Ed25519 public key") from exc
 
 
-def _atomic_write(path: Path, text: str) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text)
-    os.replace(tmp, path)
+def envelope_type(mtype: str) -> str:
+    return ENVELOPE_TYPES.get(mtype, f"control.{mtype}")
 
 
-class SeenStore:
-    """Message ids already accepted, kept until they expire, on disk."""
-
-    def __init__(self, path: Path):
-        self.path = path
-        self.lock = threading.Lock()
-        self.ids: dict[str, float] = {}
-        try:
-            data = json.loads(path.read_text())
-            self.ids = {str(k): float(v) for k, v in data.items()}
-        except (OSError, ValueError, AttributeError):
-            if path.exists():
-                log.warning("control: %s is unreadable; starting with no seen ids", path)
-
-    def add(self, message_id: str, expires: float, now: float) -> bool:
-        """True if new (and now remembered), False if it was seen before."""
-        with self.lock:
-            self.ids = {i: e for i, e in self.ids.items() if e > now}
-            if message_id in self.ids:
-                return False
-            if len(self.ids) >= MAX_SEEN:
-                raise Reject("too many messages in flight")
-            self.ids[message_id] = expires
-            try:
-                _atomic_write(self.path, json.dumps(self.ids))
-            except OSError as exc:
-                log.warning("control: cannot save seen ids: %s", exc)
-            return True
+def legacy_type(etype: str) -> str:
+    for mtype, name in ENVELOPE_TYPES.items():
+        if name == etype:
+            return mtype
+    return etype[len("control.") :] if etype.startswith("control.") else etype
 
 
-class Counter:
-    """A number that only goes up and survives restarts (message sequence numbers)."""
-
-    def __init__(self, path: Path, start: float):
-        self.path = path
-        self.lock = threading.Lock()
-        try:
-            self.value = int(path.read_text().strip())
-        except (OSError, ValueError):
-            self.value = int(start)  # no state: the clock keeps it ahead of anything sent before
-
-    def next(self) -> int:
-        with self.lock:
-            self.value += 1
-            try:
-                _atomic_write(self.path, str(self.value))
-            except OSError as exc:
-                log.warning("control: cannot save the sequence number: %s", exc)
-            return self.value
+def recipient(message: dict) -> Any:
+    """Who a message is for, in either form."""
+    if core.is_envelope(message):
+        data = message.get("data")
+        return data.get("to") if isinstance(data, dict) else None
+    return message.get("to")
 
 
-class Outbox:
-    """Messages that must arrive: kept on disk and retried until acked or expired."""
+class SeenStore(core.SeenStore):
+    """Message ids already accepted, kept until they expire, on disk (autonomy_core).
+    The capacity follows MAX_SEEN."""
 
     def __init__(self, path: Path):
-        self.path = path
-        self.lock = threading.Lock()
-        self.items: list[dict] = []
-        try:
-            self.items = list(json.loads(path.read_text()))
-        except (OSError, ValueError, TypeError):
-            self.items = []
+        super().__init__(path, MAX_SEEN)
 
-    def _save(self) -> None:
-        try:
-            _atomic_write(self.path, json.dumps(self.items))
-        except OSError as exc:
-            log.warning("control: cannot save the outbox: %s", exc)
+    @property
+    def max_entries(self) -> int:
+        return MAX_SEEN
 
-    def add(self, message: dict) -> None:
-        with self.lock:
-            self.items.append(message)
-            self._save()
+    @max_entries.setter
+    def max_entries(self, value: int) -> None:
+        pass  # always MAX_SEEN
 
-    def pending(self, now: float) -> list[dict]:
-        with self.lock:
-            kept = [m for m in self.items if m.get("expires", 0) > now]
-            if len(kept) != len(self.items):
-                self.items = kept
-                self._save()
-            return list(kept)
 
-    def done(self, message_id: str) -> None:
-        with self.lock:
-            self.items = [m for m in self.items if m.get("id") != message_id]
-            self._save()
+Counter = core.Counter  # a number that only goes up and survives restarts (seq)
+Outbox = core.Outbox  # messages kept on disk and retried until acked or expired
 
 
 @dataclass
@@ -215,6 +170,7 @@ class Peer:
     skew: float = 0.0
     rejected: int = 0
     last_reject: str = ""
+    envelope: bool = False  # it advertised Autonomy envelopes in its last heartbeat
 
 
 def make_message(
@@ -348,6 +304,16 @@ class ControlPlane:
                 key=key,
                 addrs={p: a for p, a in entry.get("addrs", {}).items() if p in PATHS and a},
             )
+        # envelopes: node x signs as cell:x; names the contracts cannot carry stay legacy
+        self.source = f"cell:{self.me}"
+        self.use_envelope = config.get("envelope", True) is not False and core.is_name(self.me)
+        self.keyring = core.KeyRing()
+        for peer in self.peers.values():
+            if peer.key is not None and core.is_name(peer.name):
+                self.keyring.add(f"cell:{peer.name}", peer.key)
+        self.freshness = core.Freshness(
+            max_lifetime=MAX_LIFETIME, future_slack=FUTURE_SLACK, require_expires=True
+        )
         self.servers: list[ThreadingHTTPServer] = []
         self.stop = threading.Event()
         self.last_path_check = 0.0
@@ -367,6 +333,8 @@ class ControlPlane:
                 message = json.loads(raw)
             except ValueError:
                 raise Reject("malformed") from None
+            if core.is_envelope(message):
+                return self._receive_envelope(message, now)
             if not isinstance(message, dict) or any(k not in message for k in REQUIRED):
                 raise Reject("malformed")
             if message["v"] != PROTOCOL:
@@ -386,8 +354,7 @@ class ControlPlane:
             with self.lock:
                 handler(peer, message)
         except Reject as why:
-            self._rejected(claimed, str(why), now)
-            return (400 if str(why) in ("malformed", "too large") else 403), {"error": str(why)}
+            return self._refuse(claimed, why, now)
         ack = make_message(
             self.key,
             self.me,
@@ -401,6 +368,84 @@ class ControlPlane:
             ref=message["id"],
         )
         return 200, ack
+
+    def _refuse(self, claimed: Any, why: Reject, now: float) -> tuple[int, dict]:
+        self._rejected(claimed, why.reason, now)
+        status = 400 if why.reason in ("malformed", "too large") else 403
+        return status, {"error": why.reason}
+
+    def _envelope_peer(self, env: dict) -> Peer:
+        """The fleet node an envelope claims to come from (not yet verified)."""
+        source = env.get("source")
+        name = (
+            source[len("cell:") :]
+            if isinstance(source, str) and source.startswith("cell:")
+            else None
+        )
+        peer = self.peers.get(name) if name else None
+        if peer is None:
+            raise Reject("unknown sender")
+        if peer.key is None:
+            raise Reject("no public key for the sender in the fleet file")
+        if f"cell:{peer.name}" not in self.keyring:
+            raise Reject("unknown sender")
+        return peer
+
+    def _receive_envelope(self, env: dict, now: float) -> tuple[int, dict]:
+        source = env.get("source")
+        claimed: Any = source[len("cell:") :] if isinstance(source, str) else None
+        try:
+            peer = self._envelope_peer(env)
+            core.verify_envelope(
+                env, self.keyring, now=now, freshness=self.freshness, seen=self.seen
+            )
+            data = env.get("data")
+            if not isinstance(data, dict):
+                raise Reject("malformed")
+            if data.get("to") not in (self.me, "fleet"):
+                raise Reject("not addressed to this node")
+            mtype = legacy_type(str(env["type"]))
+            handler = self.handled.get(mtype)
+            if handler is None:
+                raise Reject("unknown message type")
+            with self.lock:
+                handler(peer, self._as_message(env, peer, mtype))
+        except Reject as why:
+            return self._refuse(claimed, why, now)
+        ack = core.make_envelope(
+            self.key,
+            source=self.source,
+            type=envelope_type("ack"),
+            data={"to": peer.name},
+            seq=self.counter.next(),
+            now=now,
+            ttl=60,
+            correlationid=str(env["correlationid"]),
+            causationid=str(env["id"]),
+            traceparent=core.child_traceparent(str(env["traceparent"])),
+        )
+        return 200, ack
+
+    @staticmethod
+    def _as_message(env: dict, peer: Peer, mtype: str) -> dict:
+        """An accepted envelope in the original message form, for the handlers."""
+        sent, expires = core.envelope_times(env)
+        body = {k: v for k, v in env["data"].items() if k not in ("to", "boot")}
+        message = {
+            "v": PROTOCOL,
+            "id": env["id"],
+            "from": peer.name,
+            "to": env["data"]["to"],
+            "created": sent,
+            "expires": expires,
+            "seq": env["seq"],
+            "boot": str(env["data"].get("boot", "")),
+            "type": mtype,
+            "body": body,
+        }
+        if "causationid" in env:
+            message["ref"] = env["causationid"]
+        return message
 
     def _rejected(self, claimed: Any, reason: str, now: float) -> None:
         """Count and log a refusal. The sender is whoever the message *claims* to be from:
@@ -429,6 +474,7 @@ class ControlPlane:
         peer.roles = [str(r) for r in body.get("roles", peer.roles)]
         peer.skew = float(message["created"]) - now
         peer.seq = int(message["seq"])
+        peer.envelope = str(body.get("envelope", "")).split(".")[0] == ENVELOPE.split(".")[0]
 
     # -------------------------------------------------------------- sending
     def _url(self, addr: str) -> str:
@@ -448,6 +494,11 @@ class ControlPlane:
             now = self.clock()
             try:
                 status, answer = self.post(self._url(addr), data, SEND_TIMEOUT)
+                if status == 400 and core.is_envelope(message) and peer.envelope:
+                    peer.envelope = False  # an older node: back to the original form
+                    log.info(
+                        "control: %s does not take envelopes; using legacy messages", peer.name
+                    )
                 if status != 200:
                     raise Reject(f"answered HTTP {status}")
                 ack = json.loads(answer)
@@ -464,6 +515,19 @@ class ControlPlane:
         return None
 
     def _check_ack(self, peer: Peer, ack: Any, sent_id: str) -> None:
+        if core.is_envelope(ack):
+            if self._envelope_peer(ack) is not peer:
+                raise Reject("ack from another node")
+            core.verify_envelope(ack, self.keyring, now=self.clock(), freshness=self.freshness)
+            data = ack.get("data")
+            if (
+                ack["type"] != envelope_type("ack")
+                or ack.get("causationid") != sent_id
+                or not isinstance(data, dict)
+                or data.get("to") != self.me
+            ):
+                raise Reject("not the ack for this message")
+            return
         if not isinstance(ack, dict) or any(k not in ack for k in REQUIRED):
             raise Reject("malformed ack")
         if ack["type"] != "ack" or ack.get("ref") != sent_id or ack["to"] != self.me:
@@ -472,7 +536,20 @@ class ControlPlane:
             raise Reject("ack from another node")
         check_fresh(ack, self.clock())
 
+    def speaks_envelope(self, peer: Peer) -> bool:
+        return self.use_envelope and peer.envelope and f"cell:{peer.name}" in self.keyring
+
     def message_for(self, peer: Peer, mtype: str, body: dict, ttl: float = 300.0) -> dict:
+        if self.speaks_envelope(peer):
+            return core.make_envelope(
+                self.key,
+                source=self.source,
+                type=envelope_type(mtype),
+                data={**body, "to": peer.name, "boot": self.boot},
+                seq=self.counter.next(),
+                now=self.clock(),
+                ttl=min(ttl, MAX_LIFETIME),
+            )
         return make_message(
             self.key,
             self.me,
@@ -492,7 +569,7 @@ class ControlPlane:
             "version": self.version,
             "fleet_hash": self.fleet_hash,
             "via": via,
-        }
+        } | ({"envelope": ENVELOPE} if self.use_envelope else {})
 
     def heartbeat_tick(self, probe_all_paths: bool = False) -> None:
         """One heartbeat to every peer, over the first path that works (or over each
@@ -526,7 +603,8 @@ class ControlPlane:
 
     def flush_outbox(self) -> None:
         for message in self.outbox.pending(self.clock()):
-            peer = self.peers.get(message["to"])
+            to = recipient(message)
+            peer = self.peers.get(to) if isinstance(to, str) else None
             if peer and self.send(peer, message):
                 self.outbox.done(message["id"])
 
@@ -632,6 +710,8 @@ class ControlPlane:
                 details.append(f"clock {peer.skew:+.0f} s off")
             if peer.last_seen:
                 details.append(f"up {human_age(peer.uptime)}")
+            if peer.last_seen and self.use_envelope:
+                details.append("envelopes" if self.speaks_envelope(peer) else "legacy messages")
             if details:
                 lines.append("  " + ", ".join(details))
             if peer.rejected:

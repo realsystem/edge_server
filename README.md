@@ -553,7 +553,7 @@ Alerts ("node down", "site unreachable") come in a later phase; this one only ob
 - `initial-setup.sh` — System setup (static IP, Docker, storage)
 - `deploy-edge-server.sh` — Deploy the stack (Frigate, Tailscale, firewall, Telegram bot; optional Home Assistant, MQTT)
 - `tools/fleet.py` — reads and checks the optional `fleet.yaml` for the deploy script (`examples/fleet.*.yaml`)
-- `telegram-bot/controlplane.py` — signed heartbeats between the nodes of a fleet (only used with two or more nodes)
+- `telegram-bot/controlplane.py` — signed heartbeats between the nodes of a fleet (only used with two or more nodes); built on [`autonomy-core`](https://github.com/realsystem/autonomy/tree/main/core), and speaks Autonomy envelopes to peers that support them
 - `secrets.sh` — Encrypted secrets management on target
 
 **Plugins:**

@@ -259,6 +259,14 @@ jobs:
       - name: Run the bot container as deployed
         run: SUDO=sudo ./tests/validate-telegram-bot.sh
 
+      # Fleets build the image with WITH_CRYPTO=true: cryptography and the pinned
+      # autonomy-core must install, and the mounted control plane must import with them.
+      - name: Fleet image has the control-plane libraries
+        run: |
+          docker build -q --build-arg WITH_CRYPTO=true -t edge-telegram-bot:fleet telegram-bot
+          docker run --rm -v "$PWD/telegram-bot:/app:ro" -w /app edge-telegram-bot:fleet \
+            python3 -c "import controlplane, autonomy_core; print('autonomy-core', autonomy_core.__version__)"
+
   integration-test:
     name: Integration test (Docker)
     runs-on: ubuntu-latest

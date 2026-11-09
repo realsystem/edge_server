@@ -1241,7 +1241,7 @@ class Bot:
         if not config_path.is_file():
             return
         try:
-            import controlplane  # next to this file; needs the cryptography package
+            import controlplane  # next to this file; needs cryptography and autonomy-core
 
             config = controlplane.load_config(config_path)
             key = controlplane.load_private_key(self.cfg.control_key)

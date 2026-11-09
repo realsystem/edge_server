@@ -8,10 +8,15 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends procps pciutils usbutils kmod curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Fleets only (deploy passes WITH_CRYPTO=true): the signing library for the control
-# plane. Without it everything else works and the bot says so in its log.
+# Fleets only (deploy passes WITH_CRYPTO=true): the signing libraries for the control
+# plane - cryptography and autonomy-core (realsystem/autonomy, pinned to a commit; keep
+# in step with pyproject.toml). Without them everything else works and the bot says so
+# in its log.
 ARG WITH_CRYPTO=false
-RUN if [ "$WITH_CRYPTO" = "true" ]; then pip install --no-cache-dir "cryptography>=41"; fi
+ARG AUTONOMY_CORE_REF=46329b85e5013c7ce22437dea46f9ed3cb05314e
+RUN if [ "$WITH_CRYPTO" = "true" ]; then pip install --no-cache-dir "cryptography>=41" \
+        "autonomy-core @ https://github.com/realsystem/autonomy/archive/${AUTONOMY_CORE_REF}.tar.gz#subdirectory=core/python"; \
+    fi
 
 WORKDIR /app
 CMD ["python3", "-u", "/app/bot.py"]
