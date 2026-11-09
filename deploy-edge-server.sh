@@ -1035,9 +1035,12 @@ prepare_telegram_bot() {
     chmod 755 "$APP_DIR" "$APP_DIR/telegram-bot"
     install_if_changed "$script_dir/telegram-bot/bot.py" "$APP_DIR/telegram-bot/bot.py" 644
     install_if_changed "$script_dir/telegram-bot/Dockerfile" "$APP_DIR/telegram-bot/Dockerfile" 644
-    if [[ -f "$script_dir/telegram-bot/controlplane.py" ]]; then
-        install_if_changed "$script_dir/telegram-bot/controlplane.py" "$APP_DIR/telegram-bot/controlplane.py" 644
-    fi
+    local mod
+    for mod in controlplane.py governance.py; do
+        if [[ -f "$script_dir/telegram-bot/$mod" ]]; then
+            install_if_changed "$script_dir/telegram-bot/$mod" "$APP_DIR/telegram-bot/$mod" 644
+        fi
+    done
     install_if_changed "$script_dir/collect-diagnostics.sh" "$APP_DIR/telegram-bot/collect-diagnostics.sh" 755
     # The token is a secret: root-only, and never written into the compose file
     if [[ "$cred" == "$APP_DIR/.telegram" ]]; then
@@ -1051,8 +1054,12 @@ prepare_telegram_bot() {
     # quick after the first build.
     prepare_control_plane
     local build_args=()
-    # the signing library goes into the image only for fleets; other installs build as before
-    [[ "$CONTROL_ACTIVE" != "true" ]] || build_args=(--build-arg WITH_CRYPTO=true)
+    # the signing libraries (cryptography, autonomy-core) go into the image for fleets and
+    # wherever /reboot is set up: host actions then run through the policy check and the
+    # action gateway, with an audit log in bot-state (Autonomy M5)
+    if [[ "$CONTROL_ACTIVE" == "true" || -n "$totp_secret" ]]; then
+        build_args=(--build-arg WITH_CRYPTO=true)
+    fi
     if docker build -q "${build_args[@]}" -t "$TELEGRAM_IMAGE" "$APP_DIR/telegram-bot" > /dev/null; then
         INSTALL_TELEGRAM_BOT=true
     elif docker image inspect "$TELEGRAM_IMAGE" &> /dev/null; then
@@ -1071,8 +1078,8 @@ prepare_telegram_bot() {
     if [[ "$INSTALL_TELEGRAM_BOT" == "true" && -n "$totp_secret" ]]; then
         # Root-only drop box: the container writes a request file, a host systemd
         # unit acts on it (see install_reboot_unit).
-        mkdir -p "$APP_DIR/bot-requests"
-        chmod 700 "$APP_DIR/bot-requests"
+        mkdir -p "$APP_DIR/bot-requests" "$APP_DIR/bot-state"
+        chmod 700 "$APP_DIR/bot-requests" "$APP_DIR/bot-state"
         TELEGRAM_REBOOT_ENABLED=true
     fi
 }
@@ -1599,6 +1606,10 @@ EOF
       - __STORAGE_MOUNT__/frigate:/media/frigate:ro
 EOF
             [[ "$TELEGRAM_REBOOT_ENABLED" == "true" ]] && printf '      - ./bot-requests:/requests\n'
+            # state for governed host actions (gateway journal, audit log); fleets mount it below
+            if [[ "$TELEGRAM_REBOOT_ENABLED" == "true" && "$CONTROL_ACTIVE" != "true" ]]; then
+                printf '      - ./bot-state:/state\n'
+            fi
             if [[ "$CONTROL_ACTIVE" == "true" ]]; then
                 # fleet control plane: the signing key (read-only), a small state directory,
                 # and the control port published on this node's LAN and Tailscale addresses only
