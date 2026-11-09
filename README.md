@@ -574,6 +574,18 @@ deploy) may send it signed `health.reported` messages; `/fleet` shows their stat
 Unknown and revoked ones (`autonomy registry revoke`) are refused. Adding a component needs
 no new software on the node, only the newly signed registry.
 
+#### Governed host actions and `/audit`
+
+Where `/reboot` is set up, `/restart`, `/reboot` and `/redeploy` run through the Autonomy
+policy decision point and action gateway ([`autonomy-core`](https://github.com/realsystem/autonomy/tree/main/core)):
+the authenticator-checked command becomes a proposal by `owner:ops`, the policy check
+decides, and only the gateway writes the request for the host helpers, at most once per
+Telegram message. Every step is a signed, hash-chained record in `bot-state/audit.jsonl`;
+`/audit` shows the last ones and whether the chain is intact. An owner-signed policy
+bundle in `bot-state/policy-bundle.json` can forbid actions (Cedar policies need
+`cedarpy` in the image; without it a bundle with policies denies everything). Without
+`autonomy-core` the bot keeps its direct path.
+
 ## Files
 
 **Orchestrator (runs on laptop):**
@@ -583,6 +595,7 @@ no new software on the node, only the newly signed registry.
 - `initial-setup.sh` — System setup (static IP, Docker, storage)
 - `deploy-edge-server.sh` — Deploy the stack (Frigate, Tailscale, firewall, Telegram bot; optional Home Assistant, MQTT)
 - `tools/fleet.py` — reads and checks the optional `fleet.yaml` (or signed registry) for the deploy script (`examples/fleet.*.yaml`)
+- `telegram-bot/governance.py` — host actions through the Autonomy policy check and action gateway, with an audit log (`/audit`)
 - `telegram-bot/controlplane.py` — signed heartbeats between the nodes of a fleet (only used with two or more nodes); built on [`autonomy-core`](https://github.com/realsystem/autonomy/tree/main/core), and speaks Autonomy envelopes to peers that support them
 - `secrets.sh` — Encrypted secrets management on target
 

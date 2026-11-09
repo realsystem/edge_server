@@ -1210,7 +1210,9 @@ class TestTelegramBotInDeploy:
         assert "./bot-requests:/requests" in bot["volumes"]
         assert "REQUESTS_DIR=/requests" in bot["environment"]
         rw = [v for v in bot["volumes"] if not v.endswith(":ro")]
-        assert rw == ["./bot-requests:/requests"]
+        # the drop box, and the gateway's journal and audit log (Autonomy M5)
+        assert rw == ["./bot-requests:/requests", "./bot-state:/state"]
+        assert stat.S_IMODE((app / "bot-state").stat().st_mode) == 0o700
         assert bot["read_only"] is True and bot["cap_drop"] == ["ALL"]
         assert self.SECRET not in (app / "docker-compose.yml").read_text()
 

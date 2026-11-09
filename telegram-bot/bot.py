@@ -87,6 +87,7 @@ FLEET_COMMAND = {
     "command": "fleet",
     "description": "The other nodes: contact, versions, fleet file",
 }
+AUDIT_HELP = "\n/audit - recent governed actions (signed, hash-chained audit log)"
 FLEET_HELP = "\n/fleet - the other nodes of the fleet: last contact, versions, fleet file"
 REBOOT_COMMAND = {"command": "reboot", "description": "Reboot the laptop (authenticator code)"}
 REBOOT_HELP = "\n/reboot <code> - reboot the laptop; code from your authenticator app"
@@ -923,6 +924,8 @@ class Bot:
     _jobs_lock: threading.Lock = field(default_factory=threading.Lock)
     _logs_last: float = 0.0
     control: Any = None  # controlplane.ControlPlane when this node is in a fleet
+    governance: Any = None  # governance.Governance: host actions through PDP and gateway
+    _governed: dict[str, str] = field(default_factory=dict)  # job kind -> action id
 
     # -- sending ----------------------------------------------------------
 
@@ -1222,7 +1225,7 @@ class Bot:
 
     def help_text(self) -> str:
         extra = REBOOT_HELP + REDEPLOY_HELP + RESTART_HELP + LOGS_HELP
-        text = HELP + (FLEET_HELP if self.control else "")
+        text = HELP + (FLEET_HELP if self.control else "") + (AUDIT_HELP if self.governance else "")
         return text + (extra if self.cfg.totp_secret else "")
 
     def cmd_fleet(self, chat_id: int) -> None:
@@ -1234,6 +1237,94 @@ class Bot:
             )
             return
         self.reply(chat_id, self.control.fleet_text(), pre=True)
+
+    def setup_governance(self) -> None:
+        """Route /restart, /reboot and /redeploy through the policy decision point and the
+        action gateway (Autonomy M5) when autonomy-core and a state directory are here."""
+        cfg = self.cfg
+        if not cfg.totp_secret or not cfg.requests_dir.is_dir():
+            return
+        if not cfg.control_state.is_dir():
+            log.info("governed actions off: no state directory at %s", cfg.control_state)
+            return
+        try:
+            import governance
+
+            key = governance.load_or_create_key(
+                cfg.control_key if cfg.control_key.exists() else cfg.control_state / "gateway.key"
+            )
+            self.governance = governance.Governance(
+                cfg.control_state,
+                key=key,
+                cell=governance.cell_name({"node": self.control.me} if self.control else None),
+                submit={
+                    "restart": lambda payload: self._submit_job(
+                        "restart", {"service": payload["service"]}
+                    ),
+                    "reboot": lambda payload: self._create_request_once("reboot"),
+                    "redeploy": lambda payload: self._create_request_once("redeploy"),
+                },
+                registry=getattr(self.control, "registry", None),
+                bundle_file=cfg.control_state / "policy-bundle.json",
+                clock=self.clock,
+            )
+        except Exception as e:  # noqa: BLE001 - the bot keeps the direct path
+            log.warning("governed actions off (%s): %s", type(e).__name__, e)
+            self.governance = None
+            return
+        log.info(
+            "governed actions on: cell %s, policy bundle %s",
+            self.governance.cell,
+            self.governance.pdp.bundle.version,
+        )
+
+    def _create_request_once(self, name: str) -> bool:
+        try:
+            self._create_request(name)
+        except FileExistsError:
+            return False
+        return True
+
+    def _govern(
+        self, chat_id: int, user_id: int, message: dict, action: str, target: str, kind: str
+    ) -> bool:
+        """Propose, decide and execute through the gateway; reply on refusal. True when the
+        host helper has the request."""
+        try:
+            rec = self.governance.request(
+                action, target, requested_by=user_id, message_id=message.get("message_id")
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("governed %s failed", kind)
+            self.reply(chat_id, f"Could not request the {kind}: {e}")
+            return False
+        if rec["status"] == "rejected":
+            err = rec.get("error", {})
+            self.reply(chat_id, f"Not done: {err.get('code')}: {err.get('message')}")
+            return False
+        if rec["status"] == "failed":
+            self.reply(chat_id, f"A {kind} is already pending.")
+            return False
+        self._governed[kind] = rec["action_id"]
+        return True
+
+    def _governed_done(self, kind: str, ok: bool, detail: str = "") -> None:
+        if self.governance is None:
+            return
+        aid = self._governed.pop(kind, None) or self.governance.pending(kind)
+        try:
+            self.governance.finished(aid, ok, detail)
+        except Exception:  # noqa: BLE001 - the owner still gets the result
+            log.exception("could not record the %s outcome", kind)
+
+    def cmd_audit(self, chat_id: int) -> None:
+        if self.governance is None:
+            self.reply(
+                chat_id,
+                "The audit log is off on this node (needs /reboot set up and autonomy-core).",
+            )
+            return
+        self.reply(chat_id, self.governance.audit_text(), pre=True)
 
     def setup_control(self) -> None:
         """Start the control plane if the host described a fleet. Never stops the bot."""
@@ -1388,8 +1479,18 @@ class Bot:
         marker = cfg.requests_dir / "reboot-notify"
         try:
             marker.write_text(json.dumps({"chat_id": chat_id, "at": now}))
-            self.reply(chat_id, "Code accepted. Rebooting now; I will message you when I am back.")
-            self._create_request("reboot")
+            if self.governance is not None:
+                if not self._govern(chat_id, user_id, message, "host.reboot", "host", "reboot"):
+                    marker.unlink(missing_ok=True)
+                    return
+                self.reply(
+                    chat_id, "Code accepted. Rebooting now; I will message you when I am back."
+                )
+            else:
+                self.reply(
+                    chat_id, "Code accepted. Rebooting now; I will message you when I am back."
+                )
+                self._create_request("reboot")
         except FileExistsError:
             self.reply(chat_id, "A reboot is already pending.")
             return
@@ -1436,7 +1537,12 @@ class Bot:
         (cfg.requests_dir / "redeploy-result").unlink(missing_ok=True)  # an old one
         try:
             marker.write_text(json.dumps({"chat_id": chat_id, "at": now}))
-            self._create_request("redeploy")
+            if self.governance is not None:
+                if not self._govern(chat_id, user_id, message, "host.redeploy", "host", "redeploy"):
+                    marker.unlink(missing_ok=True)
+                    return
+            else:
+                self._create_request("redeploy")
         except FileExistsError:
             self.reply(chat_id, "A redeploy is already in progress.")
             return
@@ -1568,7 +1674,12 @@ class Bot:
         if now is None:
             return
         try:
-            if not self._submit_job("restart", {"service": service}):
+            if self.governance is not None:
+                if not self._govern(
+                    chat_id, user_id, message, "host.restart_service", service, "restart"
+                ):
+                    return
+            elif not self._submit_job("restart", {"service": service}):
                 self.reply(chat_id, "A restart is already in progress.")
                 return
         except OSError as e:
@@ -1585,6 +1696,7 @@ class Bot:
         data = self._claim_result("restart")
         if data is None:
             return False
+        self._governed_done("restart", data.get("status") == "ok", str(data.get("detail") or ""))
         self.reply(chat_id, format_restart_result(data))
         return True
 
@@ -1717,6 +1829,7 @@ class Bot:
             age = 0.0
         if data.get("at") and age > REDEPLOY_RESULT_MAX_AGE:
             return True  # a leftover from long ago
+        self._governed_done("redeploy", data.get("status") == "ok", str(data.get("detail") or ""))
         self._tell(chat_id, format_redeploy_result(data))
         return True
 
@@ -1736,6 +1849,7 @@ class Bot:
             self._start_redeploy_watch(chat_id)
 
     def _reboot_not_done(self, chat_id: int) -> None:
+        self._governed_done("reboot", False, "the host did not reboot")
         for name in ("reboot", "reboot-notify"):
             (self.cfg.requests_dir / name).unlink(missing_ok=True)
         self.reply(
@@ -1756,6 +1870,7 @@ class Bot:
         if age > REBOOT_NOTIFY_MAX_AGE:
             return
         up = self.uptime()
+        self._governed_done("reboot", up is not None and up < age)
         if up is not None and up < age:
             text = f"Back online after reboot (uptime {human_duration(up)})."
         else:
@@ -1849,6 +1964,8 @@ class Bot:
             self.threads.append(thread)
         elif command == "/fleet":
             self.cmd_fleet(chat_id)
+        elif command == "/audit":
+            self.cmd_audit(chat_id)
         elif command == "/testalert":
             self.cmd_testalert(chat_id, args)
         elif command == "/reboot":
@@ -1883,6 +2000,7 @@ class Bot:
 
     def run(self) -> None:
         self.setup_control()
+        self.setup_governance()
         try:
             self.api.call("setMyCommands", {"commands": self.commands()})
         except TelegramError as e:
