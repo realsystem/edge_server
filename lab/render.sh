@@ -31,4 +31,8 @@ error() { printf 'render: ERROR %s\n' "$*"; }
 prepare_telegram_bot
 [[ "$INSTALL_TELEGRAM_BOT" == "true" ]] || { echo "render: the bot was not set up (check the token and ids)" >&2; exit 1; }
 create_app_stack
+# made by root in here; the host user, other containers and the bot must be able to use it
+chmod 755 "$APP"
+chmod -R a+rX "$APP/telegram-bot" "$APP/frigate" "$APP/bot-status" 2> /dev/null || true
+chmod 777 "$APP/bot-requests" "$APP/bot-state" 2> /dev/null || true
 echo "render: done: $APP/docker-compose.yml"

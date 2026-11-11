@@ -78,7 +78,7 @@ class TestTelegramMock:
             # offset acknowledges it
             assert (
                 post(
-                    base + f"/bot1:tok/getUpdates",
+                    base + "/bot1:tok/getUpdates",
                     {"timeout": 0, "offset": update["update_id"] + 1},
                 )["result"]
                 == []

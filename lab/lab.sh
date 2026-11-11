@@ -115,8 +115,7 @@ cmd_up() {
   docker run --rm -e APP="$APP" -e REPO=/repo -e CRED=/in/.telegram \
     -v "$EDGE:/repo:ro" -v "$APP:$APP" -v "$LAB_STATE/telegram.in:/in/.telegram:ro" \
     ubuntu:24.04 bash /repo/lab/render.sh | sed 's/^/  /'
-  chmod 755 "$APP" "$APP/bot-requests" "$APP/bot-state" 2>/dev/null || true
-  chmod 777 "$APP/bot-requests" "$APP/bot-state" "$LAB_STATE/fakeproc"   # container users differ; lab only
+  chmod 777 "$LAB_STATE/fakeproc"   # host-stub writes it as root; the bot reads it. Lab only
 
   # 2. authority from the autonomy lab, when there is one (signed policy bundle, model routing)
   if [ -s "$LAB_DIR/autonomy/policy-bundle.json" ]; then
@@ -186,7 +185,10 @@ print(urllib.request.urlopen("http://frigate:5000/api/version", timeout=5).read(
 }
 
 cmd_down()   { need_docker; dc down --remove-orphans; rm -f "$ENV_OUT"; say "down (data kept)"; }
-cmd_reset()  { need_docker; [ -f "$APP/docker-compose.yml" ] && { LAB_MOCK_TELEGRAM=1; dc down -v --remove-orphans || true; }; rm -rf "$LAB_STATE" "$ENV_OUT"; say "reset"; }
+cmd_reset()  { need_docker; [ -f "$APP/docker-compose.yml" ] && { LAB_MOCK_TELEGRAM=1; dc down -v --remove-orphans || true; }; 
+  # files made by root in containers: remove them from a container too (Linux hosts)
+  rm -rf "$LAB_STATE" 2>/dev/null || docker run --rm -v "$LAB_DIR:/d" alpine rm -rf /d/edge_server
+  rm -f "$ENV_OUT"; say "reset"; }
 cmd_status() { need_docker; dc ps; }
 cmd_logs()   { need_docker; dc logs --no-color --tail 100 "$@"; }
 
