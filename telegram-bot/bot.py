@@ -32,6 +32,10 @@ Environment:
                         The deploy script sets it for you (bot-defaults.env); a
                         value in .telegram wins.
   HA_PORT               default 8123
+  MODELS_CONFIG         model routing file for /ask (autonomy ops/models.example.yaml);
+                        without it /ask uses llm.chat on the job processor (PROCESSOR_URL)
+  LLM_MODEL             model for that default route (empty: the worker's default)
+  MODEL_REVIEW          true: an LLM reviews governed actions too (escalate-only)
   PROCESSOR_URL         the job processor on this node (INSTALL_PROCESSOR=true): /status
                         shows its queue and workers, and the watcher alerts when jobs
                         wait PROCESSOR_ALERT_MINUTES (default 30) with no worker online
@@ -97,6 +101,8 @@ AUDIT_HELP = (
     "\n/pending, /approve <id> <code>, /deny <id> - actions waiting for your approval"
     "\n/suspend <all|cell|component> [reason], /hold [reason] - stop automatic actions; /resume [scope] <code>"
 )
+ASK_COMMAND = {"command": "ask", "description": "Ask the assistant about this node"}
+ASK_HELP = "\n/ask <question> - ask the assistant about this node (a model on your GPU machine)"
 FLEET_HELP = "\n/fleet - the other nodes of the fleet: last contact, versions, fleet file"
 REBOOT_COMMAND = {"command": "reboot", "description": "Reboot the laptop (authenticator code)"}
 REBOOT_HELP = "\n/reboot <code> - reboot the laptop; code from your authenticator app"
@@ -150,6 +156,9 @@ class Config:
     processor_api_key: str = ""
     processor_api_key_file: Path | None = None
     processor_alert_minutes: float = 30.0
+    models_config: Path | None = None  # MODELS_CONFIG: routing for /ask (M7)
+    llm_model: str = ""
+    model_review: bool = False
     ha_timeout: float = 3.0
     proc: Path = Path("/proc")
     sys: Path = Path("/sys")
@@ -247,6 +256,9 @@ class Config:
                 Path(env["PROCESSOR_API_KEY_FILE"]) if env.get("PROCESSOR_API_KEY_FILE") else None
             ),
             processor_alert_minutes=processor_alert,
+            models_config=Path(env["MODELS_CONFIG"]) if env.get("MODELS_CONFIG") else None,
+            llm_model=env.get("LLM_MODEL", "").strip(),
+            model_review=env.get("MODEL_REVIEW", "").strip().lower() in ("1", "true", "yes", "on"),
             node=env.get("EDGE_NODE", "").strip(),
             proc=Path(env.get("HOST_PROC", str(cls.proc))),
             sys=Path(env.get("HOST_SYS", str(cls.sys))),
@@ -1019,6 +1031,7 @@ class Bot:
     _logs_last: float = 0.0
     control: Any = None  # controlplane.ControlPlane when this node is in a fleet
     governance: Any = None  # governance.Governance: host actions through PDP and gateway
+    assistant: Any = None  # assistant.Assistant: /ask (Autonomy M7)
     _governed: dict[str, str] = field(default_factory=dict)  # job kind -> action id
 
     # -- sending ----------------------------------------------------------
@@ -1325,12 +1338,74 @@ class Bot:
             commands.append(FLEET_COMMAND)
         if self.cfg.totp_secret:
             commands += [REBOOT_COMMAND, REDEPLOY_COMMAND, RESTART_COMMAND, LOGS_COMMAND]
+        if self.assistant is not None:
+            commands.append(ASK_COMMAND)
         return commands
 
     def help_text(self) -> str:
         extra = REBOOT_HELP + REDEPLOY_HELP + RESTART_HELP + LOGS_HELP
         text = HELP + (FLEET_HELP if self.control else "") + (AUDIT_HELP if self.governance else "")
+        text += ASK_HELP if self.assistant is not None else ""
         return text + (extra if self.cfg.totp_secret else "")
+
+    def setup_assistant(self) -> None:
+        """/ask (Autonomy M7): a node assistant on the model gateway, when a model route is
+        configured (MODELS_CONFIG, or the job processor's llm.chat). Never stops the bot."""
+        cfg = self.cfg
+        try:
+            import assistant
+
+            state = cfg.control_state if cfg.control_state.is_dir() else None
+            models = assistant.NodeModels(
+                processor_url=cfg.processor_url,
+                key_file=cfg.processor_api_key_file,
+                key=cfg.processor_api_key,
+                model=cfg.llm_model,
+                config_file=cfg.models_config,
+                usage_path=state / "model-usage.jsonl" if state else None,
+                tracer=getattr(self.governance, "tracer", None),
+            )
+            if not models.configured:
+                return
+            self.assistant = assistant.Assistant(
+                models,
+                tools={
+                    "node.status": lambda: build_status(cfg, self.sleep),
+                    "node.audit": lambda: (
+                        self.governance.audit_text(15) if self.governance else "audit log off"
+                    ),
+                    "frigate.cameras": lambda: "\n".join(frigate_status(cfg)[0]),
+                },
+                services=lambda: [s for s in compose_services(cfg) if s not in HIDDEN_FROM_RESTART],
+                governance=self.governance,
+                cell=getattr(self.governance, "cell", "local"),
+                clock=self.clock,
+            )
+            if cfg.model_review and self.governance is not None:
+                self.governance.use_reviewer(models)
+        except Exception as e:  # noqa: BLE001 - /ask is optional
+            log.warning("/ask off: %s", e)
+            self.assistant = None
+            return
+        log.info("/ask on%s", " (LLM review of governed actions on)" if cfg.model_review else "")
+
+    def cmd_ask(self, chat_id: int, args: list[str]) -> None:
+        if self.assistant is None:
+            self.reply(
+                chat_id, "/ask is off: no model is configured (INSTALL_PROCESSOR or MODELS_CONFIG)."
+            )
+            return
+        question = " ".join(args).strip()
+        if not question:
+            self.reply(chat_id, "Send /ask <question>, e.g. /ask why are detections slow?")
+            return
+        self.reply(chat_id, "Thinking (the model runs on the GPU machine; up to a few minutes)...")
+        try:
+            answer = self.assistant.ask(question[:1000])
+        except Exception as e:  # noqa: BLE001 - always answer
+            log.exception("/ask failed")
+            answer = f"The assistant failed: {e}"
+        self.reply(chat_id, answer)
 
     def cmd_fleet(self, chat_id: int) -> None:
         if not self.control:
@@ -2201,6 +2276,10 @@ class Bot:
             self.cmd_fleet(chat_id)
         elif command == "/audit":
             self.cmd_audit(chat_id)
+        elif command == "/ask":
+            thread = threading.Thread(target=self.cmd_ask, args=(chat_id, args), daemon=True)
+            thread.start()
+            self.threads.append(thread)
         elif command == "/pending":
             self.cmd_pending(chat_id)
         elif command == "/approve":
@@ -2246,6 +2325,7 @@ class Bot:
     def run(self) -> None:
         self.setup_control()
         self.setup_governance()
+        self.setup_assistant()
         if self.governance is not None:
             threading.Thread(target=self.verify_loop, daemon=True).start()
         try:

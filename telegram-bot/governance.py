@@ -295,6 +295,99 @@ class Governance:
         )
         return q
 
+    def submit(self, proposal: dict[str, Any], *, summary: str) -> dict[str, Any]:
+        """A proposal by a component (an agent, M7): evaluate, decide, then execute (a grant
+        allows it), ask the owner (/pending), or refuse. Returns ``{"status": ...}`` with
+        ``request_id`` (pending_approval), ``action_id`` (started) or ``reason`` (denied)."""
+        with self.tracer.span(
+            "agent.proposal", **{"autonomy.proposer": str(proposal.get("proposer"))}
+        ):
+            return self._submit(proposal, summary)
+
+    def _submit(self, proposal: dict[str, Any], summary: str) -> dict[str, Any]:
+        now = self.clock()
+        action = proposal["action"]
+        if action["type"] not in ACTIONS:
+            return {"status": "denied", "reason": f"{action['type']} is not an action of this node"}
+        _, risk = ACTIONS[action["type"]]
+        corr = f"corr_{proposal['proposal_id'][4:]}"
+        self.audit.append(
+            "action.proposed",
+            summary=f"{proposal['proposer']}: {action['type']} {action['target']}"[:1000],
+            correlationid=corr,
+            refs={"proposal": proposal["proposal_id"]},
+        )
+        evaluation = self.evaluator.evaluate(proposal, risk_class=risk, correlationid=corr)
+        trust = (
+            "untrusted"
+            if any(i.get("trust") == "untrusted" for i in proposal.get("inputs", []))
+            else "trusted"
+        )
+        decision = self.pdp.decide(
+            decision_request(
+                proposal,
+                cell=self.cell,
+                risk_class=risk,
+                trust=trust,
+                now=now,
+                evaluation=evaluation["outcome"],
+            )
+        )
+        self.audit.append(
+            "action.decided",
+            summary=f"{decision['effect']}: {action['type']} {action['target']} ({decision.get('reason', '')})"[
+                :1000
+            ],
+            correlationid=corr,
+            refs={"proposal": proposal["proposal_id"], "decision": decision["decision_id"]},
+        )
+        if decision["effect"] == "require_approval":
+            q = self.ask(proposal, decision, summary)
+            return {"status": "pending_approval", "request_id": q["request_id"]}
+        if decision["effect"] == "deny":
+            return {"status": "denied", "reason": str(decision.get("reason", "denied"))}
+        record = self.gateway.execute(
+            {
+                "action_id": core.prefixed_id("act", now),
+                "proposal": proposal,
+                "decision": decision,
+                "idempotency_key": proposal["idempotency_key"],
+                "correlationid": corr,
+            },
+            traceparent=core.current_traceparent(),
+            correlationid=corr,
+        )
+        return {
+            "status": record["status"],
+            "action_id": record["action_id"],
+            "reason": str(record.get("error", "")),
+        }
+
+    def withdraw(self, proposer: str) -> int:
+        """Withdraw a suspended component's waiting proposals (C11: suspend cancels)."""
+        n = 0
+        for q in self.approvals.pending():
+            if str(q["proposal"].get("proposer", "")).split("@", 1)[0] == proposer.split("@", 1)[0]:
+                if self.approvals.deny(q["request_id"]) is not None:
+                    n += 1
+                    self.audit.append(
+                        "approval.withdrawn",
+                        summary=f"{q['request_id']} withdrawn: {proposer} was suspended",
+                        correlationid=f"corr_{q['proposal']['proposal_id'][4:]}",
+                        refs={
+                            "proposal": q["proposal"]["proposal_id"],
+                            "decision": q["decision"]["decision_id"],
+                        },
+                    )
+        return n
+
+    def use_reviewer(self, models: Any, deadline_s: float = 20.0) -> None:
+        """Give the evaluator an LLM reviewer on the model gateway (escalate-only; no model:
+        skipped, ST-03)."""
+        self.evaluator.reviewer = core.ModelReviewer(
+            models, requested_by=f"svc:evaluator@{self.cell}", deadline_s=deadline_s
+        )
+
     def approve(self, request_id: str, *, operator: int, private_chat: bool) -> dict[str, Any]:
         """The owner approved (code checked by the caller): execute through the gateway."""
         q, approval = self.approvals.approve(

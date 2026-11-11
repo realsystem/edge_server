@@ -490,6 +490,23 @@ cd /opt/edge-server && sudo docker compose exec processor ./server -register-wor
 
 An API key for another client: `sudo docker compose exec processor ./server -create-api-key owner@edge.local -api-key-name <name>`. Job options such as idempotency keys, sensitive jobs and `llm.chat` are described in processor's `docs/job-options.md`.
 
+#### Asking the node (`/ask`, Autonomy M7)
+
+With the job processor installed and a GPU worker attached, `/ask <question>` answers questions about this node, for example `/ask why are detections slow?`.
+
+- **What it reads:** the assistant reads `/status`, the audit log and the Frigate cameras.
+- **Where the model runs:** it asks a model on your GPU machine (an `llm.chat` job), and answers in a minute or two. Node data counts as *site* data: it can go to your own machines, never to a cloud model.
+- **It never acts by itself.** If restarting one service would likely help, it says so:
+  - With the default policy it has no grant, so it tells you which `/restart` to run.
+  - If you give `agent:node-assistant` a grant at autonomy level A1 in your policy bundle, its restart proposals wait in `/pending` for `/approve`.
+- **Stopping it:** `/suspend agent:node-assistant` stops it and withdraws anything it proposed.
+
+| Setting (in `.telegram`) | |
+|---|---|
+| `LLM_MODEL` | Model for `/ask`, e.g. `qwen2.5:14b` (default: the worker's `LLM_DEFAULT_MODEL`) |
+| `MODELS_CONFIG` | A routing file instead, e.g. to add a cloud model for public questions (format: autonomy `ops/models.example.yaml`) |
+| `MODEL_REVIEW=true` | An LLM also reviews `/restart`, `/reboot` and `/redeploy` before they run. It can only flag them in the audit log as "escalate", never block your own commands. Without a model the review is skipped. |
+
 ## 6. Post-Deployment
 
 | Service | URL |
