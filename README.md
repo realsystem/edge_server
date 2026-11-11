@@ -19,6 +19,28 @@ design in [docs/design/edge-system.md](docs/design/edge-system.md) and the examp
 | **Mosquitto MQTT** *(optional, off by default)* | Lightweight message broker implementing MQTT protocol. The glue between Frigate, Home Assistant, and IoT sensors via publish/subscribe topics. | EMQX, HiveMQ, RabbitMQ, AWS IoT Core | Free | Low |
 | **Tailscale** | Zero-config mesh VPN built on WireGuard. Secure remote access without exposing ports to the internet. | WireGuard (manual), ZeroTier, OpenVPN, Cloudflare Tunnel | Free (personal use) | Very low |
 
+## Lab (test everything on a laptop)
+
+`lab/` runs the node's real bot and compose file in Docker on a laptop, with Frigate and the
+host helpers replaced by small stand-ins, so nothing touches real hardware. It is one part of the
+[Autonomy lab](https://github.com/realsystem/autonomy/blob/main/design/lab.md) (the `autonomy`
+repo runs all parts with one script); it also runs on its own:
+
+```bash
+lab/lab.sh up --mock-telegram     # a fake Telegram API; or without it: your own TEST bot token
+lab/lab.sh say "/status"          # (mock) talk to the bot; lab/lab.sh replies shows its answers
+lab/lab.sh say "/restart frigate $(lab/lab.sh code)"
+lab/lab.sh cam cam1_front 0       # a camera loses video
+lab/lab.sh down                   # lab/lab.sh reset removes everything
+```
+
+What runs: the bot built from this checkout (with `autonomy-core` from `../autonomy`, or the
+pinned one with `--pinned`); the `docker-compose.yml` that `deploy-edge-server.sh` would write,
+rendered by the production functions in a throwaway container; `frigate-stub` (Frigate's API as
+the bot reads it); `host-stub` (runs the real `service-request.py` for `/restart` and `/logs`;
+`/reboot` and `/redeploy` are simulated: a fake `/proc/uptime`); and, with `--mock-telegram`,
+`telegram-mock`. Needs Docker Compose 2.24+. State is in `~/.autonomy-lab`.
+
 ## Plugins
 
 Optional monitoring plugins. They publish to Home Assistant via MQTT when

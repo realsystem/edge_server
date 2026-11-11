@@ -1,0 +1,64 @@
+name: Lab
+
+# The edge node's lab (lab/): the real bot and compose from this checkout with Frigate and
+# the host helpers as stand-ins, and a mocked Telegram API. Real containers, no real model,
+# no hardware. On changes to lab/ and the bot, and nightly.
+on:
+  pull_request:
+    paths: ["lab/**", "telegram-bot/**", "deploy-edge-server.sh", ".github/workflows/lab.yml"]
+  push:
+    branches: [main]
+    paths: ["lab/**"]
+  workflow_dispatch:
+  schedule:
+    - cron: "37 6 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lab:
+    name: lab up, /status, /restart, camera
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      LAB_DIR: /tmp/autonomy-lab
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: edge_server
+      - uses: actions/checkout@v4
+        with:
+          repository: realsystem/autonomy
+          path: autonomy
+      - name: Up with a mocked Telegram API (answers /status)
+        run: edge_server/lab/lab.sh up --mock-telegram
+      - name: A camera loses video, /status says so
+        run: |
+          edge_server/lab/lab.sh cam cam1_front 0
+          edge_server/lab/lab.sh say "/status"
+          for i in $(seq 1 15); do
+            edge_server/lab/lab.sh replies 3 | grep -q "NO VIDEO" && exit 0
+            sleep 2
+          done
+          edge_server/lab/lab.sh replies 3
+          exit 1
+      - name: /restart frigate with the lab TOTP code (host-stub runs the real helper)
+        run: |
+          edge_server/lab/lab.sh say "/restart frigate $(edge_server/lab/lab.sh code)"
+          for i in $(seq 1 40); do
+            edge_server/lab/lab.sh replies 5 | grep -q "Restarted frigate" && exit 0
+            sleep 3
+          done
+          edge_server/lab/lab.sh replies 5
+          exit 1
+      - name: Logs
+        if: always()
+        run: edge_server/lab/lab.sh logs | tail -150
+      - name: Reset
+        if: always()
+        run: edge_server/lab/lab.sh reset

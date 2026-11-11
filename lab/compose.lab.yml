@@ -1,0 +1,70 @@
+# Lab changes on top of the docker-compose.yml that deploy-edge-server.sh generates.
+# Needs Docker Compose >= 2.24 (!reset). Not for production.
+name: ${LAB_PROJECT:-alab}-edge
+
+networks:
+  lab:
+    name: ${LAB_NETWORK:-autonomy-lab}
+    external: true
+
+services:
+  frigate:
+    build: {context: "${LAB_EDGE:?}/lab/frigate-stub"}
+    image: alab-frigate-stub:lab
+    pull_policy: never
+    labels: {autonomy.lab: "true"}
+    privileged: !reset null
+    shm_size: !reset null
+    devices: !reset []
+    ports: !reset []
+    volumes: !reset []
+    environment: !reset []
+    networks: !override [lab]
+
+  telegram-bot:
+    image: ${LAB_BOT_IMAGE:-alab-telegram-bot:lab}
+    labels: {autonomy.lab: "true"}
+    pid: !reset null
+    networks: !override [lab]
+    environment:
+      - HOST_PROC=/fakeproc
+      - TELEGRAM_API_URL=${LAB_TELEGRAM_API:-https://api.telegram.org}
+      - PROCESSOR_URL=${LAB_PROCESSOR_URL:-}
+      - PROCESSOR_API_KEY_FILE=/run/lab/processor.key
+      - MODELS_CONFIG=${LAB_MODELS_CONFIG:-}
+      - LLM_MODEL=${LAB_LLM_MODEL:-mock-llm}
+      - MODEL_REVIEW=${LAB_MODEL_REVIEW:-false}
+      - ALERT_WATCH_INTERVAL=30
+    volumes:
+      - ${LAB_STATE:?}/fakeproc:/fakeproc:ro
+      - ${LAB_PROCESSOR_KEY:-/dev/null}:/run/lab/processor.key:ro
+      - ${LAB_MODELS_FILE:-/dev/null}:/run/lab/models.yaml:ro
+    depends_on:
+      frigate: {condition: service_healthy}
+
+  host-stub:
+    build: {context: "${LAB_EDGE:?}/lab/host-stub"}
+    image: alab-host-stub:lab
+    pull_policy: never
+    container_name: host-stub
+    labels: {autonomy.lab: "true"}
+    restart: unless-stopped
+    environment:
+      - EDGE_SERVER_DIR=${LAB_STATE:?}/app
+      - COMPOSE_PROJECT_NAME=${LAB_PROJECT:-alab}-edge
+      - FAKEPROC=/fakeproc
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${LAB_STATE:?}/app:${LAB_STATE:?}/app
+      - ${LAB_STATE:?}/fakeproc:/fakeproc
+      - ${LAB_EDGE:?}/telegram-bot/service-request.py:/opt/service-request.py:ro
+    networks: [lab]
+
+  telegram-mock:
+    build: {context: "${LAB_EDGE:?}/lab/telegram-mock"}
+    image: alab-telegram-mock:lab
+    pull_policy: never
+    container_name: telegram-mock
+    labels: {autonomy.lab: "true"}
+    networks: [lab]
+    profiles: [mock-telegram]
