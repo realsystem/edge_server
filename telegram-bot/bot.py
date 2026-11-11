@@ -32,6 +32,11 @@ Environment:
                         The deploy script sets it for you (bot-defaults.env); a
                         value in .telegram wins.
   HA_PORT               default 8123
+  PROCESSOR_URL         the job processor on this node (INSTALL_PROCESSOR=true): /status
+                        shows its queue and workers, and the watcher alerts when jobs
+                        wait PROCESSOR_ALERT_MINUTES (default 30) with no worker online
+  PROCESSOR_API_KEY     API key for it, or PROCESSOR_API_KEY_FILE: a file holding it,
+                        read at each check (the deploy script creates one there)
   EDGE_NODE             this node's name from the fleet file, shown in /status
   EDGE_OPERATORS        user ids from the fleet file, used when TELEGRAM_ALLOWED_IDS is empty
   ALERT_DISK_FREE_PERCENT, ALERT_INTERVAL, ALERT_REPEAT_HOURS  see above
@@ -141,6 +146,10 @@ class Config:
     ha_host: str = ""  # Home Assistant on the LAN checked in /status; "" = off
     node: str = ""  # this node's name in the fleet file, shown in /status
     ha_port: int = 8123
+    processor_url: str = ""  # job processor control plane (INSTALL_PROCESSOR); "" = off
+    processor_api_key: str = ""
+    processor_api_key_file: Path | None = None
+    processor_alert_minutes: float = 30.0
     ha_timeout: float = 3.0
     proc: Path = Path("/proc")
     sys: Path = Path("/sys")
@@ -219,6 +228,10 @@ class Config:
         if not 1 <= ha_port <= 65535:
             raise ValueError("HA_PORT must be between 1 and 65535")
         watch = env.get("ALERT_WATCH", "true").strip().lower() not in ("false", "0", "no", "off")
+        try:
+            processor_alert = float(env.get("PROCESSOR_ALERT_MINUTES", cls.processor_alert_minutes))
+        except ValueError:
+            raise ValueError("PROCESSOR_ALERT_MINUTES must be a number") from None
         return cls(
             token=token,
             allowed=frozenset(allowed),
@@ -228,6 +241,12 @@ class Config:
             storage_label=env.get("STORAGE_LABEL", cls.storage_label).strip() or cls.storage_label,
             ha_host=ha_host,
             ha_port=ha_port,
+            processor_url=env.get("PROCESSOR_URL", "").strip().rstrip("/"),
+            processor_api_key=env.get("PROCESSOR_API_KEY", "").strip(),
+            processor_api_key_file=(
+                Path(env["PROCESSOR_API_KEY_FILE"]) if env.get("PROCESSOR_API_KEY_FILE") else None
+            ),
+            processor_alert_minutes=processor_alert,
             node=env.get("EDGE_NODE", "").strip(),
             proc=Path(env.get("HOST_PROC", str(cls.proc))),
             sys=Path(env.get("HOST_SYS", str(cls.sys))),
@@ -683,6 +702,71 @@ def http_get(url: str, timeout: float = 5) -> bytes:
         return body
 
 
+def processor_stats(cfg: Config) -> tuple[dict | None, str]:
+    """The job processor's /api/v1/stats, or (None, why not)."""
+    key = cfg.processor_api_key
+    if not key and cfg.processor_api_key_file is not None:
+        key = (read_text(cfg.processor_api_key_file) or "").strip()
+    if not key:
+        return None, "no API key yet (PROCESSOR_API_KEY or PROCESSOR_API_KEY_FILE)"
+    request = urllib.request.Request(
+        f"{cfg.processor_url}/api/v1/stats", headers={"Authorization": f"Bearer {key}"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:  # noqa: S310 - internal URL
+            body = json.loads(response.read())
+    except urllib.error.HTTPError as e:
+        return None, f"HTTP {e.code}" + (" (check PROCESSOR_API_KEY)" if e.code == 401 else "")
+    except (OSError, ValueError) as e:
+        return None, f"no answer ({getattr(e, 'reason', e)})"
+    data = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(data, dict):
+        return None, "unexpected answer"
+    return data, ""
+
+
+def processor_problem(cfg: Config, stats: dict | None, error: str) -> str | None:
+    """What is wrong with the job processor, if anything: unreachable, or jobs waiting
+    longer than PROCESSOR_ALERT_MINUTES with no worker online."""
+    if stats is None:
+        return f"Job processor at {cfg.processor_url}: {error}."
+    queued = int((stats.get("jobs") or {}).get("queued", 0))
+    waited = float(stats.get("oldest_queued_s") or 0)
+    if queued and not stats.get("workers_online") and waited >= cfg.processor_alert_minutes * 60:
+        return (
+            f"{queued} job(s) have waited {human_duration(waited)} and no processor worker is "
+            "online. Is the GPU machine on and connected (Tailscale)?"
+        )
+    return None
+
+
+def processor_lines(cfg: Config) -> tuple[list[str], list[str]]:
+    """Lines for /status: queue, failures, online workers; and the problems they imply."""
+    stats, error = processor_stats(cfg)
+    problem = processor_problem(cfg, stats, error)
+    if stats is None:
+        return [f"processor: {error}"], [problem] if problem else []
+    jobs = stats.get("jobs") or {}
+    queued, running = int(jobs.get("queued", 0)), int(jobs.get("running", 0)) + int(
+        jobs.get("leased", 0)
+    )
+    failed = int(jobs.get("failed", 0)) + int(jobs.get("dead_letter", 0))
+    queue = f"processor: {queued} queued"
+    if queued:
+        queue += f" (oldest {human_duration(float(stats.get('oldest_queued_s') or 0))})"
+    queue += f", {running} running, {int(jobs.get('succeeded', 0))} done, {failed} failed"
+    workers = stats.get("workers_online") or []
+    if workers:
+        names = ", ".join(
+            f"{w.get('id')} ({', '.join(w.get('capabilities') or []) or 'no capabilities'})"
+            for w in workers
+        )
+        worker_line = f"processor workers online: {names}"
+    else:
+        worker_line = "processor workers online: none"
+    return [queue, worker_line], [problem] if problem else []
+
+
 def disabled_cameras(cfg: Config) -> set[str]:
     """Cameras switched off in the Frigate config (they report 0 fps by design)."""
     try:
@@ -791,6 +875,11 @@ def build_status(cfg: Config, sleep: Callable[[float], None] = time.sleep) -> st
         ha_lines, ha_problems = home_assistant_lines(cfg)
         host += ha_lines
         problems += ha_problems
+
+    if cfg.processor_url:
+        processor, processor_problems = processor_lines(cfg)
+        host += processor
+        problems += processor_problems
 
     frigate, frigate_problems = frigate_status(cfg)
     problems += frigate_problems
@@ -1125,6 +1214,13 @@ class Bot:
             )
         return [m for m in messages if m]
 
+    def watch_processor(self, now: float) -> list[str]:
+        stats, error = processor_stats(self.cfg)
+        message = self.judge(
+            "processor", "Job processor", processor_problem(self.cfg, stats, error), now
+        )
+        return [message] if message else []
+
     def watch_temperature(self, now: float) -> list[str]:
         limit = self.cfg.alert_temp_c
         temps = temperatures(self.cfg.sys)
@@ -1179,7 +1275,10 @@ class Bot:
     def watch_messages(self, now: float | None = None) -> list[str]:
         now = time.monotonic() if now is None else now
         messages: list[str] = []
-        for check in (self.watch_frigate, self.watch_temperature, self.watch_disk_health):
+        checks = [self.watch_frigate, self.watch_temperature, self.watch_disk_health]
+        if self.cfg.processor_url:
+            checks.append(self.watch_processor)
+        for check in checks:
             try:
                 messages += check(now)
             except Exception:  # noqa: BLE001 - one broken check must not hide the others

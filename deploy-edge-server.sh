@@ -152,6 +152,15 @@ TIMEZONE="${TIMEZONE:-$(system_timezone)}"
 # removes its container but keeps its data directory, so it can be re-enabled.
 INSTALL_HOMEASSISTANT="${INSTALL_HOMEASSISTANT:-false}"
 INSTALL_MQTT="${INSTALL_MQTT:-false}"
+# Job processor control plane (github.com/realsystem/processor): a durable job queue that
+# workers elsewhere (a GPU machine at home, say) poll over Tailscale. Off by default.
+# Its port is published on this node's Tailscale address only (PROCESSOR_BIND overrides).
+INSTALL_PROCESSOR="${INSTALL_PROCESSOR:-false}"
+PROCESSOR_IMAGE="${PROCESSOR_IMAGE:-ghcr.io/realsystem/processor-control-plane:sha-aa7e243}"
+PROCESSOR_PORT="${PROCESSOR_PORT:-8090}"
+PROCESSOR_BIND="${PROCESSOR_BIND:-}"
+PROCESSOR_ADMIN_EMAIL="${PROCESSOR_ADMIN_EMAIL:-owner@edge.local}"
+PROCESSOR_WORKER_AUTH="${PROCESSOR_WORKER_AUTH:-signature}"
 # Hardware video decoding (Intel VA-API). Off by default: it fails on some GPUs/
 # camera streams (e.g. H.264 profile 100) and software decoding always works.
 ENABLE_HWACCEL="${ENABLE_HWACCEL:-false}"
@@ -1449,6 +1458,89 @@ UNIT
     fi
 }
 
+#-------------------------------------------------------------------------------
+# JOB PROCESSOR (optional)
+#-------------------------------------------------------------------------------
+
+# Sets PROCESSOR_ACTIVE and PROCESSOR_PUBLISH (addresses the port is published on).
+# Secrets (session secret, admin password, worker token) are made once and kept in
+# $APP_DIR/.processor (root only); the queue lives in $APP_DIR/processor.
+prepare_processor() {
+    PROCESSOR_ACTIVE=false
+    PROCESSOR_PUBLISH=""
+    if [[ "$INSTALL_PROCESSOR" != "true" ]]; then
+        return 0
+    fi
+    if [[ "$PROCESSOR_IMAGE" == *__PROCESSOR_TAG__* ]]; then
+        warn "No processor image pinned in this release: set PROCESSOR_IMAGE=ghcr.io/realsystem/processor-control-plane:<tag>"
+        return 0
+    fi
+    if [[ -n "$PROCESSOR_BIND" ]]; then
+        PROCESSOR_PUBLISH="$PROCESSOR_BIND"
+    else
+        PROCESSOR_PUBLISH=$(tailscale ip -4 2> /dev/null | head -n 1) || PROCESSOR_PUBLISH=""
+    fi
+    if [[ -z "$PROCESSOR_PUBLISH" ]]; then
+        warn "No Tailscale address yet (sudo tailscale up) and no PROCESSOR_BIND: the job processor is not installed this time"
+        return 0
+    fi
+    mkdir -p "$APP_DIR/processor"
+    chown 1000:1000 "$APP_DIR/processor" # the image runs as uid 1000
+    chmod 700 "$APP_DIR/processor"
+    local secrets="$APP_DIR/.processor" tmp
+    if [[ ! -s "$secrets" ]]; then
+        tmp=$(umask 077 && mktemp "$secrets.XXXXXX")
+        {
+            echo "# Made by deploy-edge-server.sh; kept across deploys. Root only."
+            echo "SESSION_SECRET=$(openssl rand -hex 32)"
+            echo "WORKER_TOKEN=$(openssl rand -hex 32)"
+            echo "ADMIN_PASSWORD=$(openssl rand -hex 16)"
+        } > "$tmp"
+        mv "$tmp" "$secrets"
+        info "Created the job processor's secrets in $secrets"
+    fi
+    chmod 600 "$secrets"
+    # the bot reads its API key from this file (filled in by start_services)
+    if [[ "$INSTALL_TELEGRAM_BOT" == "true" ]]; then
+        touch "$APP_DIR/processor-bot.key"
+        chmod 644 "$APP_DIR/processor-bot.key"
+    fi
+    if [[ -n "${PROCESSOR_REGISTRY_TOKEN:-}" ]]; then
+        if printf '%s' "$PROCESSOR_REGISTRY_TOKEN" | docker login ghcr.io -u "${PROCESSOR_REGISTRY_USER:-realsystem}" --password-stdin > /dev/null; then
+            info "Logged in to ghcr.io for the processor image"
+        else
+            warn "Could not log in to ghcr.io with PROCESSOR_REGISTRY_TOKEN"
+        fi
+    fi
+    if [[ "$PROCESSOR_PUBLISH" == 100.* ]]; then
+        # published on the Tailscale address, which must exist when Docker starts at boot
+        mkdir -p "$SYSTEMD_DIR/docker.service.d"
+        printf '[Unit]\nWants=tailscaled.service\nAfter=tailscaled.service\n' \
+            > "$SYSTEMD_DIR/docker.service.d/edge-after-tailscale.conf"
+        systemctl daemon-reload || true
+    fi
+    PROCESSOR_ACTIVE=true
+    info "Job processor: port $PROCESSOR_PORT on $PROCESSOR_PUBLISH, workers authenticate with $PROCESSOR_WORKER_AUTH"
+}
+
+# The bot's API key for the processor: created once the processor answers.
+processor_bot_key() {
+    local keyfile="$APP_DIR/processor-bot.key" key i
+    [[ "${PROCESSOR_ACTIVE:-false}" == "true" && "$INSTALL_TELEGRAM_BOT" == "true" ]] || return 0
+    [[ -s "$keyfile" ]] && return 0
+    for i in $(seq 1 30); do
+        if key=$(docker compose exec -T processor ./server -create-api-key "$PROCESSOR_ADMIN_EMAIL" \
+            -api-key-name telegram-bot 2> /dev/null | tail -n 1) && [[ "$key" == pk_* ]]; then
+            printf '%s\n' "$key" > "$keyfile"
+            chmod 644 "$keyfile"
+            info "Created the bot's API key for the job processor"
+            return 0
+        fi
+        sleep 2
+    done
+    warn "Could not create an API key for the bot: /status will show the processor as refused"
+}
+
 create_app_stack() {
     info "Creating application stack at $APP_DIR..."
 
@@ -1595,6 +1687,9 @@ EOF
 EOF
             # /reboot: the one writable path, a drop box only root on the host can use
             [[ "$TELEGRAM_REBOOT_ENABLED" == "true" ]] && printf '      - REQUESTS_DIR=/requests\n'
+            if [[ "${PROCESSOR_ACTIVE:-false}" == "true" ]]; then
+                printf '      - PROCESSOR_URL=http://processor:8080\n      - PROCESSOR_API_KEY_FILE=/run/edge/processor.key\n'
+            fi
             cat << 'EOF'
     volumes:
       # Only what /status and /diag read. Not the whole app dir: that holds
@@ -1606,6 +1701,7 @@ EOF
       - __STORAGE_MOUNT__/frigate:/media/frigate:ro
 EOF
             [[ "$TELEGRAM_REBOOT_ENABLED" == "true" ]] && printf '      - ./bot-requests:/requests\n'
+            [[ "${PROCESSOR_ACTIVE:-false}" == "true" ]] && printf '      - ./processor-bot.key:/run/edge/processor.key:ro\n'
             # state for governed host actions (gateway journal, audit log); fleets mount it below
             if [[ "$TELEGRAM_REBOOT_ENABLED" == "true" && "$CONTROL_ACTIVE" != "true" ]]; then
                 printf '      - ./bot-state:/state\n'
@@ -1627,6 +1723,43 @@ EOF
     pids_limit: 128
 EOF
         fi
+        if [[ "${PROCESSOR_ACTIVE:-false}" == "true" ]]; then
+            cat << 'EOF'
+
+  #-----------------------------------------------------------------------------
+  # Job processor control plane: the queue that workers (a GPU machine) poll.
+  # Published on the Tailscale address only; data in ./processor.
+  #-----------------------------------------------------------------------------
+  processor:
+    image: __PROCESSOR_IMAGE__
+    container_name: processor
+    restart: unless-stopped
+    logging: *default-logging
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    env_file:
+      - ./.processor  # SESSION_SECRET, WORKER_TOKEN, ADMIN_PASSWORD
+    environment:
+      - ENV=production
+      - DATABASE_PATH=/data/processor.db
+      - ADMIN_EMAIL=__PROCESSOR_ADMIN_EMAIL__
+      - WORKER_AUTH=__PROCESSOR_WORKER_AUTH__
+    volumes:
+      - ./processor:/data
+    tmpfs:
+      - /tmp
+    mem_limit: 256m
+    ports:
+EOF
+            local _addr _paddrs
+            IFS=' ' read -ra _paddrs <<< "$PROCESSOR_PUBLISH"
+            for _addr in "${_paddrs[@]}"; do
+                printf '      - "%s:%s:8080"\n' "$_addr" "$PROCESSOR_PORT"
+            done
+        fi
         cat << 'EOF'
 
 networks:
@@ -1639,6 +1772,9 @@ EOF
     # Substitute storage mount path
     sed -i "s|__STORAGE_MOUNT__|${STORAGE_MOUNT}|g" "$APP_DIR/docker-compose.yml"
     sed -i "s|__FRIGATE_IMAGE__|${FRIGATE_IMAGE}|g" "$APP_DIR/docker-compose.yml"
+    sed -i -e "s|__PROCESSOR_IMAGE__|${PROCESSOR_IMAGE}|g" \
+        -e "s|__PROCESSOR_ADMIN_EMAIL__|${PROCESSOR_ADMIN_EMAIL}|g" \
+        -e "s|__PROCESSOR_WORKER_AUTH__|${PROCESSOR_WORKER_AUTH}|g" "$APP_DIR/docker-compose.yml"
 
     # Without an Intel GPU the device mapping makes `docker compose up` fail
     # outright, so drop it (and VA-API below) on machines that lack it.
@@ -1894,6 +2030,7 @@ stack_containers() {
     [[ "$INSTALL_MQTT" == "true" ]] && containers="$containers mosquitto"
     [[ "$INSTALL_HOMEASSISTANT" == "true" ]] && containers="$containers homeassistant"
     [[ "$INSTALL_TELEGRAM_BOT" == "true" ]] && containers="$containers telegram-bot"
+    [[ "${PROCESSOR_ACTIVE:-false}" == "true" ]] && containers="$containers processor"
     echo "$containers"
 }
 
@@ -2039,6 +2176,8 @@ start_services() {
         docker compose up -d --force-recreate --no-deps telegram-bot
     fi
 
+    processor_bot_key
+
     # Wait for containers to start
     sleep 10
 
@@ -2075,6 +2214,14 @@ show_summary() {
         echo "  Put it under nodes.${FLEET_NODE}.public_key in fleet.yaml, copy the file to every"
         echo "  node and deploy again (or /redeploy) so the others accept this node's messages."
         echo "  /fleet in Telegram shows who has been heard from."
+    fi
+    if [[ "${PROCESSOR_ACTIVE:-false}" == "true" ]]; then
+        echo
+        echo "Job processor: http://${PROCESSOR_PUBLISH%% *}:${PROCESSOR_PORT} (web UI login ${PROCESSOR_ADMIN_EMAIL}; password in ${APP_DIR}/.processor)"
+        echo "  Add a GPU worker (README: Job processor). The worker logs its public key; register it here:"
+        echo "    cd ${APP_DIR} && docker compose exec processor ./server -register-worker-key gpu-1=<key> -capabilities llm.chat"
+        echo "  API key for another client:"
+        echo "    docker compose exec processor ./server -create-api-key ${PROCESSOR_ADMIN_EMAIL} -api-key-name <name>"
     fi
     if [[ "$INSTALL_MQTT" == "true" ]]; then
         echo "  - MQTT Broker:    mqtt://${ip_addr}:1883"
@@ -2139,6 +2286,8 @@ SAVED_SETTINGS=(
     NUT_POWER_INSTALL NUT_SHUTDOWN_DELAY NUT_LOW_BATTERY
     VICTRON_INSTALL VICTRON_ADDRESS VICTRON_KEY RENOGY_INSTALL RENOGY_ADDRESS
     REDEPLOY_REPO HA_HOST HA_PORT
+    INSTALL_PROCESSOR PROCESSOR_IMAGE PROCESSOR_PORT PROCESSOR_BIND PROCESSOR_ADMIN_EMAIL
+    PROCESSOR_WORKER_AUTH
 )
 
 save_settings() {
@@ -2585,6 +2734,7 @@ run_deploy() {
     configure_firewall
     configure_storage
     prepare_telegram_bot
+    prepare_processor
     create_app_stack
     discover_cameras
     create_systemd_service

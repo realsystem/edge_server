@@ -2842,3 +2842,102 @@ class TestControlPlaneDeploy(FleetHelpers):
         text = (REPO / "telegram-bot/Dockerfile").read_text()
         assert "ARG WITH_CRYPTO=false" in text
         assert 'if [ "$WITH_CRYPTO" = "true" ]; then pip install' in text
+
+
+# --------------------------------------------------------------------------
+# Job processor control plane (INSTALL_PROCESSOR=true)
+# --------------------------------------------------------------------------
+
+
+class TestProcessor:
+    IMAGE = "ghcr.io/realsystem/processor-control-plane:sha-abc1234"
+
+    def run(self, stub_path, tmp_path, tailscale_ip="100.64.0.7", body=None, **env):
+        ts = stub_path / "tailscale"
+        ts.write_text(
+            f'#!/usr/bin/env bash\n[[ "$*" == "ip -4" ]] && echo "{tailscale_ip}"\nexit 0\n'
+        )
+        ts.chmod(0o755)
+        full_env = {
+            "EDGE_SERVER_DIR": str(tmp_path / "app"),
+            "EDGE_STORAGE_DIR": str(tmp_path / "storage"),
+            "SYSTEMD_DIR": str(tmp_path / "systemd"),
+            "INSTALL_PROCESSOR": "true",
+            "PROCESSOR_IMAGE": self.IMAGE,
+            **env,
+        }
+        script = body or 'mkdir -p "$APP_DIR"\nprepare_processor\ncreate_app_stack'
+        result = run_sourced("deploy-edge-server.sh", script, stub_path, full_env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        return tmp_path / "app", result
+
+    def compose(self, app):
+        return yaml.safe_load((app / "docker-compose.yml").read_text())["services"]
+
+    def test_processor_published_on_the_tailscale_address_only(self, stub_path, tmp_path):
+        app, _ = self.run(stub_path, tmp_path)
+        p = self.compose(app)["processor"]
+        assert p["image"] == self.IMAGE
+        assert p["ports"] == ["100.64.0.7:8090:8080"]
+        assert p["read_only"] is True and p["cap_drop"] == ["ALL"]
+        assert "WORKER_AUTH=signature" in p["environment"] and "ENV=production" in p["environment"]
+        assert p["volumes"] == ["./processor:/data"]
+        dropin = tmp_path / "systemd" / "docker.service.d" / "edge-after-tailscale.conf"
+        assert "After=tailscaled.service" in dropin.read_text()
+
+    def test_secrets_are_made_once_and_private(self, stub_path, tmp_path):
+        app, _ = self.run(stub_path, tmp_path)
+        secrets = app / ".processor"
+        first = secrets.read_text()
+        assert oct(secrets.stat().st_mode & 0o777) == "0o600"
+        values = dict(line.split("=", 1) for line in first.splitlines() if "=" in line)
+        assert set(values) == {"SESSION_SECRET", "WORKER_TOKEN", "ADMIN_PASSWORD"}
+        assert len(values["SESSION_SECRET"]) == 64 and len(values["WORKER_TOKEN"]) == 64
+        self.run(stub_path, tmp_path)
+        assert secrets.read_text() == first  # a redeploy keeps them
+
+    def test_bot_gets_the_url_and_a_key_file(self, stub_path, tmp_path):
+        app, _ = self.run(stub_path, tmp_path, INSTALL_TELEGRAM_BOT="true")
+        b = self.compose(app)["telegram-bot"]
+        assert "PROCESSOR_URL=http://processor:8080" in b["environment"]
+        assert "PROCESSOR_API_KEY_FILE=/run/edge/processor.key" in b["environment"]
+        assert "./processor-bot.key:/run/edge/processor.key:ro" in b["volumes"]
+        assert (app / "processor-bot.key").exists()
+
+    def test_bind_override_and_port(self, stub_path, tmp_path):
+        app, _ = self.run(stub_path, tmp_path, PROCESSOR_BIND="10.0.0.5", PROCESSOR_PORT="9000")
+        assert self.compose(app)["processor"]["ports"] == ["10.0.0.5:9000:8080"]
+        assert not (tmp_path / "systemd" / "docker.service.d").exists()
+
+    @pytest.mark.parametrize(
+        "env,why",
+        [
+            (
+                {"PROCESSOR_IMAGE": "ghcr.io/realsystem/processor-control-plane:__PROCESSOR_TAG__"},
+                "No processor image pinned",
+            ),
+            ({"__no_tailscale": "1"}, "No Tailscale address yet"),
+            ({"INSTALL_PROCESSOR": "false"}, ""),
+        ],
+    )
+    def test_not_installed(self, stub_path, tmp_path, env, why):
+        ip = "" if env.pop("__no_tailscale", None) else "100.64.0.7"
+        app, result = self.run(stub_path, tmp_path, tailscale_ip=ip, **env)
+        assert "processor" not in self.compose(app)
+        assert why in result.stdout
+
+    def test_health_check_watches_the_processor(self, stub_path, tmp_path):
+        script = (
+            f"export UNIT_DIR={tmp_path}\n"
+            'mkdir -p "$APP_DIR"\nprepare_processor\n'
+            'eval "$(declare -f create_systemd_service '
+            "| sed 's|/etc/systemd/system|'$UNIT_DIR'|g')\"\n"
+            "create_systemd_service\n"
+        )
+        app, _ = self.run(stub_path, tmp_path, body=script)
+        assert "CONTAINERS=(frigate processor)" in (app / "health-check.sh").read_text()
+
+    def test_settings_are_saved_for_auto(self, stub_path, tmp_path):
+        app, _ = self.run(stub_path, tmp_path, body='mkdir -p "$APP_DIR"\nsave_settings')
+        saved = (app / "deploy.env").read_text()
+        assert "INSTALL_PROCESSOR=true" in saved and f"PROCESSOR_IMAGE={self.IMAGE}" in saved

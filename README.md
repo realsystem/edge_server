@@ -450,6 +450,46 @@ the next deploy recreates them (Frigate restarts once) and the old log goes with
 the old container. To see their size first:
 `sudo du -sh /var/lib/docker/containers/*/*-json.log`.
 
+### Job processor (optional, `INSTALL_PROCESSOR=true`)
+
+This node can host the control plane of [processor](https://github.com/realsystem/processor), a durable job queue. Workers on other machines poll it over Tailscale, for example a GPU machine at home that runs Ollama. Nothing is opened to the internet, and the GPU machine accepts no incoming connections.
+
+```bash
+sudo INSTALL_PROCESSOR=true ./deploy-edge-server.sh
+```
+
+| Setting | Default | |
+|---|---|---|
+| `INSTALL_PROCESSOR` | `false` | |
+| `PROCESSOR_IMAGE` | pinned per release (`ghcr.io/realsystem/processor-control-plane:sha-…`) | |
+| `PROCESSOR_PORT` | `8090` | |
+| `PROCESSOR_BIND` | this node's Tailscale address | Other addresses to publish on, space-separated |
+| `PROCESSOR_WORKER_AUTH` | `signature` | Per-worker Ed25519 keys; `token` or `any` to use the shared `WORKER_TOKEN` |
+| `PROCESSOR_ADMIN_EMAIL` | `owner@edge.local` | Web UI login; the password is in `/opt/edge-server/.processor` |
+| `PROCESSOR_REGISTRY_TOKEN` | | A GitHub token with `read:packages`, needed while the image is private |
+
+The queue lives in `/opt/edge-server/processor`. The generated secrets live in `/opt/edge-server/.processor` (root only) and are kept across deploys. With the bot installed, `/status` shows the queue and the online workers. The watcher alerts when jobs have waited `PROCESSOR_ALERT_MINUTES` (default 30) with no worker online. The deploy creates the bot's API key.
+
+**Adding the GPU worker** (on the GPU machine, which must be on the same tailnet):
+
+```bash
+docker run -d --name processor-worker --restart unless-stopped --network host \
+  -e CONTROL_PLANE_URL=http://<this node's Tailscale name>:8090 \
+  -e WORKER_ID=gpu-1 -e WORKER_KEY_FILE=/keys/worker.pem \
+  -e WORKER_CAPABILITIES=llm.chat,ollama_chat \
+  -e LLM_BASE_URL=http://127.0.0.1:11434 -e LLM_DEFAULT_MODEL=qwen2.5:14b -e JOB_TIMEOUT=10m \
+  -v processor-worker-keys:/keys ghcr.io/realsystem/processor-worker:sha-aa7e243
+docker logs processor-worker 2>&1 | grep "public key"
+```
+
+Then register the logged key on this node:
+
+```bash
+cd /opt/edge-server && sudo docker compose exec processor ./server -register-worker-key gpu-1=<key> -capabilities llm.chat,ollama_chat
+```
+
+An API key for another client: `sudo docker compose exec processor ./server -create-api-key owner@edge.local -api-key-name <name>`. Job options such as idempotency keys, sensitive jobs and `llm.chat` are described in processor's `docs/job-options.md`.
+
 ## 6. Post-Deployment
 
 | Service | URL |
