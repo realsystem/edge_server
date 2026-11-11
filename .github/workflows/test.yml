@@ -212,6 +212,31 @@ jobs:
           NO_COLOR: "1"
         run: ./tests/test-scripts.sh
 
+  secret-scan:
+    # Autonomy M9, IT-81: no secrets in the repository. The Autonomy scanner over the tree
+    # (expected test data in .secrets-allowlist), then gitleaks over the files as committed.
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install autonomy-core
+        run: pip install -r requirements.txt
+
+      - name: Autonomy secret scanner
+        run: autonomy secrets scan . --allowlist .secrets-allowlist
+
+      - name: Gitleaks
+        run: >-
+          docker run --rm -v "$PWD:/repo" -w /repo zricethezav/gitleaks:v8.21.2
+          dir --config /repo/.gitleaks.toml --redact --verbose /repo
+
   docker-compose-validate:
     name: Validate Docker Compose
     runs-on: ubuntu-latest

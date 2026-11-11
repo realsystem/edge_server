@@ -2162,6 +2162,26 @@ def check_environment(cfg: Config) -> list[str]:
     return problems
 
 
+def install_redaction(cfg: Config) -> bool:
+    """Mask the bot token, the authenticator secret and secret-shaped text in every log line
+    (Autonomy M9, autonomy-core's redactor). False when autonomy-core is not installed."""
+    try:
+        import autonomy_core as core
+    except ImportError:
+        return False
+    for value in (cfg.token, cfg.totp_secret):
+        if value:
+            core.REDACTOR.register(value)
+    for name, value in os.environ.items():
+        if any(w in name.upper() for w in ("TOKEN", "SECRET", "PASSWORD", "API_KEY")) and value:
+            core.REDACTOR.register(value)
+    redacting = core.telemetry.RedactingFilter()
+    for handler in logging.getLogger().handlers:
+        if not any(isinstance(f, core.telemetry.RedactingFilter) for f in handler.filters):
+            handler.addFilter(redacting)
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     logging.basicConfig(
@@ -2174,6 +2194,7 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as e:
         log.error("%s", e)
         return 2
+    install_redaction(cfg)
     if "--check" in argv:
         problems = check_environment(cfg)
         for p in problems:

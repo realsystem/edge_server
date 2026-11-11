@@ -1,0 +1,11 @@
+# gitleaks configuration for CI (Autonomy M9, IT-81). Same expected test data as .secrets-allowlist.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "documentation placeholders and fake values in tests"
+paths = [
+  '''^tests/''',
+  '''^plugins/[^/]+/tests/''',
+  '''^\.git/''',
+]

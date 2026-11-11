@@ -115,7 +115,11 @@ class Governance:
             except (ValueError, OSError, core.Reject) as exc:
                 self.bundle_problem = f"policy bundle refused: {exc}"
                 log.warning("governance: %s; using the baseline", self.bundle_problem)
-        self.pdp = Pdp(issuer=self.issuer, key=key, bundle=bundle, clock=clock)
+        # one trace per action story (Autonomy M9, IT-71): OTLP/JSON spans next to the audit log
+        self.tracer = core.Tracer(
+            state_dir / "traces.jsonl", service=f"cell:{cell}", instance=f"cell:{cell}"
+        )
+        self.pdp = Pdp(issuer=self.issuer, key=key, bundle=bundle, clock=clock, tracer=self.tracer)
         self.audit = core.AuditLog(
             state_dir / "audit.jsonl", cell=cell, actor=self.executor, key=key
         )
@@ -132,6 +136,7 @@ class Governance:
             suspended=suspended,
             blocked=self.control.blocked,
             approval_keys=core.KeyRing({"svc:approval": public}),
+            tracer=self.tracer,
         )
         for rec in self.gateway.reconcile():
             log.warning(
@@ -149,6 +154,26 @@ class Governance:
     ) -> dict[str, Any]:
         """The owner asked (TOTP checked) for an action: propose, decide, execute. Returns the
         ExecutionRecord: status ``started`` (the host helper has the request) or ``rejected``."""
+        with self.tracer.span(
+            "telegram.command", **{"autonomy.action_type": action_type, "autonomy.target": target}
+        ):
+            return self._request(
+                action_type,
+                target,
+                requested_by=requested_by,
+                message_id=message_id,
+                private_chat=private_chat,
+            )
+
+    def _request(
+        self,
+        action_type: str,
+        target: str,
+        *,
+        requested_by: int,
+        message_id: Any,
+        private_chat: bool,
+    ) -> dict[str, Any]:
         now = self.clock()
         _, risk = ACTIONS[action_type]
         proposal: dict[str, Any] = {
@@ -197,7 +222,9 @@ class Governance:
                 "idempotency_key": proposal["idempotency_key"],
                 "correlationid": f"corr_{proposal['proposal_id'][4:]}",
                 **({"approval": approval} if approval else {}),
-            }
+            },
+            traceparent=core.current_traceparent(),
+            correlationid=f"corr_{proposal['proposal_id'][4:]}",
         )
         return record
 
@@ -305,5 +332,6 @@ class Governance:
                 f"  ACTIVE: {o['kind']} {o['scope']} since {o['issued_at']}: {o['reason']}"
             )
         for rec in records[-n:]:
-            lines.append(f"{rec['time']} {rec['kind']}: {rec['summary']}")
+            trace = f" [trace {rec['trace_id'][:8]}]" if rec.get("trace_id") else ""
+            lines.append(f"{rec['time']} {rec['kind']}: {rec['summary']}{trace}")
         return "\n".join(lines)
