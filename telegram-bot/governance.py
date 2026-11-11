@@ -6,6 +6,12 @@ policy decision point decides; the action gateway is the only code that writes t
 request for the host helpers (the drop box in REQUESTS_DIR); every step is a signed,
 hash-chained audit record in the state directory, readable with /audit.
 
+Autonomy M8 (C13, C14): each proposal is evaluated first (the outcome feeds the PDP), and
+each executed action is verified afterwards through a probe: the host's boot time after a
+reboot and Frigate's own uptime after a Frigate restart (both independent of the host
+helper), the host helper's job result otherwise. A contradicted outcome opens an incident
+in the audit log and the owner is told.
+
 Needs ``autonomy-core`` (and ``cryptography``) and a writable state directory; the bot
 falls back to its direct path when either is missing and says so in its log.
 """
@@ -89,6 +95,9 @@ class Governance:
         clock: Callable[[], float] = time.time,
         suspended: Callable[[], bool] = lambda: False,
         operators: Any = (),
+        boot_time: Callable[[], float | None] | None = None,
+        frigate_started: Callable[[], float | None] | None = None,
+        services: Callable[[], list[str]] | None = None,
     ):
         self.cell = cell
         self.clock = clock
@@ -98,7 +107,12 @@ class Governance:
         public = core.encode_public_key(key)
         self.attester = f"svc:approval@{cell}"
         self.keys = core.KeyRing(
-            {"svc:pdp": public, "svc:action-gateway": public, "svc:approval": public}
+            {
+                "svc:pdp": public,
+                "svc:action-gateway": public,
+                "svc:approval": public,
+                "svc:verifier": public,
+            }
         )
         # C05: approvals and emergency controls (Autonomy M6), signed with the node key
         self.approvals = core.ApprovalService(
@@ -142,6 +156,39 @@ class Governance:
             log.warning(
                 "governance: %s settled as %s after a restart", rec["action_id"], rec["status"]
             )
+        # C13 before, C14 after (Autonomy M8)
+        self.boot_time = boot_time
+        self.frigate_started = frigate_started
+        self.jobs_file = state_dir / "job-results.json"
+        try:
+            self.jobs: dict[str, dict[str, Any]] = json.loads(self.jobs_file.read_text())
+        except (OSError, ValueError):
+            self.jobs = {}
+        probes = {"host.job_result": core.Probe(self._probe_job, independent=False)}
+        if boot_time is not None:
+            probes["host.boot_time"] = core.Probe(self._probe_boot, independent=True)
+        if frigate_started is not None:
+            probes["frigate.uptime"] = core.Probe(self._probe_frigate, independent=True)
+        invariants: dict[str, dict[str, Any]] = {}
+        if services is not None:
+            invariants["host.restart_service"] = {"known_service": _known_service(services)}
+        self.evaluator = core.Evaluator(
+            invariants=invariants,
+            open_proposals=self._open_proposals,
+            probes=set(probes),
+            clock=clock,
+            audit=self.audit,
+            tracer=self.tracer,
+        )
+        self.verifier = core.Verifier(
+            verifier=f"svc:verifier@{cell}",
+            key=key,
+            probes=probes,
+            state_dir=state_dir / "verifier",
+            clock=clock,
+            audit=self.audit,
+            tracer=self.tracer,
+        )
 
     def request(
         self,
@@ -186,14 +233,21 @@ class Governance:
             "action": {"type": action_type, "target": target, "params": {}},
             "rationale": f"owner command from Telegram user {requested_by}, authenticator code checked",
             "inputs": [],
-            "expected_effect": {"kind": "host_job_done", "within_s": 3600},
-            "verification": {"probe": "host.job_result", "independent": False},
+            **self._expectation(action_type, target),
             "reversibility": {"irreversible": True, "note": "a restart or reboot cannot be undone"},
             "freshness_s": 300,
             "idempotency_key": f"telegram:{requested_by}:{message_id}:{action_type}:{target}",
         }
+        corr = f"corr_{proposal['proposal_id'][4:]}"
+        evaluation = self.evaluator.evaluate(proposal, risk_class=risk, correlationid=corr)
         req = decision_request(
-            proposal, cell=self.cell, risk_class=risk, trust="owner", now=now, owner_verified=True
+            proposal,
+            cell=self.cell,
+            risk_class=risk,
+            trust="owner",
+            now=now,
+            owner_verified=True,
+            evaluation=evaluation["outcome"],
         )
         decision = self.pdp.decide(req)
         self.audit.append(
@@ -302,6 +356,17 @@ class Governance:
         rec = self.gateway.record(action_id) if action_id else None
         if action_id is None or rec is None or rec.get("status") != "started":
             return
+        kind = ACTIONS.get(str(rec_action(self.gateway, action_id)), ("", ""))[0]
+        if kind:
+            self.jobs[kind] = {
+                "value": "ok" if ok else "failed",
+                "at": self.clock(),
+                "detail": detail[:200],
+            }
+            try:
+                self.jobs_file.write_text(json.dumps(self.jobs))
+            except OSError as exc:
+                log.warning("governance: cannot keep the job result: %s", exc)
         result = core.AdapterResult(
             "succeeded" if ok else "failed",
             {"detail": detail[:200]} if detail else {},
@@ -315,6 +380,72 @@ class Governance:
             if ACTIONS.get(str(entry["action"]["type"]), ("", ""))[0] == kind:
                 return str(aid)
         return None
+
+    # -- C13 / C14 (Autonomy M8)
+
+    def _expectation(self, action_type: str, target: str) -> dict[str, Any]:
+        """What should be true afterwards, and how this node checks it."""
+        kind, _ = ACTIONS[action_type]
+        if action_type == "host.reboot" and self.boot_time is not None:
+            effect = {"kind": "restarted_after", "entity": "host", "within_s": 1800}
+            probe = {"probe": "host.boot_time", "independent": True}
+        elif action_type == "host.restart_service" and target == "frigate" and self.frigate_started:
+            effect = {"kind": "restarted_after", "entity": "frigate", "within_s": 600}
+            probe = {"probe": "frigate.uptime", "independent": True}
+        else:
+            effect = {
+                "kind": "state_equals",
+                "entity": f"host.job.{kind}",
+                "value": "ok",
+                "within_s": 3600,
+            }
+            probe = {"probe": "host.job_result", "independent": False}
+        return {"expected_effect": effect, "verification": probe}
+
+    def _open_proposals(self) -> list[dict[str, Any]]:
+        out = []
+        for aid, entry in self.gateway.started.items():
+            pid = (entry.get("expect") or {}).get("proposal_id") or f"prp_{aid[4:]}"
+            out.append({"proposal_id": pid, "action": entry["action"]})
+        return out
+
+    def _probe_job(self, effect: Any, action: Any, since: float) -> list[Any]:
+        kind = str(effect.get("entity", "")).rsplit(".", 1)[-1]
+        job = self.jobs.get(kind)
+        if not job or float(job["at"]) < since:
+            return []
+        return [core.Observation(f"job:{kind}", job["value"], float(job["at"]), "host.job_result")]
+
+    def _probe_boot(self, effect: Any, action: Any, since: float) -> list[Any]:
+        assert self.boot_time is not None
+        t = self.boot_time()
+        if t is None:
+            raise OSError("host boot time unavailable")
+        return [core.Observation("host:boot_time", t, self.clock(), "host.boot_time")]
+
+    def _probe_frigate(self, effect: Any, action: Any, since: float) -> list[Any]:
+        assert self.frigate_started is not None
+        t = self.frigate_started()
+        if t is None:
+            raise OSError("Frigate stats unavailable")
+        return [core.Observation("frigate:stats", t, self.clock(), "frigate.uptime")]
+
+    def verify_pending(self, final: bool = False) -> list[dict[str, Any]]:
+        """Check every executed action still waiting for verification; returns the new
+        verifications (contradicted ones also opened an incident in the audit log)."""
+        return list(self.verifier.check_pending(self.gateway, final=final))
+
+    def verification_text(self, v: dict[str, Any]) -> str:
+        entry = self.gateway.entries.get(v["action_id"], {})
+        a = entry.get("action", {})
+        what = f"{a.get('type', 'action')} {a.get('target', '')}".strip()
+        if v["result"] == "confirmed":
+            return f"Verified: {what} took effect."
+        if v["result"] == "contradicted":
+            return f"Warning: {what} was reported done but did not take effect ({v.get('note', '')}). Incident recorded; see /audit."
+        if v["result"] == "not_confirmed":
+            return f"Could not confirm that {what} took effect ({v.get('note', '')})."
+        return f"Could not check {what}: {v.get('note', 'inconclusive')}."
 
     def audit_text(self, n: int = 10) -> str:
         records = list(self.audit.records())
@@ -335,3 +466,22 @@ class Governance:
             trace = f" [trace {rec['trace_id'][:8]}]" if rec.get("trace_id") else ""
             lines.append(f"{rec['time']} {rec['kind']}: {rec['summary']}{trace}")
         return "\n".join(lines)
+
+
+def rec_action(gateway: ActionGateway, action_id: str) -> str:
+    entry = gateway.entries.get(action_id) or {}
+    return str((entry.get("action") or {}).get("type", ""))
+
+
+def _known_service(services: Callable[[], list[str]]) -> Callable[[Any], tuple[bool, str]]:
+    def check(proposal: Any) -> tuple[bool, str]:
+        target = str(proposal["action"]["target"])
+        known = services()
+        if target in known:
+            return True, ""
+        return (
+            False,
+            f"{target} is not a service of this stack ({', '.join(known) or 'none found'})",
+        )
+
+    return check

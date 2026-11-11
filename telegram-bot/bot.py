@@ -122,6 +122,7 @@ TOTP_FILE_AGE = 60  # a /reboot message older than this is refused
 REBOOT_MAX_FAILURES = 3
 REBOOT_LOCKOUT = 15 * 60.0
 REBOOT_NOTIFY_MAX_AGE = 30 * 60.0
+VERIFY_INTERVAL = 30.0  # how often executed actions are checked against their effect (M8)
 
 
 # ---------------------------------------------------------------------------
@@ -1272,15 +1273,19 @@ class Bot:
                 bundle_file=cfg.control_state / "policy-bundle.json",
                 clock=self.clock,
                 operators=cfg.allowed,
+                boot_time=self.boot_time,
+                frigate_started=self.frigate_started,
+                services=lambda: compose_services(cfg),
             )
         except Exception as e:  # noqa: BLE001 - the bot keeps the direct path
             log.warning("governed actions off (%s): %s", type(e).__name__, e)
             self.governance = None
             return
         log.info(
-            "governed actions on: cell %s, policy bundle %s",
+            "governed actions on: cell %s, policy bundle %s; outcomes verified every %g s",
             self.governance.cell,
             self.governance.pdp.bundle.version,
+            VERIFY_INTERVAL,
         )
 
     def _create_request_once(self, name: str) -> bool:
@@ -1325,6 +1330,41 @@ class Bot:
             self.governance.finished(aid, ok, detail)
         except Exception:  # noqa: BLE001 - the owner still gets the result
             log.exception("could not record the %s outcome", kind)
+        self.verify_actions()
+
+    def verify_actions(self, final: bool = False) -> None:
+        """Autonomy M8 (C14): check executed actions against what they should have done; tell
+        the owner when an outcome could not be confirmed or was contradicted."""
+        if self.governance is None:
+            return
+        try:
+            results = self.governance.verify_pending(final=final)
+        except Exception:  # noqa: BLE001 - verification must not break the bot
+            log.exception("verification failed")
+            return
+        for v in results:
+            log.info("verification %s: %s", v["action_id"], v["result"])
+            if v["result"] != "confirmed":
+                self.broadcast([self.governance.verification_text(v)])
+
+    def verify_loop(self) -> None:
+        while not self.stop.wait(VERIFY_INTERVAL):
+            self.verify_actions()
+
+    def boot_time(self) -> float | None:
+        """When the host booted (the container shares the host kernel's /proc/uptime)."""
+        up = self.uptime()
+        return None if up is None else self.clock() - up
+
+    def frigate_started(self) -> float | None:
+        """When Frigate's process started, from Frigate's own API (independent of the host
+        helper that restarted it)."""
+        try:
+            stats = json.loads(http_get(f"{self.cfg.frigate_url}/api/stats"))
+            up = float((stats.get("service") or {})["uptime"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        return self.clock() - up
 
     def _governance_on(self, chat_id: int) -> bool:
         if self.governance is None:
@@ -2107,6 +2147,8 @@ class Bot:
     def run(self) -> None:
         self.setup_control()
         self.setup_governance()
+        if self.governance is not None:
+            threading.Thread(target=self.verify_loop, daemon=True).start()
         try:
             self.api.call("setMyCommands", {"commands": self.commands()})
         except TelegramError as e:

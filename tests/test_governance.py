@@ -74,7 +74,7 @@ class TestGovernedCommands:
         assert "Restarting frigate" in telegram.texts()[-1]
         aid = governed._governed["restart"]
         assert governed.governance.gateway.record(aid)["status"] == "started"
-        assert audit_kinds(governed) == ["action.decided", "action.started"]
+        assert audit_kinds(governed) == ["action.evaluated", "action.decided", "action.started"]
         # the host helper answers
         req(governed, "restart-result").write_text(
             json.dumps({"service": "frigate", "status": "ok"})
@@ -121,7 +121,7 @@ class TestGovernedCommands:
         assert req(governed, "redeploy").exists()
         req(governed, "redeploy-result").write_text(json.dumps({"status": "ok", "at": 0}))
         governed.deliver_redeploy_result()
-        assert audit_kinds(governed)[-1] == "action.succeeded"
+        assert audit_kinds(governed)[-2:] == ["action.succeeded", "action.verified"]
 
     def test_policy_can_forbid(self, governed, telegram, monkeypatch):
         forbid = core.PolicyBundle(
