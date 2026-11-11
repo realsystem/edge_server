@@ -48,7 +48,7 @@ need_docker() {
   fi
 }
 
-secret() { sed -n "s/^$1=//p" "$SECRETS" 2>/dev/null | tail -n 1; }
+secret() { { sed -n "s/^$1=//p" "$SECRETS" 2>/dev/null || true; } | tail -n 1; }
 set_secret() { # name value
   touch "$SECRETS"; chmod 600 "$SECRETS"
   { grep -v "^$1=" "$SECRETS" 2>/dev/null || true; printf '%s=%s\n' "$1" "$2"; } > "$SECRETS.new"

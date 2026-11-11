@@ -1,5 +1,6 @@
 """The lab (lab/): stand-ins are tested directly; the render step runs the production deploy
 script against stubs, as the other deploy tests do. No Docker daemon needed."""
+
 import json
 import os
 import shutil
@@ -57,7 +58,9 @@ class TestFrigateStub:
             stats = json.loads(get(base + "/api/stats"))
             assert stats["cameras"]["cam1_front"]["camera_fps"] == 0
             post(base + "/_lab/camera", {"name": "cam1_front", "enabled": False})
-            assert json.loads(get(base + "/api/config"))["cameras"]["cam1_front"]["enabled"] is False
+            assert (
+                json.loads(get(base + "/api/config"))["cameras"]["cam1_front"]["enabled"] is False
+            )
         finally:
             httpd.shutdown()
 
@@ -69,9 +72,17 @@ class TestTelegramMock:
             post(base + "/_lab/say", {"text": "/status", "user_id": 1001})
             got = post(base + "/bot1:tok/getUpdates", {"timeout": 1, "offset": 0})
             update = got["result"][0]
-            assert update["message"]["text"] == "/status" and update["message"]["chat"]["id"] == 1001
+            assert (
+                update["message"]["text"] == "/status" and update["message"]["chat"]["id"] == 1001
+            )
             # offset acknowledges it
-            assert post(base + f"/bot1:tok/getUpdates", {"timeout": 0, "offset": update["update_id"] + 1})["result"] == []
+            assert (
+                post(
+                    base + f"/bot1:tok/getUpdates",
+                    {"timeout": 0, "offset": update["update_id"] + 1},
+                )["result"]
+                == []
+            )
             post(base + "/bot1:tok/sendMessage", {"chat_id": 1001, "text": "hello"})
             assert json.loads(get(base + "/_lab/sent"))["messages"][-1]["text"] == "hello"
         finally:
@@ -87,7 +98,9 @@ def rendered(tmp_path):
         "TELEGRAM_ALLOWED_IDS=1001\nREBOOT_TOTP_SECRET=JBSWY3DPEHPK3PXPJBSWY3DP\n"
     )
     env = {**os.environ, "APP": str(app), "REPO": str(REPO), "CRED": str(cred)}
-    result = subprocess.run(["bash", str(LAB / "render.sh")], env=env, capture_output=True, text=True, timeout=120)
+    result = subprocess.run(
+        ["bash", str(LAB / "render.sh")], env=env, capture_output=True, text=True, timeout=120
+    )
     assert result.returncode == 0, result.stdout + result.stderr
     return app
 
@@ -106,9 +119,25 @@ class TestRender:
     def test_lab_override_merges(self, rendered, tmp_path):
         env = {**os.environ, "LAB_STATE": str(tmp_path / "state"), "LAB_EDGE": str(REPO)}
         r = subprocess.run(
-            ["docker", "compose", "--project-directory", str(rendered), "-f", str(rendered / "docker-compose.yml"),
-             "-f", str(LAB / "compose.lab.yml"), "--profile", "mock-telegram", "config", "--format", "json"],
-            env=env, capture_output=True, text=True, timeout=60,
+            [
+                "docker",
+                "compose",
+                "--project-directory",
+                str(rendered),
+                "-f",
+                str(rendered / "docker-compose.yml"),
+                "-f",
+                str(LAB / "compose.lab.yml"),
+                "--profile",
+                "mock-telegram",
+                "config",
+                "--format",
+                "json",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
         if r.returncode != 0 and "unknown flag" in r.stderr:
             pytest.skip("docker compose too old")
@@ -116,7 +145,11 @@ class TestRender:
         cfg = json.loads(r.stdout)
         assert set(cfg["services"]) == {"frigate", "telegram-bot", "host-stub", "telegram-mock"}
         frigate_svc = cfg["services"]["frigate"]
-        assert not frigate_svc.get("privileged") and not frigate_svc.get("devices") and not frigate_svc.get("ports")
+        assert (
+            not frigate_svc.get("privileged")
+            and not frigate_svc.get("devices")
+            and not frigate_svc.get("ports")
+        )
         assert list(cfg["services"]["telegram-bot"]["networks"]) == ["lab"]
 
 
