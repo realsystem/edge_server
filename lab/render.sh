@@ -35,4 +35,6 @@ create_app_stack
 chmod 755 "$APP"
 chmod -R a+rX "$APP/telegram-bot" "$APP/frigate" "$APP/bot-status" 2> /dev/null || true
 chmod 777 "$APP/bot-requests" "$APP/bot-state" 2> /dev/null || true
+# compose reads these as the host user; the token is the lab bot's
+chmod 644 "$APP/.telegram" "$APP/bot-defaults.env" 2> /dev/null || true
 echo "render: done: $APP/docker-compose.yml"
