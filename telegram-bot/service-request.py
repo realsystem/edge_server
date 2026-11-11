@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -57,11 +58,36 @@ def requests_dir() -> Path:
     return app_dir() / "bot-requests"
 
 
+# The drop box is written by the bot's container and read by this script as root. A
+# compromised bot could plant a symbolic link under one of the names used here, so
+# nothing below ever follows one: files are opened with O_NOFOLLOW, created with
+# O_EXCL (which also refuses a dangling link), and must be regular files.
+def open_nofollow(path: Path, flags: int, mode: int = 0o644) -> int:
+    return os.open(path, flags | os.O_NOFOLLOW | os.O_CLOEXEC, mode)
+
+
 def write_atomic(path: Path, data: bytes | str) -> None:
     tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_bytes(data if isinstance(data, bytes) else data.encode())
-    tmp.chmod(0o644)
-    os.replace(tmp, path)
+    tmp.unlink(missing_ok=True)  # whatever was there, link or file: never written through
+    fd = open_nofollow(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    try:
+        os.write(fd, data if isinstance(data, bytes) else data.encode())
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)  # replaces a link of that name, never the file it points to
+
+
+def remove_request(path: Path) -> None:
+    """Consume the request whatever it is, so the path unit cannot fire again on it."""
+    try:
+        path.unlink(missing_ok=True)
+    except IsADirectoryError:
+        try:
+            path.rmdir()
+        except OSError:
+            pass
+    except OSError:
+        pass
 
 
 def write_result(kind: str, status: str, service: str = "", detail: str = "", **extra) -> None:
@@ -159,11 +185,19 @@ def read_request(kind: str) -> dict | None:
     """Consume bot-requests/<kind>-request. None if it is missing or not a JSON object."""
     path = requests_dir() / f"{kind}-request"
     try:
-        raw = path.read_bytes()[: MAX_REQUEST_BYTES + 1]
+        fd = open_nofollow(path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:  # missing, a symbolic link (ELOOP), or something else: refused
+        remove_request(path)
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        raw = os.read(fd, MAX_REQUEST_BYTES + 1)
     except OSError:
         return None
     finally:
-        path.unlink(missing_ok=True)  # first: a bad request must not be seen again
+        os.close(fd)
+        remove_request(path)  # first: a bad request must not be seen again
     if len(raw) > MAX_REQUEST_BYTES:
         return None
     try:

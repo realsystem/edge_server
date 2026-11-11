@@ -256,6 +256,70 @@ def test_files_are_readable_by_the_bot_and_leave_no_temp_files(app, docker):
 # ------------------------------------------------------------------- script
 
 
+# ------------------------------------------------- the drop box is written by the bot
+# The bot's container can create any name in bot-requests, links included. This script
+# runs as root on the host, so it must never read or write through one of them.
+
+
+def planted(app, name, target):
+    link = app / "bot-requests" / name
+    link.symlink_to(target)
+    return link
+
+
+def test_a_linked_request_is_not_read_but_is_consumed(app, docker, tmp_path):
+    secret = tmp_path / "secret"
+    secret.write_text(json.dumps({"service": "mosquitto"}))  # a valid request, if it were read
+    planted(app, "restart-request", secret)
+    assert sr.main(["restart"]) == 1
+    assert docker.restarts() == []
+    assert result(app, "restart")["status"] == "refused"
+    assert not (app / "bot-requests" / "restart-request").is_symlink()  # gone, so no loop
+    assert secret.exists()  # and the target was left alone
+
+
+def test_a_result_is_never_written_through_a_link(app, docker, tmp_path):
+    victim = tmp_path / "docker-firewall.sh"
+    victim.write_text("#!/bin/sh\necho original\n")
+    planted(app, ".restart-result.tmp", victim)  # the temp name the writer uses
+    planted(app, "restart-result", victim)  # and the final name
+    ask(app, "restart", {"service": "mosquitto"})
+    assert sr.main(["restart"]) == 0
+    assert victim.read_text() == "#!/bin/sh\necho original\n"
+    final = app / "bot-requests" / "restart-result"
+    assert not final.is_symlink() and json.loads(final.read_text())["status"] == "ok"
+
+
+def test_log_output_is_never_written_through_a_link(app, docker, tmp_path):
+    victim = tmp_path / "authorized_keys"
+    victim.write_text("keep\n")
+    planted(app, ".logs-output.txt.tmp", victim)
+    ask(app, "logs", {"service": "frigate"})
+    assert sr.main(["logs"]) == 0
+    assert victim.read_text() == "keep\n"
+    assert not (app / "bot-requests" / "logs-output.txt").is_symlink()
+
+
+def test_a_dangling_link_under_the_temp_name_cannot_be_turned_into_a_file(app, docker, tmp_path):
+    planted(app, ".restart-result.tmp", tmp_path / "does-not-exist-yet")
+    ask(app, "restart", {"service": "mosquitto"})
+    assert sr.main(["restart"]) == 0
+    assert not (tmp_path / "does-not-exist-yet").exists()
+
+
+def test_a_directory_as_a_request_is_refused_and_removed(app, docker):
+    (app / "bot-requests" / "restart-request").mkdir()
+    assert sr.main(["restart"]) == 1
+    assert result(app, "restart")["status"] == "refused"
+    assert not (app / "bot-requests" / "restart-request").exists()
+
+
+def test_a_fifo_as_a_request_does_not_hang(app, docker):
+    os.mkfifo(app / "bot-requests" / "restart-request")
+    assert sr.main(["restart"]) == 1  # O_NONBLOCK + "not a regular file"
+    assert not (app / "bot-requests" / "restart-request").exists()
+
+
 def test_usage_error():
     assert sr.main([]) == 2
     assert sr.main(["reboot"]) == 2
