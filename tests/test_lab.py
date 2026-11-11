@@ -83,6 +83,8 @@ class TestTelegramMock:
                 )["result"]
                 == []
             )
+            # an acknowledged update is gone for a bot that restarts and asks again from 0
+            assert post(base + "/bot1:tok/getUpdates", {"timeout": 0, "offset": 0})["result"] == []
             post(base + "/bot1:tok/sendMessage", {"chat_id": 1001, "text": "hello"})
             assert json.loads(get(base + "/_lab/sent"))["messages"][-1]["text"] == "hello"
         finally:

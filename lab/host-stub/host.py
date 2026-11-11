@@ -68,7 +68,7 @@ def reboot() -> None:
         say("reboot refused: the machine 'booted' under 10 minutes ago")
         return
     say("reboot (simulated): restarting " + " ".join(LAB_CONTAINERS))
-    state.update(base=5.0, since=time.time())
+    state.update(base=0.0, since=time.time())
     write_uptime()
     subprocess.run(["docker", "restart", "-t", "10", *LAB_CONTAINERS], check=False, capture_output=True, timeout=120)
 
