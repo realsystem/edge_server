@@ -53,6 +53,7 @@ services:
       - EDGE_SERVER_DIR=${LAB_STATE:?}/app
       - COMPOSE_PROJECT_NAME=${LAB_PROJECT:-alab}-edge
       - FAKEPROC=/fakeproc
+      - FRIGATE_URL=http://frigate:5000
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${LAB_STATE:?}/app:${LAB_STATE:?}/app

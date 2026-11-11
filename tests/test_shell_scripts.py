@@ -1052,6 +1052,15 @@ class TestTelegramBotInDeploy:
             in (stub_path / "log").read_text()
         )
 
+    def test_every_bot_module_is_installed(self, stub_path, tmp_path):
+        """The bot imports its sibling modules from /app; one missing from the install list
+        switches a feature off on the real node (assistant.py was, until the lab found it)."""
+        app, _ = self.run(stub_path, tmp_path, body="prepare_telegram_bot", telegram=self.GOOD)
+        for module in (REPO / "telegram-bot").glob("*.py"):
+            if module.name in ("service-request.py", "smart-report.py"):
+                continue  # host-side helpers, installed by their own functions
+            assert (app / "telegram-bot" / module.name).is_file(), module.name
+
     def test_compose_service_is_hardened_and_has_no_token(self, stub_path, tmp_path):
         body = "prepare_telegram_bot; create_app_stack"
         app, _ = self.run(stub_path, tmp_path, body=body, telegram=self.GOOD)
