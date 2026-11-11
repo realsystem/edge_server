@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   lab:
-    name: lab up, /status, /restart, camera
+    name: lab up, /status, /restart, camera, /reboot
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -54,6 +54,17 @@ jobs:
           for i in $(seq 1 40); do
             out="$(edge_server/lab/lab.sh replies 5)"
             case "$out" in *"Restarted frigate"*) exit 0 ;; esac
+            sleep 3
+          done
+          edge_server/lab/lab.sh replies 5
+          exit 1
+      - name: /reboot (simulated by host-stub), the bot comes back and says so
+        run: |
+          sleep 32 # a code is good once: wait for the next 30 s window
+          edge_server/lab/lab.sh say "/reboot $(edge_server/lab/lab.sh code)"
+          for i in $(seq 1 40); do
+            out="$(edge_server/lab/lab.sh replies 5)"
+            case "$out" in *"Back online after reboot"*) exit 0 ;; esac
             sleep 3
           done
           edge_server/lab/lab.sh replies 5

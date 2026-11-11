@@ -69,6 +69,9 @@ class Handler(BaseHTTPRequestHandler):
             offset = int(body.get("offset") or 0)
             deadline = time.time() + min(int(body.get("timeout") or 0), 25)
             with LOCK:
+                # like Telegram: an offset acknowledges (and forgets) everything before it, so a
+                # restarted bot does not get old messages again
+                UPDATES[:] = [u for u in UPDATES if u["update_id"] >= offset]
                 while True:
                     fresh = [u for u in UPDATES if u["update_id"] >= offset]
                     if fresh or time.time() >= deadline:
