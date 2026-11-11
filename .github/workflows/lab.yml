@@ -42,7 +42,8 @@ jobs:
           edge_server/lab/lab.sh cam cam1_front 0
           edge_server/lab/lab.sh say "/status"
           for i in $(seq 1 15); do
-            edge_server/lab/lab.sh replies 3 | grep -q "NO VIDEO" && exit 0
+            out="$(edge_server/lab/lab.sh replies 3)"
+            case "$out" in *"NO VIDEO"*) exit 0 ;; esac
             sleep 2
           done
           edge_server/lab/lab.sh replies 3
@@ -51,7 +52,8 @@ jobs:
         run: |
           edge_server/lab/lab.sh say "/restart frigate $(edge_server/lab/lab.sh code)"
           for i in $(seq 1 40); do
-            edge_server/lab/lab.sh replies 5 | grep -q "Restarted frigate" && exit 0
+            out="$(edge_server/lab/lab.sh replies 5)"
+            case "$out" in *"Restarted frigate"*) exit 0 ;; esac
             sleep 3
           done
           edge_server/lab/lab.sh replies 5
