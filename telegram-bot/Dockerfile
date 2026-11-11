@@ -13,7 +13,7 @@ RUN apt-get update \
 # in step with pyproject.toml). Without them everything else works and the bot says so
 # in its log.
 ARG WITH_CRYPTO=false
-ARG AUTONOMY_CORE_REF=f0141361d9c483ffd601e3cc31426c29d05e8195
+ARG AUTONOMY_CORE_REF=cc5084a61a8927861ce158342f485fb66d9d102d
 RUN if [ "$WITH_CRYPTO" = "true" ]; then pip install --no-cache-dir "cryptography>=41" \
         "autonomy-core @ https://github.com/realsystem/autonomy/archive/${AUTONOMY_CORE_REF}.tar.gz#subdirectory=core/python"; \
     fi
