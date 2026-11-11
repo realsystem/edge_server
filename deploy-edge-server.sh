@@ -1045,7 +1045,7 @@ prepare_telegram_bot() {
     install_if_changed "$script_dir/telegram-bot/bot.py" "$APP_DIR/telegram-bot/bot.py" 644
     install_if_changed "$script_dir/telegram-bot/Dockerfile" "$APP_DIR/telegram-bot/Dockerfile" 644
     local mod
-    for mod in controlplane.py governance.py; do
+    for mod in controlplane.py governance.py assistant.py; do
         if [[ -f "$script_dir/telegram-bot/$mod" ]]; then
             install_if_changed "$script_dir/telegram-bot/$mod" "$APP_DIR/telegram-bot/$mod" 644
         fi
