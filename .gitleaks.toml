@@ -1,11 +1,12 @@
-# gitleaks configuration for CI (Autonomy M9, IT-81). Same expected test data as .secrets-allowlist.
+# gitleaks configuration for CI (Autonomy M9, IT-81). Same expected data as .secrets-allowlist.
+# Paths are unanchored: in `gitleaks dir /repo` mode they are reported as /repo/<path>.
 [extend]
 useDefault = true
 
 [allowlist]
-description = "documentation placeholders and fake values in tests"
+description = "fake values in tests and the documented example Victron key"
 paths = [
-  '''^tests/''',
-  '''^plugins/[^/]+/tests/''',
-  '''^\.git/''',
+  '''(^|/)tests/''',
 ]
+# The example key printed by `victron-shunt` help and shown in its README (not a device key).
+regexes = ['''0df4d0395b7d1a876c0c33ecb9e70dcd''']
