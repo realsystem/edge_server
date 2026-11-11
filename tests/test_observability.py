@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_governance import audit_kinds, governed, req  # noqa: E402,F401
 from test_telegram_bot import (
     ALICE,
+    FRIGATE_STATS,
     bot,
     code_now,
     frigate,
@@ -34,20 +35,34 @@ import bot as botmod  # noqa: E402
 REPO = Path(__file__).resolve().parent.parent
 
 
-def test_it71_restart_is_one_story_and_one_trace(governed, telegram):
+def test_it71_restart_is_one_story_and_one_trace(governed, telegram, frigate):
     send(governed, f"/restart frigate {code_now()}")
     req(governed, "restart-result").write_text(json.dumps({"service": "frigate", "status": "ok"}))
+    stats = json.loads(json.dumps(FRIGATE_STATS))
+    stats["service"]["uptime"] = 3  # Frigate came back: the restart is verified (M8)
+    frigate.routes["/api/stats"] = (200, stats)
     governed._deliver_restart(ALICE)
     g = governed.governance
     records = list(g.audit.records())
     corr = records[0]["correlationid"]
     story = core.reconstruct(corr, records, core.telemetry.read_spans(g.dir / "traces.jsonl"))
-    assert story["kinds"] == ["action.decided", "action.started", "action.succeeded"]
-    assert len(story["trace_ids"]) == 1  # one trace from the command to the host helper's result
+    assert story["kinds"] == [
+        "action.evaluated",
+        "action.decided",
+        "action.started",
+        "action.succeeded",
+        "action.verified",
+    ]
+    assert len(story["trace_ids"]) == 1  # one trace from the command to the verification
     assert story["spans"][0] == "telegram.command"
-    assert {"pdp.decide", "gateway.execute", "adapter.execute", "gateway.complete"} <= set(
-        story["spans"]
-    )
+    assert {
+        "evaluator.evaluate",
+        "pdp.decide",
+        "gateway.execute",
+        "adapter.execute",
+        "gateway.complete",
+        "verifier.check",
+    } <= set(story["spans"])
     send(governed, "/audit")
     assert f"[trace {story['trace_ids'][0][:8]}]" in telegram.texts()[-1]
 

@@ -595,6 +595,17 @@ allowed user, unexpired, same parameters) or `/deny <id>`. `/suspend <all|cell|c
 restarts and work without internet; your own commands keep working. `/resume [scope]
 <code>` lifts them. Everything is in `/audit`.
 
+**Checked before, verified after** (Autonomy M8). Before the policy check, each command is
+evaluated: an unknown service is refused, and an irreversible R2 action goes for approval.
+After the host helper reports back, the bot checks that the action actually took effect,
+where it can without trusting the helper. After `/reboot` it checks the host's boot time;
+after `/restart frigate` it checks Frigate's own uptime (`/api/stats`). Other actions use
+the helper's job result. It checks every 30 s until the action's window closes (30 min for
+a reboot, 10 min for Frigate). If the action was reported done but did not take effect,
+you get a warning and the audit log gets `action.verified: contradicted` and
+`incident.opened`. If it could not be confirmed or checked, you are told too. Confirmed
+results appear only in `/audit`.
+
 ## Files
 
 **Orchestrator (runs on laptop):**
