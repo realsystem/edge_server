@@ -120,7 +120,11 @@ cmd_up() {
   # 2. authority from the autonomy lab, when there is one (signed policy bundle, model routing)
   if [ -s "$LAB_DIR/autonomy/policy-bundle.json" ]; then
     cp "$LAB_DIR/autonomy/policy-bundle.json" "$APP/bot-state/policy-bundle.json"
+    rm -rf "$APP/bot-state/registry"
+    cp -r "$LAB_DIR/autonomy/registry" "$APP/bot-state/registry" # the owner keys the bundle is verified against
     say "policy bundle from the autonomy lab"
+  else
+    rm -rf "$APP/bot-state/policy-bundle.json" "$APP/bot-state/registry" # a stale one from an earlier run
   fi
   if [ -s "$LAB_DIR/autonomy/models.yaml" ]; then
     export LAB_MODELS_FILE="$LAB_DIR/autonomy/models.yaml" LAB_MODELS_CONFIG=/run/lab/models.yaml
