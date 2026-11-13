@@ -118,18 +118,20 @@ class TestRules:
 
     def test_low_rule_with_hysteresis(self):
         rule = farm.Rule("sensor.m", "<", 20)
-        d = lambda v: {
-            "entities": {"sensor.m": {"state": v, "unit": "%", "name": "Soil ch1"}}
-        }  # noqa: E731
+
+        def d(v):
+            return {"entities": {"sensor.m": {"state": v, "unit": "%", "name": "Soil ch1"}}}
+
         assert farm.rule_state(rule, d("15")) == ("bad", "Soil ch1 is low: 15 % (alert below 20).")
         assert farm.rule_state(rule, d("20.5"))[0] == "band"  # not far enough back to end an alert
         assert farm.rule_state(rule, d("21"))[0] == "ok"
 
     def test_high_rule_with_hysteresis(self):
         rule = farm.Rule("sensor.t", ">", 40)
-        d = lambda v: {
-            "entities": {"sensor.t": {"state": v, "unit": "°C", "name": "Air"}}
-        }  # noqa: E731
+
+        def d(v):
+            return {"entities": {"sensor.t": {"state": v, "unit": "°C", "name": "Air"}}}
+
         assert farm.rule_state(rule, d("41"))[0] == "bad"
         assert farm.rule_state(rule, d("39"))[0] == "band"
         assert farm.rule_state(rule, d("38"))[0] == "ok"
