@@ -10,6 +10,8 @@
 #   lab/lab.sh say "/status"                     (mock Telegram) send a message as the lab user
 #   lab/lab.sh replies [n]                       (mock Telegram) what the bot said
 #   lab/lab.sh cam <name> <fps>                  make a Frigate camera lose video (fps 0)
+#   LAB_FARM=1 lab/lab.sh up ...                 turn on /farm and the farm alerts (without the autonomy farm)
+#   lab/lab.sh farm-status ok [moisture] | stale | gone    write the Field Station's status file by hand
 #
 # Environment (optional): LAB_DIR (~/.autonomy-lab), LAB_NETWORK (autonomy-lab),
 # LAB_PROJECT (alab), LAB_REPOS (parent of the checkouts), LAB_BOT_TOKEN, LAB_TELEGRAM_ID.
@@ -193,8 +195,8 @@ print(urllib.request.urlopen("http://frigate:5000/api/version", timeout=5).read(
   fi
 }
 
-cmd_down()   { need_docker; dc down --remove-orphans; rm -f "$ENV_OUT"; say "down (data kept)"; }
-cmd_reset()  { need_docker; [ -f "$APP/docker-compose.yml" ] && { LAB_MOCK_TELEGRAM=1; dc down -v --remove-orphans || true; }; 
+cmd_down()   { need_docker; farm_status_stop; dc down --remove-orphans; rm -f "$ENV_OUT"; say "down (data kept)"; }
+cmd_reset()  { need_docker; farm_status_stop; [ -f "$APP/docker-compose.yml" ] && { LAB_MOCK_TELEGRAM=1; dc down -v --remove-orphans || true; }; 
   # files made by root in containers: remove them from a container too (Linux hosts)
   rm -rf "$LAB_STATE" 2>/dev/null || docker run --rm -v "$LAB_DIR:/d" alpine rm -rf /d/edge_server
   rm -f "$ENV_OUT"; say "reset"; }
@@ -232,6 +234,40 @@ r = urllib.request.Request("http://127.0.0.1:5000/_lab/camera", json.dumps({"nam
 print(urllib.request.urlopen(r, timeout=5).read().decode())' "$1" "$2"
 }
 
+FARM_PID="$LAB_STATE/farm-status.pid"
+
+farm_status_write() { # updated_at moisture: what the cell would write (atomic, readable by the bot)
+  local f="$LAB_FARM_STATUS_DIR/status.json"
+  printf '{"cell":"field-station","updated_at":%s,"connected":true,"uptime_s":60,"entities":{"sensor.wh51_ch3_soil_moisture":{"state":"%s","unit":"%%","name":"WH51 ch3 soil moisture","observed_at":%s}}}\n' \
+    "$1" "$2" "$1" > "$f.tmp"
+  chmod 644 "$f.tmp"; mv "$f.tmp" "$f"
+}
+
+farm_status_stop() { # stop the refresher of an earlier "ok"
+  if [ -s "$FARM_PID" ]; then kill "$(cat "$FARM_PID")" 2>/dev/null || true; fi
+  rm -f "$FARM_PID"
+}
+
+cmd_farm_status() { # the Field Station cell's status file by hand: try /farm and the alerts without the farm
+  [ "${LAB_FARM:-}" = "1" ] || die "start the lab with LAB_FARM=1 (it turns /farm on)"
+  local now moisture="${2:-40}"
+  now="$(date +%s)"
+  farm_status_stop
+  chmod 755 "$LAB_FARM_STATUS_DIR"
+  case "${1:-}" in
+    ok)
+      farm_status_write "$now" "$moisture"
+      # a live cell keeps writing: refresh the file every 5 s until the next farm-status call
+      ( while sleep 5; do farm_status_write "$(date +%s)" "$moisture"; done ) > /dev/null 2>&1 &
+      echo $! > "$FARM_PID"
+      ;;
+    stale) farm_status_write $((now - 3600)) "$moisture" ;;
+    gone) rm -f "$LAB_FARM_STATUS_DIR/status.json" ;;
+    *) die "usage: lab.sh farm-status ok [moisture] | stale | gone" ;;
+  esac
+  say "status file: $1 (moisture $moisture)"
+}
+
 case "${1:-}" in
   up) shift; cmd_up "$@" ;;
   down) cmd_down ;;
@@ -243,5 +279,6 @@ case "${1:-}" in
   say) shift; cmd_say "$@" ;;
   replies) shift; cmd_replies "$@" ;;
   cam) shift; cmd_cam "$@" ;;
-  *) echo "usage: lab/lab.sh up [--mock-telegram] [--pinned] | down | status | logs [service] | reset | check | code | say <text> | replies [n] | cam <name> <fps>" >&2; exit 2 ;;
+  farm-status) shift; cmd_farm_status "$@" ;;
+  *) echo "usage: lab/lab.sh up [--mock-telegram] [--pinned] | down | status | logs [service] | reset | check | code | say <text> | replies [n] | cam <name> <fps> | farm-status ok|stale|gone" >&2; exit 2 ;;
 esac

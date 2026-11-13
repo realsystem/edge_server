@@ -36,6 +36,10 @@ services:
       - MODEL_REVIEW=${LAB_MODEL_REVIEW:-false}
       - ALERT_WATCH_INTERVAL=30
       - FARM_STATUS_FILE=${LAB_FARM_STATUS_FILE:-}
+      # quick alerts for trying them: one check is enough, 20 s without news is "not reporting"
+      - FARM_ALERT_CONFIRM=1
+      - FARM_STALE_SECONDS=20
+      - FARM_ALERTS=${LAB_FARM_ALERTS:-sensor.wh51_ch3_soil_moisture<10}
     volumes:
       - ${LAB_STATE:?}/fakeproc:/fakeproc:ro
       - ${LAB_PROCESSOR_KEY:-/dev/null}:/run/lab/processor.key:ro

@@ -183,6 +183,12 @@ class Config:
     control_key: Path = Path("/run/edge/node.key")
     control_state: Path = Path("/state")
     farm_status: Path | None = None  # Field Station cell's status.json; /farm is off without it
+    farm_stale: float = 120.0  # seconds without a status update before "not reporting"
+    farm_alert_station: bool = True  # alert when the cell stops reporting or loses Home Assistant
+    farm_alert_confirm: int = 0  # checks in a row before a farm alert; 0 = alert_confirm
+    farm_alerts: str = (
+        ""  # threshold rules, e.g. "sensor.wh51_ch1_soil_moisture<20,sensor.ws90_temperature>40"
+    )
     control_bind: str = "0.0.0.0"  # noqa: S104  # the host publishes the port on LAN/Tailscale only
     smart_max_age: float = 3 * 86400.0  # alert if that file is older than this
     totp_secret: str = ""  # base32; empty = /reboot is off
@@ -282,6 +288,10 @@ class Config:
             control_key=Path(env.get("CONTROL_KEY", str(cls.control_key))),
             control_state=Path(env.get("CONTROL_STATE", str(cls.control_state))),
             farm_status=Path(env["FARM_STATUS_FILE"]) if env.get("FARM_STATUS_FILE") else None,
+            farm_stale=max(10.0, float(env.get("FARM_STALE_SECONDS", cls.farm_stale))),
+            farm_alert_station=env.get("FARM_ALERT_STATION", "true").lower() != "false",
+            farm_alert_confirm=max(0, int(env.get("FARM_ALERT_CONFIRM", cls.farm_alert_confirm))),
+            farm_alerts=env.get("FARM_ALERTS", ""),
             control_bind=env.get("CONTROL_BIND", cls.control_bind),
             totp_secret=totp_secret,
             requests_dir=Path(env.get("REQUESTS_DIR", str(cls.requests_dir))),
@@ -1030,6 +1040,8 @@ class Bot:
     _locked_until: dict[int, float] = field(default_factory=dict)
     _reboot_timer: threading.Timer | None = None
     _incidents: dict[str, Incident] = field(default_factory=dict)
+    _farm_rules: list = field(default_factory=list)  # farm.Rule, parsed once from FARM_ALERTS
+    _farm_rules_read: bool = False
     _active_jobs: set[str] = field(default_factory=set)
     _jobs_lock: threading.Lock = field(default_factory=threading.Lock)
     _logs_last: float = 0.0
@@ -1289,12 +1301,50 @@ class Bot:
             messages.append(self.judge(f"smart:{device}", f"Disk {title}", problem, now, 1))
         return [m for m in messages if m]
 
+    def watch_farm(self, now: float) -> list[str]:
+        """The Field Station cell (Autonomy M10): is it reporting, and are the readings you
+        chose to watch (FARM_ALERTS) inside their limits. Reads only the cell's status file."""
+        cfg = self.cfg
+        if cfg.farm_status is None:
+            return []
+        import farm  # next to this file; standard library only
+
+        confirm = cfg.farm_alert_confirm or None
+        doc = farm.load(cfg.farm_status)
+        messages: list[str | None] = []
+        problem = farm.station_problem(doc, self.clock(), cfg.farm_stale)
+        if cfg.farm_alert_station:
+            messages.append(self.judge("farm:station", "Field Station", problem, now, confirm))
+        if cfg.farm_alerts and not self._farm_rules_read:
+            self._farm_rules, bad = farm.parse_rules(cfg.farm_alerts)
+            self._farm_rules_read = True
+            for entry in bad:
+                log.warning(
+                    "FARM_ALERTS: cannot read %r (use entity<number or entity>number)", entry
+                )
+        if doc is None or problem is not None:
+            # readings from a cell that is not reporting say nothing; the station alert covers it
+            return [m for m in messages if m]
+        for rule in self._farm_rules:
+            state, why = farm.rule_state(rule, doc)
+            if state == "band":
+                continue
+            label = farm.label(doc, rule.entity)
+            messages.append(
+                self.judge(
+                    f"farm:rule:{rule.text}", label, why if state == "bad" else None, now, confirm
+                )
+            )
+        return [m for m in messages if m]
+
     def watch_messages(self, now: float | None = None) -> list[str]:
         now = time.monotonic() if now is None else now
         messages: list[str] = []
         checks = [self.watch_frigate, self.watch_temperature, self.watch_disk_health]
         if self.cfg.processor_url:
             checks.append(self.watch_processor)
+        if self.cfg.farm_status is not None:
+            checks.append(self.watch_farm)
         for check in checks:
             try:
                 messages += check(now)
@@ -1423,7 +1473,7 @@ class Bot:
         try:
             import farm  # next to this file; standard library only
 
-            text = farm.farm_text(self.cfg.farm_status, self.clock)
+            text = farm.farm_text(self.cfg.farm_status, self.clock, self.cfg.farm_stale)
         except Exception as e:  # noqa: BLE001 - always answer
             log.exception("/farm failed")
             text = f"/farm failed: {e}"

@@ -75,3 +75,50 @@ jobs:
       - name: Reset
         if: always()
         run: edge_server/lab/lab.sh reset
+
+  farm:
+    name: /farm and farm alerts
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      LAB_DIR: /tmp/autonomy-lab
+      LAB_FARM: "1" # turns on /farm and the farm alerts; the status file is written by hand below
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: edge_server
+      - uses: actions/checkout@v4
+        with:
+          repository: realsystem/autonomy
+          path: autonomy
+      - name: Up with a mocked Telegram API
+        run: edge_server/lab/lab.sh up --mock-telegram
+      - name: /farm shows the Field Station status file, and the alerts follow it
+        run: |
+          lab=edge_server/lab/lab.sh
+          # wait_for PATTERN SECONDS: until the bot has said it (any of the last 8 messages)
+          wait_for() {
+            for _ in $(seq 1 $(($2 / 2))); do
+              out="$($lab replies 8)"
+              case "$out" in *"$1"*) return 0 ;; esac
+              sleep 2
+            done
+            echo "no '$1' in $2 s; the bot said:"; $lab replies 8; exit 1
+          }
+          $lab farm-status ok 40
+          $lab say "/farm"
+          wait_for "WH51 ch3 soil moisture: 40 %" 30
+          $lab farm-status ok 5                      # below the lab's rule (<10)
+          wait_for "WH51 ch3 soil moisture is low: 5 %" 90
+          $lab farm-status ok 40
+          wait_for "WH51 ch3 soil moisture: back to normal" 90
+          $lab farm-status stale                     # the cell stopped reporting
+          wait_for "Field Station: not reporting" 90
+          $lab farm-status ok 40
+          wait_for "Field Station: back to normal" 90
+      - name: Logs
+        if: always()
+        run: edge_server/lab/lab.sh logs telegram-bot | tail -80
+      - name: Reset
+        if: always()
+        run: edge_server/lab/lab.sh reset
