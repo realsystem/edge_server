@@ -17,11 +17,10 @@ if not hasattr(core, "RegistryStore"):
     pytest.skip("autonomy-core without the registry", allow_module_level=True)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_governance import COMPOSE, audit_kinds
-from test_telegram_bot import ALICE, bot, frigate, host, make_bot, reboot, send, telegram
-
 from autonomy_core.ids import to_rfc3339
 from autonomy_core.registry import sign_owners, sign_registry
+from test_governance import COMPOSE, audit_kinds
+from test_telegram_bot import ALICE, bot, frigate, host, make_bot, reboot, send, telegram
 
 
 def authority(state: Path, now: float, *, with_registry: bool = True, tamper: bool = False) -> str:
