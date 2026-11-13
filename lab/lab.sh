@@ -131,6 +131,10 @@ cmd_up() {
     export LAB_PROCESSOR_URL="$PROCESSOR_URL" LAB_PROCESSOR_KEY="$PROCESSOR_API_KEY_FILE"
     say "job processor at $PROCESSOR_URL"
   fi
+  # 3. the Field Station cell's status file (autonomy lab --farm): the bot's /farm reads it
+  export LAB_FARM_STATUS_DIR="${LAB_FARM_STATUS_DIR:-$LAB_STATE/farm-status}"
+  mkdir -p "$LAB_FARM_STATUS_DIR"
+  if [ "${LAB_FARM:-}" = "1" ]; then export LAB_FARM_STATUS_FILE=/run/lab/farm/status.json; fi
   [ "$LAB_MOCK_TELEGRAM" = "1" ] && export LAB_TELEGRAM_API="http://telegram-mock:8081"
   [ "${LAB_MODEL_REVIEW:-}" = "" ] || export LAB_MODEL_REVIEW
 

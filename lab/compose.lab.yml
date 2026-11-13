@@ -35,10 +35,12 @@ services:
       - LLM_MODEL=${LAB_LLM_MODEL:-mock-llm}
       - MODEL_REVIEW=${LAB_MODEL_REVIEW:-false}
       - ALERT_WATCH_INTERVAL=30
+      - FARM_STATUS_FILE=${LAB_FARM_STATUS_FILE:-}
     volumes:
       - ${LAB_STATE:?}/fakeproc:/fakeproc:ro
       - ${LAB_PROCESSOR_KEY:-/dev/null}:/run/lab/processor.key:ro
       - ${LAB_MODELS_FILE:-/dev/null}:/run/lab/models.yaml:ro
+      - ${LAB_FARM_STATUS_DIR:?}:/run/lab/farm:ro
     depends_on:
       frigate: {condition: service_healthy}
 
