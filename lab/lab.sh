@@ -23,6 +23,7 @@ export LAB_PROJECT="${LAB_PROJECT:-alab}"
 LAB_REPOS="${LAB_REPOS:-$(cd "$EDGE/.." && pwd)}"
 export LAB_EDGE="$EDGE"
 export LAB_STATE="$LAB_DIR/edge_server"
+export LAB_FARM_STATUS_DIR="${LAB_FARM_STATUS_DIR:-$LAB_STATE/farm-status}" # compose needs it for every command
 APP="$LAB_STATE/app"
 SECRETS="$LAB_DIR/secrets.env"
 ENV_OUT="$LAB_DIR/edge_server.env"
@@ -122,6 +123,7 @@ cmd_up() {
     cp "$LAB_DIR/autonomy/policy-bundle.json" "$APP/bot-state/policy-bundle.json"
     rm -rf "$APP/bot-state/registry"
     cp -r "$LAB_DIR/autonomy/registry" "$APP/bot-state/registry" # the owner keys the bundle is verified against
+    chmod -R a+rX "$APP/bot-state/policy-bundle.json" "$APP/bot-state/registry" # umask 077 above; the bot runs as another user
     say "policy bundle from the autonomy lab"
   else
     rm -rf "$APP/bot-state/policy-bundle.json" "$APP/bot-state/registry" # a stale one from an earlier run
@@ -136,7 +138,6 @@ cmd_up() {
     say "job processor at $PROCESSOR_URL"
   fi
   # 3. the Field Station cell's status file (autonomy lab --farm): the bot's /farm reads it
-  export LAB_FARM_STATUS_DIR="${LAB_FARM_STATUS_DIR:-$LAB_STATE/farm-status}"
   mkdir -p "$LAB_FARM_STATUS_DIR"
   if [ "${LAB_FARM:-}" = "1" ]; then export LAB_FARM_STATUS_FILE=/run/lab/farm/status.json; fi
   [ "$LAB_MOCK_TELEGRAM" = "1" ] && export LAB_TELEGRAM_API="http://telegram-mock:8081"
