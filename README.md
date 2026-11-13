@@ -822,3 +822,7 @@ Supported secrets:
 ./secrets.sh set K V   # Set a value
 ./secrets.sh edit      # Edit all secrets
 ```
+
+## License
+
+Apache License 2.0, see [LICENSE](LICENSE).
