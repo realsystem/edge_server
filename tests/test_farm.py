@@ -19,22 +19,24 @@ def doc(t=NOW, connected=True, entities=None):
         "updated_at": t,
         "connected": connected,
         "uptime_s": 3600,
-        "entities": entities
-        if entities is not None
-        else {
-            "sensor.ws90_temperature": {
-                "state": "35.0",
-                "unit": "°C",
-                "name": "WS90 temperature",
-                "observed_at": t - 5,
-            },
-            "sensor.wh51_ch1_soil_moisture": {
-                "state": "41",
-                "unit": "%",
-                "name": "Soil moisture ch1",
-                "observed_at": t - 130,
-            },
-        },
+        "entities": (
+            entities
+            if entities is not None
+            else {
+                "sensor.ws90_temperature": {
+                    "state": "35.0",
+                    "unit": "°C",
+                    "name": "WS90 temperature",
+                    "observed_at": t - 5,
+                },
+                "sensor.wh51_ch1_soil_moisture": {
+                    "state": "41",
+                    "unit": "%",
+                    "name": "Soil moisture ch1",
+                    "observed_at": t - 130,
+                },
+            }
+        ),
     }
 
 

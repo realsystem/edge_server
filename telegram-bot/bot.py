@@ -1416,7 +1416,9 @@ class Bot:
 
     def cmd_farm(self, chat_id: int) -> None:
         if self.cfg.farm_status is None:
-            self.reply(chat_id, "/farm is off: this node has no Field Station cell (FARM_STATUS_FILE).")
+            self.reply(
+                chat_id, "/farm is off: this node has no Field Station cell (FARM_STATUS_FILE)."
+            )
             return
         try:
             import farm  # next to this file; standard library only
