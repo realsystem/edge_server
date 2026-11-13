@@ -119,7 +119,12 @@ class TestRender:
 
     @pytest.mark.skipif(shutil.which("docker") is None, reason="docker CLI not installed")
     def test_lab_override_merges(self, rendered, tmp_path):
-        env = {**os.environ, "LAB_STATE": str(tmp_path / "state"), "LAB_EDGE": str(REPO)}
+        env = {
+            **os.environ,
+            "LAB_STATE": str(tmp_path / "state"),
+            "LAB_EDGE": str(REPO),
+            "LAB_FARM_STATUS_DIR": str(tmp_path),
+        }
         r = subprocess.run(
             [
                 "docker",

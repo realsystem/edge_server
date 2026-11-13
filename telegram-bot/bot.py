@@ -101,6 +101,8 @@ AUDIT_HELP = (
     "\n/pending, /approve <id> <code>, /deny <id> - actions waiting for your approval"
     "\n/suspend <all|cell|component> [reason], /hold [reason] - stop automatic actions; /resume [scope] <code>"
 )
+FARM_COMMAND = {"command": "farm", "description": "Field Station: latest sensor readings"}
+FARM_HELP = "\n/farm - the Field Station's latest readings (read only)"
 ASK_COMMAND = {"command": "ask", "description": "Ask the assistant about this node"}
 ASK_HELP = "\n/ask <question> - ask the assistant about this node (a model on your GPU machine)"
 FLEET_HELP = "\n/fleet - the other nodes of the fleet: last contact, versions, fleet file"
@@ -180,6 +182,7 @@ class Config:
     # fleet control plane (controlplane.py): on only when the host wrote status_dir/fleet.json
     control_key: Path = Path("/run/edge/node.key")
     control_state: Path = Path("/state")
+    farm_status: Path | None = None  # Field Station cell's status.json; /farm is off without it
     control_bind: str = "0.0.0.0"  # noqa: S104  # the host publishes the port on LAN/Tailscale only
     smart_max_age: float = 3 * 86400.0  # alert if that file is older than this
     totp_secret: str = ""  # base32; empty = /reboot is off
@@ -278,6 +281,7 @@ class Config:
             status_dir=Path(env.get("STATUS_DIR", str(cls.status_dir))),
             control_key=Path(env.get("CONTROL_KEY", str(cls.control_key))),
             control_state=Path(env.get("CONTROL_STATE", str(cls.control_state))),
+            farm_status=Path(env["FARM_STATUS_FILE"]) if env.get("FARM_STATUS_FILE") else None,
             control_bind=env.get("CONTROL_BIND", cls.control_bind),
             totp_secret=totp_secret,
             requests_dir=Path(env.get("REQUESTS_DIR", str(cls.requests_dir))),
@@ -1340,12 +1344,15 @@ class Bot:
             commands += [REBOOT_COMMAND, REDEPLOY_COMMAND, RESTART_COMMAND, LOGS_COMMAND]
         if self.assistant is not None:
             commands.append(ASK_COMMAND)
+        if self.cfg.farm_status is not None:
+            commands.append(FARM_COMMAND)
         return commands
 
     def help_text(self) -> str:
         extra = REBOOT_HELP + REDEPLOY_HELP + RESTART_HELP + LOGS_HELP
         text = HELP + (FLEET_HELP if self.control else "") + (AUDIT_HELP if self.governance else "")
         text += ASK_HELP if self.assistant is not None else ""
+        text += FARM_HELP if self.cfg.farm_status is not None else ""
         return text + (extra if self.cfg.totp_secret else "")
 
     def setup_assistant(self) -> None:
@@ -1406,6 +1413,21 @@ class Bot:
             log.exception("/ask failed")
             answer = f"The assistant failed: {e}"
         self.reply(chat_id, answer)
+
+    def cmd_farm(self, chat_id: int) -> None:
+        if self.cfg.farm_status is None:
+            self.reply(
+                chat_id, "/farm is off: this node has no Field Station cell (FARM_STATUS_FILE)."
+            )
+            return
+        try:
+            import farm  # next to this file; standard library only
+
+            text = farm.farm_text(self.cfg.farm_status, self.clock)
+        except Exception as e:  # noqa: BLE001 - always answer
+            log.exception("/farm failed")
+            text = f"/farm failed: {e}"
+        self.reply(chat_id, text, pre=True)
 
     def cmd_fleet(self, chat_id: int) -> None:
         if not self.control:
@@ -2276,6 +2298,8 @@ class Bot:
             self.cmd_fleet(chat_id)
         elif command == "/audit":
             self.cmd_audit(chat_id)
+        elif command == "/farm":
+            self.cmd_farm(chat_id)
         elif command == "/ask":
             thread = threading.Thread(target=self.cmd_ask, args=(chat_id, args), daemon=True)
             thread.start()
