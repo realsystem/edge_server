@@ -1454,6 +1454,13 @@ class Bot:
             key = governance.load_or_create_key(
                 cfg.control_key if cfg.control_key.exists() else cfg.control_state / "gateway.key"
             )
+            # a fleet's verified registry, else the one an owner put in the state directory:
+            # a one-node install can then also hold an owner-signed policy bundle (grants)
+            registry = getattr(self.control, "registry", None)
+            if registry is None:
+                registry = governance.core.RegistryStore(cfg.control_state / "registry").current(
+                    now=self.clock()
+                )
             self.governance = governance.Governance(
                 cfg.control_state,
                 key=key,
@@ -1465,7 +1472,7 @@ class Bot:
                     "reboot": lambda payload: self._create_request_once("reboot"),
                     "redeploy": lambda payload: self._create_request_once("redeploy"),
                 },
-                registry=getattr(self.control, "registry", None),
+                registry=registry,
                 bundle_file=cfg.control_state / "policy-bundle.json",
                 clock=self.clock,
                 operators=cfg.allowed,
