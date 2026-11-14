@@ -7,6 +7,7 @@ Admin: POST /_lab/camera {"name": "cam1_front", "fps": 0}  (0 = "NO VIDEO"),
        POST /_lab/camera {"name": "cam1_front", "enabled": false}
 Standard library only.
 """
+
 import json
 import os
 import threading
@@ -15,7 +16,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 START = time.time()
 LOCK = threading.Lock()
-CAMERAS = {n: {"fps": 5.0, "enabled": True} for n in ("cam1_front", "cam2_rear", "cam3_side", "cam4_gate")}
+CAMERAS = {
+    n: {"fps": 5.0, "enabled": True} for n in ("cam1_front", "cam2_rear", "cam3_side", "cam4_gate")
+}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -36,22 +39,35 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/stats":
             with LOCK:
                 cams = {
-                    n: {"camera_fps": c["fps"] if c["enabled"] else 0.0, "detection_fps": 1.0 if c["fps"] else 0.0,
-                        "skipped_fps": 0.0}
+                    n: {
+                        "camera_fps": c["fps"] if c["enabled"] else 0.0,
+                        "detection_fps": 1.0 if c["fps"] else 0.0,
+                        "skipped_fps": 0.0,
+                    }
                     for n, c in CAMERAS.items()
                 }
-            return self._send(200, {"service": {"uptime": int(time.time() - START), "version": "0.0.0-lab-stub"},
-                                    "detectors": {"cpu": {"inference_speed": 12.0}}, "cameras": cams})
+            return self._send(
+                200,
+                {
+                    "service": {"uptime": int(time.time() - START), "version": "0.0.0-lab-stub"},
+                    "detectors": {"cpu": {"inference_speed": 12.0}},
+                    "cameras": cams,
+                },
+            )
         if self.path == "/api/config":
             with LOCK:
-                return self._send(200, {"cameras": {n: {"enabled": c["enabled"]} for n, c in CAMERAS.items()}})
+                return self._send(
+                    200, {"cameras": {n: {"enabled": c["enabled"]} for n, c in CAMERAS.items()}}
+                )
         self._send(404, {"error": "not found"})
 
     def do_POST(self):
         if self.path != "/_lab/camera":
             return self._send(404, {"error": "not found"})
         try:
-            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+            body = json.loads(
+                self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}"
+            )
             name = body["name"]
             with LOCK:
                 cam = CAMERAS[name]

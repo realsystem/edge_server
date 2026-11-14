@@ -11,6 +11,7 @@ Watches $EDGE_SERVER_DIR/bot-requests like the production path units do:
 It also keeps FAKEPROC/uptime moving, so the bot has an uptime to verify a reboot against.
 Lab only: it touches containers of the lab project and nothing else.
 """
+
 import json
 import os
 import subprocess
@@ -58,7 +59,9 @@ def say(msg: str) -> None:
 
 def helper(kind: str) -> None:
     say(f"{kind}-request -> service-request.py")
-    r = subprocess.run([sys.executable, HELPER, kind], env=os.environ, capture_output=True, text=True, timeout=300)
+    r = subprocess.run(
+        [sys.executable, HELPER, kind], env=os.environ, capture_output=True, text=True, timeout=300
+    )
     say(f"{kind} done ({r.returncode}) {(r.stderr or r.stdout).strip()[-200:]}")
 
 
@@ -70,15 +73,30 @@ def reboot() -> None:
     say("reboot (simulated): restarting " + " ".join(LAB_CONTAINERS))
     state.update(base=0.0, since=time.time())
     write_uptime()
-    subprocess.run(["docker", "restart", "-t", "10", *LAB_CONTAINERS], check=False, capture_output=True, timeout=120)
+    subprocess.run(
+        ["docker", "restart", "-t", "10", *LAB_CONTAINERS],
+        check=False,
+        capture_output=True,
+        timeout=120,
+    )
 
 
 def redeploy() -> None:
     (REQ / "redeploy").unlink(missing_ok=True)
     say("redeploy (simulated)")
     tmp = REQ / ".redeploy-result.tmp"
-    tmp.write_text(json.dumps({"status": "ok", "from": "aaaaaaa", "to": "bbbbbbb", "tag": "v0.0",
-                               "detail": "simulated in the lab: nothing was deployed", "at": int(time.time())}))
+    tmp.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "from": "aaaaaaa",
+                "to": "bbbbbbb",
+                "tag": "v0.0",
+                "detail": "simulated in the lab: nothing was deployed",
+                "at": int(time.time()),
+            }
+        )
+    )
     tmp.chmod(0o644)
     os.replace(tmp, REQ / "redeploy-result")
 

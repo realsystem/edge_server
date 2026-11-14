@@ -6,9 +6,12 @@
 #
 #   lab/lab.sh up [--mock-telegram] [--pinned]   build and start
 #   lab/lab.sh down | status | logs [service] | reset | check
-#   lab/lab.sh code                              the current /restart and /reboot code
-#   lab/lab.sh say "/status"                     (mock Telegram) send a message as the lab user
-#   lab/lab.sh replies [n]                       (mock Telegram) what the bot said
+#   lab/lab.sh up --mock-telegram --nodes       also a Home Assistant add-on node (pi-1) with its own bot,
+#                                                a Supervisor stand-in and fleet control with the edge bot
+#   lab/lab.sh code [pi]                         the current /restart and /reboot code (of the pi node)
+#   lab/lab.sh say [--bot pi] "/status"          (mock Telegram) send a message as the lab user
+#   lab/lab.sh replies [--bot pi] [n]            (mock Telegram) what the bot said
+#   lab/lab.sh pi-calls                          (--nodes) what the add-on's helper asked the Supervisor stand-in
 #   lab/lab.sh cam <name> <fps>                  make a Frigate camera lose video (fps 0)
 #   LAB_FARM=1 lab/lab.sh up ...                 turn on /farm and the farm alerts (without the autonomy farm)
 #   lab/lab.sh farm-status ok [moisture] | stale | gone    write the Field Station's status file by hand
@@ -33,11 +36,19 @@ ENV_OUT="$LAB_DIR/edge_server.env"
 die() { echo "lab: $*" >&2; exit 1; }
 say() { echo "lab/edge_server: $*"; }
 
+NODES_ENV="$LAB_STATE/nodes.env" # exists while the two-node lab is up; exports what compose.nodes.yml needs
+PI_TOKEN="123456790:labmocktokenpiaaaaaaaaaaaaaaaaaaaaaaaa"
+
 dc() {
-  local profile=()
+  local profile=() files=(-f "$APP/docker-compose.yml" -f "$HERE/compose.lab.yml")
   [ "${LAB_MOCK_TELEGRAM:-}" = "1" ] && profile=(--profile mock-telegram)
-  docker compose --project-directory "$APP" -f "$APP/docker-compose.yml" -f "$HERE/compose.lab.yml" \
-    ${profile[@]+"${profile[@]}"} "$@"
+  if [ -f "$NODES_ENV" ]; then
+    # shellcheck source=/dev/null
+    . "$NODES_ENV"
+    files+=(-f "$HERE/compose.nodes.yml")
+    profile=(--profile mock-telegram) # the nodes lab always has the mocked Telegram API
+  fi
+  docker compose --project-directory "$APP" "${files[@]}" ${profile[@]+"${profile[@]}"} "$@"
 }
 
 need_docker() {
@@ -95,16 +106,19 @@ print(urllib.request.urlopen(r, timeout=30).read().decode())' "$@"
 
 cmd_up() {
   need_docker
-  local pinned=0
+  local pinned=0 nodes=0
   LAB_MOCK_TELEGRAM=0
   for a in "$@"; do
     case "$a" in
       --mock-telegram) LAB_MOCK_TELEGRAM=1 ;;
       --pinned) pinned=1 ;;
+      --nodes) nodes=1 ;;
       *) die "unknown option $a" ;;
     esac
   done
+  [ "$nodes" = "0" ] || [ "$LAB_MOCK_TELEGRAM" = "1" ] || die "--nodes needs --mock-telegram (two bots, one mocked Telegram API)"
   export LAB_MOCK_TELEGRAM
+  rm -f "$NODES_ENV" # set again below when --nodes
   ensure_secrets
   umask 077
   mkdir -p "$LAB_STATE" "$APP" "$LAB_STATE/fakeproc"
@@ -158,6 +172,8 @@ cmd_up() {
     say "bot image: your edge_server + autonomy-core from $AUTONOMY"
   fi
 
+  if [ "$nodes" = "1" ]; then nodes_prepare "$pinned"; fi
+
   dc up -d --build --wait
   cat > "$ENV_OUT" <<ENV
 BOT_CONTAINER=telegram-bot
@@ -166,6 +182,36 @@ MOCK_TELEGRAM=$LAB_MOCK_TELEGRAM
 ENV
   say "up"
   cmd_check
+}
+
+# The second node: build the add-on image from this checkout, make keys, the fleet file and the add-on's
+# options, and tell compose (nodes.env) to add the second node and the fleet settings of the edge bot.
+nodes_prepare() { # pinned
+  local subnet="${LAB_NODES_SUBNET:-10.231.77.0/24}" base edge_ip pi_ip pi_totp
+  base="${subnet%.*}"; edge_ip="${LAB_EDGE_IP:-$base.10}"; pi_ip="${LAB_PI_IP:-$base.11}"
+  docker network inspect autonomy-lab-nodes >/dev/null 2>&1 \
+    || docker network create --subnet "$subnet" --label autonomy.lab=true autonomy-lab-nodes >/dev/null
+  pi_totp="$(secret LAB_PI_TOTP_SECRET)"
+  if [ -z "$pi_totp" ]; then
+    pi_totp="$(docker run --rm python:3.12-alpine python -c 'import base64,os;print(base64.b32encode(os.urandom(15)).decode())')"
+    set_secret LAB_PI_TOTP_SECRET "$pi_totp"
+  fi
+  docker build -q -f "$EDGE/ha-addon/Dockerfile" -t alab-ha-addon-base:lab "$EDGE" >/dev/null
+  if [ "$1" = "1" ]; then
+    docker tag alab-ha-addon-base:lab alab-ha-addon:lab
+    say "add-on image: production Dockerfile, pinned autonomy-core"
+  else
+    docker build -q -f "$HERE/addon.Dockerfile" --build-context "autonomy=${LAB_AUTONOMY_DIR:-$LAB_REPOS/autonomy}" \
+      -t alab-ha-addon:lab "$HERE" >/dev/null
+    say "add-on image: your edge_server + autonomy-core from ${LAB_AUTONOMY_DIR:-$LAB_REPOS/autonomy}"
+  fi
+  docker run --rm -v "$EDGE:/repo:ro" -v "$LAB_STATE:/state" --entrypoint python3 alab-ha-addon:lab \
+    /repo/lab/nodes/setup.py --state /state --edge-ip "$edge_ip" --pi-ip "$pi_ip" \
+    --edge-token "$LAB_TOKEN" --pi-token "$PI_TOKEN" --pi-totp "$pi_totp" --operator "${LAB_IDS%%,*}" | sed 's/^/  /'
+  cat > "$NODES_ENV" <<NENV
+export LAB_EDGE_IP='$edge_ip' LAB_PI_IP='$pi_ip' LAB_EDGE_TOKEN='$LAB_TOKEN'
+NENV
+  say "two nodes: edge-1 ($edge_ip) and pi-1 ($pi_ip), fleet control between them"
 }
 
 cmd_check() {
@@ -199,11 +245,20 @@ cmd_down()   { need_docker; farm_status_stop; dc down --remove-orphans; rm -f "$
 cmd_reset()  { need_docker; farm_status_stop; [ -f "$APP/docker-compose.yml" ] && { LAB_MOCK_TELEGRAM=1; dc down -v --remove-orphans || true; }; 
   # files made by root in containers: remove them from a container too (Linux hosts)
   rm -rf "$LAB_STATE" 2>/dev/null || docker run --rm -v "$LAB_DIR:/d" alpine rm -rf /d/edge_server
+  docker network rm autonomy-lab-nodes >/dev/null 2>&1 || true
   rm -f "$ENV_OUT"; say "reset"; }
 cmd_status() { need_docker; dc ps; }
 cmd_logs()   { need_docker; dc logs --no-color --tail 100 "$@"; }
 
-cmd_code() {
+cmd_code() { # [pi]
+  if [ "${1:-}" = "pi" ]; then
+    docker exec pi-bot python3 -c '
+import sys, time
+sys.path.insert(0, "/app/telegram-bot")
+import bot
+print(bot.totp(sys.argv[1], int(time.time() // 30)))' "$(secret LAB_PI_TOTP_SECRET)"
+    return
+  fi
   docker exec telegram-bot python3 -c '
 import sys, time
 sys.path.insert(0, "/app")
@@ -211,19 +266,57 @@ import bot
 print(bot.totp(sys.argv[1], int(time.time() // 30)))' "$(secret LAB_TOTP_SECRET)"
 }
 
+bot_token() { # [pi]: the token that selects a bot in the mocked Telegram API ("" = the edge bot)
+  if [ "${1:-}" = "pi" ]; then echo "$PI_TOKEN"; fi
+}
+
 cmd_say() {
-  [ -n "${1:-}" ] || die 'usage: lab.sh say "/status"'
+  local bot=""
+  if [ "${1:-}" = "--bot" ]; then bot="$(bot_token "${2:-}")"; shift 2; fi
+  [ -n "${1:-}" ] || die 'usage: lab.sh say [--bot pi] "/status"'
   local text
-  text="$(python3 -c 'import json,sys;print(json.dumps({"text":sys.argv[1]}))' "$1" 2>/dev/null || printf '{"text":"%s"}' "$1")"
+  text="$(python3 -c 'import json,sys;print(json.dumps({"text":sys.argv[1],"token":sys.argv[2]}))' "$1" "$bot" 2>/dev/null || printf '{"text":"%s","token":"%s"}' "$1" "$bot")"
   mock POST /_lab/say "$text" >/dev/null
 }
 
 cmd_replies() {
-  mock GET /_lab/sent | python3 -c '
+  local bot=""
+  if [ "${1:-}" = "--bot" ]; then bot="$(bot_token "${2:-}")"; shift 2; fi
+  mock GET "/_lab/sent${bot:+?token=$bot}" | python3 -c '
 import json, sys
 n = int(sys.argv[1]) if len(sys.argv) > 1 else 5
 for m in json.load(sys.stdin)["messages"][-n:]:
     print("---"); print(m["text"])' "${1:-5}" 2>/dev/null || mock GET /_lab/sent
+}
+
+cmd_pi_calls() {
+  docker exec pi-supervisor python -c 'import urllib.request;print(urllib.request.urlopen("http://127.0.0.1:80/_lab/calls", timeout=5).read().decode())'
+}
+
+# wait [--bot pi] <text> [seconds]: until a recent reply of the bot contains the text (default 90 s)
+cmd_wait() {
+  local bot=()
+  if [ "${1:-}" = "--bot" ]; then bot=(--bot "${2:-}"); shift 2; fi
+  [ -n "${1:-}" ] || die "usage: lab.sh wait [--bot pi] <text> [seconds]"
+  local want="$1" end=$((SECONDS + ${2:-90}))
+  while [ "$SECONDS" -lt "$end" ]; do
+    case "$(cmd_replies ${bot[@]+"${bot[@]}"} 8)" in *"$want"*) return 0 ;; esac
+    sleep 2
+  done
+  cmd_replies ${bot[@]+"${bot[@]}"} 8 >&2
+  die "no reply with '$want'"
+}
+
+# wait-call <text> [seconds]: until the Supervisor stand-in has seen a call containing the text
+cmd_wait_call() {
+  [ -n "${1:-}" ] || die "usage: lab.sh wait-call <text> [seconds]"
+  local end=$((SECONDS + ${2:-60}))
+  while [ "$SECONDS" -lt "$end" ]; do
+    case "$(cmd_pi_calls)" in *"$1"*) return 0 ;; esac
+    sleep 2
+  done
+  cmd_pi_calls >&2
+  die "the Supervisor stand-in never saw '$1'"
 }
 
 cmd_cam() {
@@ -275,10 +368,13 @@ case "${1:-}" in
   logs) shift; cmd_logs "$@" ;;
   reset) cmd_reset ;;
   check) cmd_check ;;
-  code) cmd_code ;;
+  code) shift; cmd_code "$@" ;;
   say) shift; cmd_say "$@" ;;
   replies) shift; cmd_replies "$@" ;;
+  pi-calls) cmd_pi_calls ;;
+  wait) shift; cmd_wait "$@" ;;
+  wait-call) shift; cmd_wait_call "$@" ;;
   cam) shift; cmd_cam "$@" ;;
   farm-status) shift; cmd_farm_status "$@" ;;
-  *) echo "usage: lab/lab.sh up [--mock-telegram] [--pinned] | down | status | logs [service] | reset | check | code | say <text> | replies [n] | cam <name> <fps> | farm-status ok|stale|gone" >&2; exit 2 ;;
+  *) echo "usage: lab/lab.sh up [--mock-telegram] [--nodes] [--pinned] | down | status | logs [service] | reset | check | code [pi] | say [--bot pi] <text> | replies [--bot pi] [n] | pi-calls | wait [--bot pi] <text> | wait-call <text> | cam <name> <fps> | farm-status ok|stale|gone" >&2; exit 2 ;;
 esac

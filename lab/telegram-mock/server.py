@@ -3,11 +3,15 @@
 
 The bot talks to it through TELEGRAM_API_URL: getUpdates (long poll), sendMessage,
 setMyCommands, getMe, sendDocument. Admin:
-  POST /_lab/say   {"text": "/status", "user_id": 1001}   a message from a user to the bot
-  GET  /_lab/sent  -> {"messages": [{"chat_id":..,"text":..}, ...]}   what the bot said
+  POST /_lab/say   {"text": "/status", "user_id": 1001, "token": "..."}   a message from a user to a bot
+  GET  /_lab/sent[?token=...] -> {"messages": [{"chat_id":..,"text":..}, ...]}   what a bot said
   POST /_lab/clear
+Several bots can use it at once (the two-node lab): each is told apart by the token in the URL
+(/bot<token>/<method>). "token" in /_lab/say and /_lab/sent is a substring of a bot's token; left
+out, it is PRIMARY_TOKEN (the first node's bot), and with no PRIMARY_TOKEN every bot, as with one bot.
 Standard library only.
 """
+
 import json
 import os
 import threading
@@ -15,10 +19,28 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 LOCK = threading.Condition()
-UPDATES = []   # [{"update_id", "message"}]
+UPDATES = []  # [{"update_id", "message"}]
 SENT = []
 NEXT_ID = [1]
 COMMANDS = []
+PRIMARY = os.environ.get("PRIMARY_TOKEN", "")
+
+
+def bot_token(path):
+    """The token in /bot<token>/<method>, or ""."""
+    for part in path.split("/"):
+        if part.startswith("bot") and ":" in part:
+            return part[3:]
+    return ""
+
+
+def wanted(token_part):
+    """The substring that selects a bot: the request's, else the primary bot, else any."""
+    return token_part or PRIMARY
+
+
+def matches(recorded, token_part):
+    return not token_part or token_part in (recorded or "")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -34,11 +56,25 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
-        if self.path == "/_lab/sent":
+        if self.path.split("?")[0] == "/_lab/sent":
+            query = self.path.partition("?")[2]
+            want = wanted(
+                dict(q.partition("=")[::2] for q in query.split("&") if q).get("token", "")
+            )
             with LOCK:
-                return self._send({"messages": list(SENT)})
+                return self._send({"messages": [m for m in SENT if matches(m.get("token"), want)]})
         if self.path.endswith("/getMe"):
-            return self._send({"ok": True, "result": {"id": 1, "is_bot": True, "first_name": "lab", "username": "lab_mock_bot"}})
+            return self._send(
+                {
+                    "ok": True,
+                    "result": {
+                        "id": 1,
+                        "is_bot": True,
+                        "first_name": "lab",
+                        "username": "lab_mock_bot",
+                    },
+                }
+            )
         self._send({"ok": False, "description": "not found"}, 404)
 
     def do_POST(self):
@@ -53,10 +89,19 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/_lab/say":
             with LOCK:
                 uid = int(body.get("user_id", 1001))
-                UPDATES.append({"update_id": NEXT_ID[0], "message": {
-                    "message_id": NEXT_ID[0], "date": int(time.time()), "text": body["text"],
-                    "from": {"id": uid, "is_bot": False, "first_name": "lab"},
-                    "chat": {"id": uid, "type": "private"}}})
+                UPDATES.append(
+                    {
+                        "update_id": NEXT_ID[0],
+                        "for": wanted(body.get("token", "")),
+                        "message": {
+                            "message_id": NEXT_ID[0],
+                            "date": int(time.time()),
+                            "text": body["text"],
+                            "from": {"id": uid, "is_bot": False, "first_name": "lab"},
+                            "chat": {"id": uid, "type": "private"},
+                        },
+                    }
+                )
                 NEXT_ID[0] += 1
                 LOCK.notify_all()
             return self._send({"ok": True})
@@ -67,23 +112,46 @@ class Handler(BaseHTTPRequestHandler):
         method = path.rsplit("/", 1)[-1]
         if method == "getUpdates":
             offset = int(body.get("offset") or 0)
+            token = bot_token(path)
             deadline = time.time() + min(int(body.get("timeout") or 0), 25)
             with LOCK:
                 # like Telegram: an offset acknowledges (and forgets) everything before it, so a
-                # restarted bot does not get old messages again
-                UPDATES[:] = [u for u in UPDATES if u["update_id"] >= offset]
+                # restarted bot does not get old messages again. Only this bot's own messages.
+                UPDATES[:] = [
+                    u
+                    for u in UPDATES
+                    if u["update_id"] >= offset or not matches(token, u.get("for"))
+                ]
                 while True:
-                    fresh = [u for u in UPDATES if u["update_id"] >= offset]
+                    fresh = [
+                        {k: v for k, v in u.items() if k != "for"}
+                        for u in UPDATES
+                        if u["update_id"] >= offset and matches(token, u.get("for"))
+                    ]
                     if fresh or time.time() >= deadline:
                         return self._send({"ok": True, "result": fresh})
                     LOCK.wait(timeout=max(0.1, deadline - time.time()))
         if method == "sendMessage":
             with LOCK:
-                SENT.append({"chat_id": body.get("chat_id"), "text": body.get("text", ""), "at": time.time()})
+                SENT.append(
+                    {
+                        "chat_id": body.get("chat_id"),
+                        "text": body.get("text", ""),
+                        "at": time.time(),
+                        "token": bot_token(path),
+                    }
+                )
             return self._send({"ok": True, "result": {"message_id": len(SENT)}})
         if method == "sendDocument":
             with LOCK:
-                SENT.append({"chat_id": None, "text": "[document]", "at": time.time()})
+                SENT.append(
+                    {
+                        "chat_id": None,
+                        "text": "[document]",
+                        "at": time.time(),
+                        "token": bot_token(path),
+                    }
+                )
             return self._send({"ok": True, "result": {"message_id": len(SENT)}})
         if method == "setMyCommands":
             COMMANDS[:] = body.get("commands", [])
