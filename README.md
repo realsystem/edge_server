@@ -327,6 +327,25 @@ Safeguards:
 - Remove `REBOOT_TOTP_SECRET` from `.telegram` and redeploy to switch it off again; the
   deploy removes the systemd units.
 
+The secret's name is now `OWNER_TOTP_SECRET`. `REBOOT_TOTP_SECRET` still works (the new name wins when both are set), because the same code now guards every state change: `/reboot`, `/restart`, `/redeploy`, `/approve`, `/resume` and the peer commands below.
+
+#### Ask another node (`/remote`)
+
+In a fleet, you can restart a service or reboot another node from this node's bot:
+
+```
+/remote pi-1 restart frigate 123456
+/remote pi-1 reboot 123456
+```
+
+The code is the owner's code **for that node** (each node has its own secret, so you have one authenticator entry per node). This bot signs the request and sends it over the fleet control plane; the other node checks the signature, its grant, and the code against its own secret before it does anything, and tells its owner what it did or refused. A node that has not been told to accept requests accepts none:
+
+```
+PEER_GRANTS=edge-1:restart=frigate|mosquitto,reboot     # in .telegram; empty = no peer may ask for anything
+```
+
+A peer's key alone cannot restart or reboot anything: without a fresh code from you the request is refused, and a code works once. Reboots keep the uptime guard and restarts the pause between runs.
+
 #### Update from Telegram (`/redeploy`)
 
 With `REBOOT_TOTP_SECRET` set, `/redeploy 123456` (same authenticator, same code rules,

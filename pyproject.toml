@@ -31,7 +31,7 @@ dependencies = [
     # Autonomy core library (envelopes, seen ids, counter, outbox) used by the fleet
     # control plane; pinned to a commit of realsystem/autonomy. Keep in step with
     # AUTONOMY_CORE_REF in telegram-bot/Dockerfile (tests/test_controlplane_envelope.py checks).
-    "autonomy-core @ https://github.com/realsystem/autonomy/archive/cb4538e0823b1460daf795f02aaee58c10fc404b.tar.gz#subdirectory=core/python",
+    "autonomy-core @ https://github.com/realsystem/autonomy/archive/fde8f4749b7c3def408fc478cf25d3248d8f6db4.tar.gz#subdirectory=core/python",
 ]
 
 [project.optional-dependencies]
