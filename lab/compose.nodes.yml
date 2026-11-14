@@ -1,0 +1,54 @@
+# The second node of the two-node lab (lab.sh up --nodes): a Home Assistant add-on node (the real
+# add-on image from ha-addon/) with a Supervisor stand-in, fleet control between it and the edge bot,
+# and one mocked Telegram API serving both bots by token. Merged on top of compose.lab.yml.
+# The two bots reach each other on their own network with fixed addresses (the fleet file needs IPs).
+networks:
+  nodes:
+    name: ${LAB_NODES_NETWORK:-autonomy-lab-nodes}
+    external: true
+
+services:
+  telegram-bot:
+    networks: !override
+      lab: {}
+      nodes: {ipv4_address: "${LAB_EDGE_IP:-10.231.77.10}"}
+    environment:
+      - EDGE_NODE=edge-1
+      - PEER_GRANTS=pi-1:restart=frigate,reboot
+    volumes:
+      - ${LAB_STATE:?}/app/node.key:/run/edge/node.key:ro
+
+  telegram-mock:
+    environment:
+      - PRIMARY_TOKEN=${LAB_EDGE_TOKEN:-}
+
+  pi-supervisor:
+    build: {context: "${LAB_EDGE:?}/lab/supervisor-stub"}
+    image: alab-supervisor-stub:lab
+    pull_policy: never
+    container_name: pi-supervisor
+    labels: {autonomy.lab: "true"}
+    networks:
+      lab:
+        aliases: [supervisor, homeassistant]
+
+  pi-bot:
+    image: alab-ha-addon:lab
+    pull_policy: never
+    container_name: pi-bot
+    labels: {autonomy.lab: "true"}
+    environment:
+      - SUPERVISOR_URL=http://supervisor
+      - SUPERVISOR_TOKEN=lab-token
+      - TELEGRAM_API_URL=http://telegram-mock:8081
+      - HOST_PROC=/fakeproc
+    volumes:
+      - ${LAB_STATE:?}/pi/data:/data
+      - ${LAB_STATE:?}/pi/share:/share:ro
+      - ${LAB_STATE:?}/fakeproc:/fakeproc:ro
+    networks:
+      lab: {}
+      nodes: {ipv4_address: "${LAB_PI_IP:-10.231.77.11}"}
+    depends_on:
+      pi-supervisor: {condition: service_healthy}
+      telegram-mock: {condition: service_started}

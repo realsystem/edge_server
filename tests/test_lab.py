@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -164,3 +165,128 @@ class TestShell:
     def test_lab_scripts_parse(self):
         for f in ("lab.sh", "render.sh"):
             assert subprocess.run(["bash", "-n", str(LAB / f)]).returncode == 0
+
+
+supervisor = load("supervisor_stub", LAB / "supervisor-stub/server.py")
+nodes_setup = load("nodes_setup", LAB / "nodes/setup.py")
+
+
+class TestTelegramMockTwoBots:
+    def test_each_bot_gets_only_its_own_messages(self):
+        httpd, base = serve(tgmock)
+        try:
+            post(base + "/_lab/clear", {})
+            post(base + "/_lab/say", {"text": "/a", "token": "111:edge"})
+            post(base + "/_lab/say", {"text": "/b", "token": "222:pi"})
+            edge = post(base + "/bot111:edge/getUpdates", {"timeout": 0, "offset": 0})["result"]
+            pi = post(base + "/bot222:pi/getUpdates", {"timeout": 0, "offset": 0})["result"]
+            assert [u["message"]["text"] for u in edge] == ["/a"]
+            assert [u["message"]["text"] for u in pi] == ["/b"]
+            # acknowledging one bot's update leaves the other's alone
+            post(
+                base + "/bot111:edge/getUpdates", {"timeout": 0, "offset": edge[0]["update_id"] + 1}
+            )
+            assert post(base + "/bot222:pi/getUpdates", {"timeout": 0, "offset": 0})["result"]
+            post(base + "/bot111:edge/sendMessage", {"chat_id": 1, "text": "from edge"})
+            post(base + "/bot222:pi/sendMessage", {"chat_id": 1, "text": "from pi"})
+
+            def sent(q):
+                return [m["text"] for m in json.loads(get(base + "/_lab/sent" + q))["messages"]]
+
+            assert sent("?token=pi") == ["from pi"]
+            assert sent("?token=edge") == ["from edge"]
+            assert sent("") == ["from edge", "from pi"]
+        finally:
+            httpd.shutdown()
+
+
+class TestSupervisorStub:
+    def test_calls_are_recorded_and_need_the_token(self):
+        supervisor.CALLS.clear()
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), supervisor.Supervisor)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        try:
+
+            def call(path, method="POST", token="lab-token"):
+                r = urllib.request.Request(
+                    base + path, data=b"" if method == "POST" else None, method=method
+                )
+                r.add_header("Authorization", f"Bearer {token}")
+                try:
+                    return urllib.request.urlopen(r, timeout=10).status
+                except urllib.error.HTTPError as e:
+                    return e.code
+
+            assert call("/core/restart", token="wrong") == 401
+            assert call("/core/restart") == 200
+            assert call("/host/reboot") == 200
+            assert call("/addons/core_mosquitto/restart") == 200
+            assert call("/core/api/", "GET") == 502  # Core is "restarting"
+            paths = [c["path"] for c in json.loads(get(base + "/_lab/calls"))]
+            assert paths == [
+                "/core/restart",
+                "/host/reboot",
+                "/addons/core_mosquitto/restart",
+                "/core/api/",
+            ]
+            assert "hunter2" in get_auth(base + "/core/logs")  # the bot, not the stub, must redact
+        finally:
+            httpd.shutdown()
+
+
+def get_auth(url):
+    r = urllib.request.Request(url, headers={"Authorization": "Bearer lab-token"})
+    return urllib.request.urlopen(r, timeout=10).read().decode()
+
+
+class TestNodesSetup:
+    def run(self, tmp_path):
+        return nodes_setup.main(
+            [
+                "--state", str(tmp_path), "--repo", str(REPO),
+                "--edge-ip", "10.231.77.10", "--pi-ip", "10.231.77.11",
+                "--edge-token", "123456789:aaa", "--pi-token", "123456790:bbb",
+                "--pi-totp", "JBSWY3DPEHPK3PXP",
+            ]
+        )  # fmt: skip
+
+    def test_writes_keys_fleet_and_options(self, tmp_path):
+        assert self.run(tmp_path) == 0
+        fleet = json.loads((tmp_path / "app/bot-status/fleet.json").read_text())
+        assert fleet["node"] == "edge-1" and fleet["peers"][0]["name"] == "pi-1"
+        assert fleet["peers"][0]["addrs"]["lan"] == "10.231.77.11"
+        options = json.loads((tmp_path / "pi/data/options.json").read_text())
+        assert options["node"] == "pi-1" and options["peer_grants"].startswith("edge-1:")
+        assert (tmp_path / "pi/share/autonomy/fleet.yaml").is_file()
+
+    def test_keys_survive_a_second_run(self, tmp_path):
+        self.run(tmp_path)
+        before = (tmp_path / "pi/data/node.key").read_bytes()
+        assert self.run(tmp_path) == 0
+        assert (tmp_path / "pi/data/node.key").read_bytes() == before
+
+
+class TestNodesCompose:
+    def test_compose_files_parse_and_shell_is_valid(self):
+        import yaml
+
+        class Loader(yaml.SafeLoader):
+            pass
+
+        for tag in ("!override", "!reset"):
+            Loader.add_constructor(
+                tag,
+                lambda loader, node: (
+                    loader.construct_sequence(node, deep=True)
+                    if isinstance(node, yaml.SequenceNode)
+                    else (
+                        loader.construct_mapping(node, deep=True)
+                        if isinstance(node, yaml.MappingNode)
+                        else None
+                    )
+                ),
+            )
+        doc = yaml.load((LAB / "compose.nodes.yml").read_text(), Loader)  # noqa: S506
+        assert {"telegram-bot", "pi-supervisor", "pi-bot"} <= set(doc["services"])
+        assert subprocess.run(["bash", "-n", str(LAB / "lab.sh")]).returncode == 0

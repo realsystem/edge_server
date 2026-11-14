@@ -5,7 +5,7 @@ name: Lab
 # no hardware. On changes to lab/ and the bot, and nightly.
 on:
   pull_request:
-    paths: ["lab/**", "telegram-bot/**", "deploy-edge-server.sh", ".github/workflows/lab.yml"]
+    paths: ["lab/**", "telegram-bot/**", "ha-addon/**", "deploy-edge-server.sh", ".github/workflows/lab.yml"]
   push:
     branches: [main]
     paths: ["lab/**"]
@@ -72,6 +72,75 @@ jobs:
       - name: Logs
         if: always()
         run: edge_server/lab/lab.sh logs | tail -150
+      - name: Reset
+        if: always()
+        run: edge_server/lab/lab.sh reset
+
+  nodes:
+    name: two nodes, cross-node control with the owner's TOTP
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      LAB_DIR: /tmp/autonomy-lab
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: edge_server
+      - uses: actions/checkout@v4
+        with:
+          repository: realsystem/autonomy
+          path: autonomy
+      - name: Up - an edge node and a Home Assistant add-on node, one mocked Telegram
+        run: edge_server/lab/lab.sh up --mock-telegram --nodes
+      - name: Each node's bot answers its own /status
+        run: |
+          edge_server/lab/lab.sh say "/status"
+          edge_server/lab/lab.sh say --bot pi "/status"
+          edge_server/lab/lab.sh wait "memory" 60
+          edge_server/lab/lab.sh wait --bot pi "memory" 60
+      - name: /fleet on each node lists the other (heartbeats)
+        run: |
+          for i in $(seq 1 12); do
+            edge_server/lab/lab.sh say "/fleet"
+            edge_server/lab/lab.sh say --bot pi "/fleet"
+            sleep 10
+            a="$(edge_server/lab/lab.sh replies 3)"
+            b="$(edge_server/lab/lab.sh replies --bot pi 3)"
+            case "$a" in *pi-1*) case "$b" in *edge-1*) exit 0 ;; esac ;; esac
+          done
+          edge_server/lab/lab.sh replies 3; edge_server/lab/lab.sh replies --bot pi 3
+          exit 1
+      - name: Edge restarts Home Assistant Core on the Pi node, with the Pi's owner code
+        run: |
+          edge_server/lab/lab.sh say "/remote pi-1 restart core $(edge_server/lab/lab.sh code pi)"
+          edge_server/lab/lab.sh wait-call /core/restart 60
+          edge_server/lab/lab.sh wait --bot pi "asked to restart core" 60
+      - name: The Pi node asks the edge to restart Frigate, with the edge's owner code
+        run: |
+          edge_server/lab/lab.sh say --bot pi "/remote edge-1 restart frigate $(edge_server/lab/lab.sh code)"
+          edge_server/lab/lab.sh wait "Restarted frigate" 120
+      - name: A wrong code does nothing
+        run: |
+          sleep 12 # the sender pauses 10 s between /remote commands
+          edge_server/lab/lab.sh say "/remote pi-1 reboot 000000"
+          edge_server/lab/lab.sh wait --bot pi "Refused a request from edge-1" 60
+          case "$(edge_server/lab/lab.sh pi-calls)" in *host/reboot*) echo "rebooted with a wrong code"; exit 1 ;; esac
+      - name: A request outside the grant is refused even with a good code
+        run: |
+          sleep 12
+          edge_server/lab/lab.sh say "/remote pi-1 restart core_mosquitto $(edge_server/lab/lab.sh code pi)"
+          edge_server/lab/lab.sh wait --bot pi "Refused a request from edge-1" 60
+          case "$(edge_server/lab/lab.sh pi-calls)" in *addons/core_mosquitto*) echo "restarted an add-on that is not granted"; exit 1 ;; esac
+      - name: Reboot of the Pi host needs the code too, and then the Supervisor is asked
+        run: |
+          sleep 32 # a code is good once: wait for the next 30 s window
+          edge_server/lab/lab.sh say "/remote pi-1 reboot $(edge_server/lab/lab.sh code pi)"
+          edge_server/lab/lab.sh wait-call /host/reboot 90
+      - name: Logs
+        if: always()
+        run: |
+          edge_server/lab/lab.sh logs | tail -200
+          edge_server/lab/lab.sh pi-calls
       - name: Reset
         if: always()
         run: edge_server/lab/lab.sh reset
