@@ -46,6 +46,7 @@ dc() {
     # shellcheck source=/dev/null
     . "$NODES_ENV"
     files+=(-f "$HERE/compose.nodes.yml")
+    profile=(--profile mock-telegram) # the nodes lab always has the mocked Telegram API
   fi
   docker compose --project-directory "$APP" "${files[@]}" ${profile[@]+"${profile[@]}"} "$@"
 }
@@ -286,6 +287,36 @@ import json, sys
 n = int(sys.argv[1]) if len(sys.argv) > 1 else 5
 for m in json.load(sys.stdin)["messages"][-n:]:
     print("---"); print(m["text"])' "${1:-5}" 2>/dev/null || mock GET /_lab/sent
+}
+
+cmd_pi_calls() {
+  docker exec pi-supervisor python -c 'import urllib.request;print(urllib.request.urlopen("http://127.0.0.1:80/_lab/calls", timeout=5).read().decode())'
+}
+
+# wait [--bot pi] <text> [seconds]: until a recent reply of the bot contains the text (default 90 s)
+cmd_wait() {
+  local bot=()
+  if [ "${1:-}" = "--bot" ]; then bot=(--bot "${2:-}"); shift 2; fi
+  [ -n "${1:-}" ] || die "usage: lab.sh wait [--bot pi] <text> [seconds]"
+  local want="$1" end=$((SECONDS + ${2:-90}))
+  while [ "$SECONDS" -lt "$end" ]; do
+    case "$(cmd_replies ${bot[@]+"${bot[@]}"} 8)" in *"$want"*) return 0 ;; esac
+    sleep 2
+  done
+  cmd_replies ${bot[@]+"${bot[@]}"} 8 >&2
+  die "no reply with '$want'"
+}
+
+# wait-call <text> [seconds]: until the Supervisor stand-in has seen a call containing the text
+cmd_wait_call() {
+  [ -n "${1:-}" ] || die "usage: lab.sh wait-call <text> [seconds]"
+  local end=$((SECONDS + ${2:-60}))
+  while [ "$SECONDS" -lt "$end" ]; do
+    case "$(cmd_pi_calls)" in *"$1"*) return 0 ;; esac
+    sleep 2
+  done
+  cmd_pi_calls >&2
+  die "the Supervisor stand-in never saw '$1'"
 }
 
 cmd_cam() {
