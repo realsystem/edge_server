@@ -66,6 +66,8 @@ class Api(Protocol):
 
     def restart(self) -> None: ...
 
+    def request(self, method: str, path: str, body: Any = None) -> Any: ...
+
 
 # --------------------------------------------------------------------------- transports
 
@@ -132,6 +134,9 @@ class HttpApi:
         except (urllib.error.URLError, OSError) as exc:
             raise HaNodeError(f"HA API {path}: {exc}") from exc
         return json.loads(raw) if raw else None
+
+    def request(self, method: str, path: str, body: Any = None) -> Any:
+        return self._call(method, path, body)
 
     def ping(self) -> bool:
         try:
@@ -372,6 +377,151 @@ def do_sync(
     return True
 
 
+# --------------------------------------------------------------------------- add-ons and integrations
+
+
+def resolve(value: Any) -> Any:
+    """Site-file values may be ``{file: /path}`` so that a password never sits in the file."""
+    if isinstance(value, dict) and set(value) == {"file"}:
+        try:
+            return Path(str(value["file"])).read_text().strip()
+        except OSError as exc:
+            raise HaNodeError(f"cannot read {value['file']}: {exc}") from exc
+    if isinstance(value, dict):
+        return {k: resolve(v) for k, v in value.items()}
+    return value
+
+
+def _ha_json(node: Node, command: str) -> dict[str, Any] | None:
+    rc, text = node.run(command + " --raw-json")
+    if rc != 0:
+        return None
+    try:
+        data = json.loads(text.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return None
+    return (
+        data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else None
+    )
+
+
+def addon_items(site: dict[str, Any]) -> list[dict[str, Any]]:
+    items = []
+    for raw in site.get("addons") or []:
+        item = {"slug": raw} if isinstance(raw, str) else dict(raw)
+        if not item.get("slug"):
+            raise HaNodeError("an add-on entry needs a slug")
+        items.append(item)
+    return items
+
+
+def integration_items(site: dict[str, Any]) -> list[dict[str, Any]]:
+    items = []
+    for raw in site.get("integrations") or []:
+        item = {"domain": raw} if isinstance(raw, str) else dict(raw)
+        if not item.get("domain"):
+            raise HaNodeError("an integration entry needs a domain")
+        items.append(item)
+    return items
+
+
+def plan_extras(node: Node, api: Api, site: dict[str, Any]) -> list[tuple[str, str]]:
+    """(kind, text) for each add-on and integration: what a run would do."""
+    out: list[tuple[str, str]] = []
+    for item in addon_items(site):
+        info = _ha_json(node, f"ha addons info {shlex.quote(item['slug'])}")
+        if info is None or info.get("version") in (None, ""):
+            out.append(("install", f"add-on {item['slug']}"))
+        elif "options" in item and info.get("options") != resolve(item["options"]):
+            out.append(("configure", f"add-on {item['slug']}"))
+        elif item.get("start", True) and info.get("state") != "started":
+            out.append(("start", f"add-on {item['slug']}"))
+        else:
+            out.append(("same", f"add-on {item['slug']}"))
+    domains = {
+        e.get("domain") for e in (api.request("GET", "/api/config/config_entries/entry") or [])
+    }
+    for item in integration_items(site):
+        out.append(
+            ("same" if item["domain"] in domains else "add", f"integration {item['domain']}")
+        )
+    return out
+
+
+def apply_addon(node: Node, item: dict[str, Any], out: Any) -> None:
+    slug = shlex.quote(item["slug"])
+    info = _ha_json(node, f"ha addons info {slug}")
+    if info is None or info.get("version") in (None, ""):
+        rc, text = node.run(f"ha addons install {slug}")
+        if rc != 0:
+            raise HaNodeError(f"cannot install {item['slug']}: {text.strip()[:300]}")
+        out(f"installed add-on {item['slug']}")
+        info = {}
+    if "options" in item and info.get("options") != resolve(item["options"]):
+        opts = json.dumps(resolve(item["options"]))
+        rc, text = node.run(f"ha addons options {slug} --options {shlex.quote(opts)}")
+        if rc != 0:
+            raise HaNodeError(f"cannot set the options of {item['slug']}: {text.strip()[:300]}")
+        out(f"configured add-on {item['slug']}")
+        if info.get("state") == "started":
+            node.run(f"ha addons restart {slug}")
+    if item.get("start", True) and info.get("state") != "started":
+        rc, text = node.run(f"ha addons start {slug}")
+        if rc != 0:
+            raise HaNodeError(f"cannot start {item['slug']}: {text.strip()[:300]}")
+        out(f"started add-on {item['slug']}")
+
+
+def apply_integration(api: Api, item: dict[str, Any], out: Any) -> None:
+    """Run the integration's config flow with the values from the site file."""
+    domain = str(item["domain"])
+    existing = api.request("GET", "/api/config/config_entries/entry") or []
+    if any(e.get("domain") == domain for e in existing):
+        return
+    values = resolve(item.get("input") or {})
+    flow = api.request(
+        "POST",
+        "/api/config/config_entries/flow",
+        {"handler": domain, "show_advanced_options": False},
+    )
+    for _ in range(6):
+        kind = flow.get("type")
+        if kind == "create_entry":
+            out(f"set up integration {domain}")
+            return
+        if kind == "abort":
+            reason = flow.get("reason", "")
+            if reason == "already_configured":
+                return
+            raise HaNodeError(f"{domain}: Home Assistant refused ({reason})")
+        if kind in ("external", "external_step", "progress"):
+            raise HaNodeError(
+                f"{domain}: needs a step in a browser (sign-in or a device setting). "
+                "Do it in Home Assistant: Settings, Devices & services, Add integration."
+            )
+        if kind != "form":
+            raise HaNodeError(f"{domain}: unexpected answer from Home Assistant ({kind})")
+        fields = [f.get("name") for f in flow.get("data_schema") or []]
+        required = [f.get("name") for f in flow.get("data_schema") or [] if f.get("required")]
+        missing = [f for f in required if f not in values]
+        if missing:
+            raise HaNodeError(
+                f"{domain}: needs values for {', '.join(missing)}. Add them under 'input:' in the site file."
+            )
+        answer = {k: v for k, v in values.items() if k in fields}
+        flow = api.request("POST", f"/api/config/config_entries/flow/{flow['flow_id']}", answer)
+    raise HaNodeError(f"{domain}: the setup did not finish after 6 steps")
+
+
+def do_extras(node: Node, api: Api, site: dict[str, Any], out: Any = print) -> bool:
+    """Install and configure add-ons, then set up integrations. Stops at the first problem."""
+    for item in addon_items(site):
+        apply_addon(node, item, out)
+    for item in integration_items(site):
+        apply_integration(api, item, out)
+    return True
+
+
 # --------------------------------------------------------------------------- wizard
 
 
@@ -398,6 +548,12 @@ def fetch_source(spec: str) -> Path:
     except (OSError, subprocess.SubprocessError) as exc:
         raise HaNodeError(f"cannot fetch {url}: {exc}") from exc
     return cache / sub if sub else cache
+
+
+def _csv(text: str, current: Any, key: str) -> list[Any]:
+    """The names typed in; entries that already carry options or input keep them."""
+    have = {str(i[key] if isinstance(i, dict) else i): i for i in current or []}
+    return [have.get(n, n) for n in (t.strip() for t in text.split(",")) if n]
 
 
 def run_wizard(
@@ -442,6 +598,24 @@ def run_wizard(
     site["source"] = q(
         "Config to deploy: a directory, or a git URL[#subdir] (empty = none)", "source"
     )
+    site["addons"] = _csv(
+        q(
+            "Add-ons to install, slugs separated by commas (e.g. core_mosquitto; empty = none)",
+            "addons_csv",
+            ",".join(str(i["slug"]) for i in addon_items(site)),
+        ),
+        site.get("addons"),
+        "slug",
+    )
+    site["integrations"] = _csv(
+        q(
+            "Integrations to set up, domains separated by commas (e.g. mqtt; empty = none)",
+            "integrations_csv",
+            ",".join(str(i["domain"]) for i in integration_items(site)),
+        ),
+        site.get("integrations"),
+        "domain",
+    )
     site["add_include"] = yn(
         "Add the packages: include to configuration.yaml if it is missing", "add_include", False
     )
@@ -463,17 +637,28 @@ def run_wizard(
         plan_changes = bool(plan["add"] or plan["change"] or plan["remove"])
         if not plan_changes and not plan["conflict"]:
             out("The node already matches.")
+    extras = plan_extras(node, api, site)
+    for kind, text in extras:
+        out(f"  {kind:9} {text}")
+    extras_todo = any(kind != "same" for kind, _ in extras)
     path.write_text(
         "# Per-site file for tools/ha_node.py. No secrets: the token stays in its own file.\n"
-        + yaml.safe_dump(site, sort_keys=False)
+        "# addons: and integrations: entries may carry 'options:' / 'input:' (use {file: PATH} for secrets).\n"
+        + yaml.safe_dump({k: v for k, v in site.items() if not k.endswith("_csv")}, sort_keys=False)
     )
     out(f"Answers saved in {path}")
-    if site["source"] and (plan_changes or site["add_include"]):
-        if not yes and not yn("Apply these changes now", "_never_saved", False):
-            out("Nothing applied. Run the wizard again, or 'ha_node.py sync', when ready.")
-            return 0
-        ok = do_sync(node, api, wanted, bool(site["restart"]), bool(site["add_include"]), out)
-        return 0 if ok else 1
+    files_todo = bool(site["source"]) and (plan_changes or site["add_include"])
+    if not (files_todo or extras_todo):
+        return 0
+    if not yes and not yn("Apply these changes now", "_never_saved", False):
+        out("Nothing applied. Run the wizard again when ready.")
+        return 0
+    if files_todo and not do_sync(
+        node, api, wanted, bool(site["restart"]), bool(site["add_include"]), out
+    ):
+        return 1
+    if extras_todo:
+        do_extras(node, api, site, out)
     return 0
 
 

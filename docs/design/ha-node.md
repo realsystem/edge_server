@@ -39,5 +39,5 @@ Steps that need a browser login or a device-side setting (the GW3000's custom se
 
 1. Connection check and backup (read-only, no risk).
 2. Package sync with manifest, `check_config`, rollback; tests with a fake HA node (SSH and API stand-ins).
-3. Integrations and add-ons.
+3. Integrations and add-ons (built: `addons:` and `integrations:` in the site file; the wizard asks for them; secrets as `{file: PATH}`; sign-in steps are reported as manual).
 4. The `autonomy-node` add-on (bot + Field Station) and its install step; peer setup (key exchange) per `autonomy/design/node-mesh.md`.
