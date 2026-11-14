@@ -2720,8 +2720,8 @@ Usage: sudo ./deploy-edge-server.sh [--auto | --uninstall]
   --classic    leave fleet mode: forget the saved fleet file, settings stay as deployed
   --ha-node    configure a Home Assistant OS node (a Raspberry Pi) from this machine:
                asks for its address and what to deploy, shows the plan, backs the node
-               up, copies only files it owns, checks the configuration and rolls back
-               if it is invalid. Does not change this server. --yes repeats the saved
+               up, copies only files it owns, checks the configuration and restores the
+               old files if it is invalid. Does not change this server. --yes repeats the saved
                answers without asking. See docs/design/ha-node.md.
   -h, --help   this text
 EOF
