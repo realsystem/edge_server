@@ -69,8 +69,11 @@ def pair(tmp_path, host, telegram, frigate):
 
 
 def remote(p, text, user=ALICE, chat_type="private", date=NOW):
+    before = len(p.telegram.texts())
     p.a.handle_update(message(user, text, date=date, chat_type=chat_type))
-    return p.telegram.texts()[-1]
+    # the receiver tells its owner from another thread into the same fake Telegram, so the
+    # sender's own reply is not always the last text: return everything sent during the call
+    return " | ".join(p.telegram.texts()[before:])
 
 
 def say(p):
