@@ -221,3 +221,102 @@ def test_http_api_ping_and_check(monkeypatch):
     monkeypatch.setattr(hn.HttpApi, "_call", call)
     api = hn.HttpApi("http://ha:8123/", "tok")
     assert api.ping() and api.check_config() == (False, "e")
+
+
+# --------------------------------------------------------------------------- the wizard
+
+
+def wizard(tmp_path, answers, node=None, api=None, source=None, yes=False, site_text=None):
+    site = tmp_path / "ha-node.yaml"
+    if site_text:
+        site.write_text(site_text)
+    it = iter(answers)
+    out = []
+    node = node or FakeNode()
+    api = api or FakeApi()
+    rc = hn.run_wizard(
+        str(site),
+        yes,
+        ask=lambda prompt: next(it),
+        out=out.append,
+        connect_fn=lambda s: (node, api),
+        fetch_fn=lambda spec: source,
+    )
+    return rc, out, node, api, site
+
+
+def make_source(tmp_path):
+    src = tmp_path / "src"
+    (src / "packages").mkdir(parents=True)
+    (src / "packages/farm.yaml").write_text("a: 1\n")
+    return src
+
+
+# host, user, port, key, token file, source, add include, restart, apply
+ANSWERS = ["ha.local", "hassio", "22", "/k", "/t", "SRC", "y", "n", "y"]
+
+
+def test_wizard_asks_checks_plans_applies_and_saves_the_answers(tmp_path):
+    src = make_source(tmp_path)
+    rc, out, node, api, site = wizard(tmp_path, ANSWERS, source=src)
+    assert rc == 0
+    assert node.files["/config/packages/farm.yaml"] == b"a: 1\n"
+    assert node.files["/config/configuration.yaml"].endswith(
+        b"packages: !include_dir_named packages\n"
+    )
+    assert any("add       packages/farm.yaml" in line for line in out)
+    saved = site.read_text()
+    assert "host: ha.local" in saved and "token_file: /t" in saved and "SRC" in saved
+    assert "tok_secret" not in saved
+
+
+def test_wizard_answering_no_to_apply_changes_nothing(tmp_path):
+    src = make_source(tmp_path)
+    rc, out, node, _, _ = wizard(tmp_path, ANSWERS[:-1] + ["n"], source=src)
+    assert rc == 0 and "/config/packages/farm.yaml" not in node.files
+    assert any("Nothing applied" in line for line in out)
+
+
+def test_wizard_stops_when_the_check_fails(tmp_path):
+    rc, out, node, _, _ = wizard(
+        tmp_path, ANSWERS, node=FakeNode(has_ha=False), source=make_source(tmp_path)
+    )
+    assert rc == 1 and "/config/packages/farm.yaml" not in node.files
+    assert any("nothing was changed" in line for line in out)
+
+
+def test_wizard_with_yes_repeats_the_saved_answers_without_asking(tmp_path):
+    src = make_source(tmp_path)
+    saved = "host: ha.local\nssh_user: hassio\nssh_port: 22\nssh_key: /k\ntoken_file: /t\nsource: SRC\nadd_include: true\nrestart: true\n"
+    rc, out, node, api, _ = wizard(tmp_path, [], source=src, yes=True, site_text=saved)
+    assert rc == 0 and api.restarted
+    assert node.files["/config/packages/farm.yaml"] == b"a: 1\n"
+
+
+def test_wizard_needs_a_host(tmp_path):
+    with pytest.raises(hn.HaNodeError, match="address"):
+        wizard(tmp_path, [""] * 9)
+
+
+def test_wizard_with_no_source_only_checks_and_saves(tmp_path):
+    rc, out, node, _, site = wizard(tmp_path, ["ha.local", "", "", "", "/t", "", "", ""])
+    assert rc == 0 and site.is_file() and "/config/packages/farm.yaml" not in node.files
+
+
+def test_deploy_script_hands_ha_node_to_the_wizard(tmp_path):
+    import subprocess
+
+    r = subprocess.run(
+        [
+            "bash",
+            str(Path(__file__).resolve().parent.parent / "deploy-edge-server.sh"),
+            "--ha-node",
+            "--yes",
+            "--site",
+            str(tmp_path / "none.yaml"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert r.returncode == 1 and "the node's address is required" in r.stderr

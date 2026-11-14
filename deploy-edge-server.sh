@@ -15,6 +15,12 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+# --ha-node: configure a Home Assistant OS node over the LAN (this machine is the jumpbox).
+# Nothing here installs or changes this server; see docs/design/ha-node.md.
+if [[ "${1:-}" == "--ha-node" ]]; then
+    exec python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/tools/ha_node.py" wizard "${@:2}"
+fi
+
 #-------------------------------------------------------------------------------
 # FLEET MODE: --config fleet.yaml --node NAME (see docs/design/edge-system.md)
 # Read before the defaults below, so a setting comes from the first of: command-line
@@ -2692,6 +2698,7 @@ Usage: sudo ./deploy-edge-server.sh [--auto | --uninstall]
        ./deploy-edge-server.sh --config fleet.yaml --node NAME --check
        sudo ./deploy-edge-server.sh --write-config fleet.yaml --node NAME
        sudo ./deploy-edge-server.sh --classic
+       ./deploy-edge-server.sh --ha-node [--site FILE] [--yes]
 
   (no option)  deploy or update this server, asking questions where needed
   --auto       unattended: fetch the newest release tag (v1.0, v1.2.3; nothing
@@ -2711,6 +2718,11 @@ Usage: sudo ./deploy-edge-server.sh [--auto | --uninstall]
   --check      with --config: validate the file and print what it would deploy, then stop
   --write-config F  write a one-node fleet file from this install's current settings
   --classic    leave fleet mode: forget the saved fleet file, settings stay as deployed
+  --ha-node    configure a Home Assistant OS node (a Raspberry Pi) from this machine:
+               asks for its address and what to deploy, shows the plan, backs the node
+               up, copies only files it owns, checks the configuration and rolls back
+               if it is invalid. Does not change this server. --yes repeats the saved
+               answers without asking. See docs/design/ha-node.md.
   -h, --help   this text
 EOF
 }
@@ -2769,6 +2781,7 @@ main() {
                 shift # the value was read by the fleet block at the top of the file
                 ;;
             --classic | --check) ;;
+            --ha-node) ;; # handled at the top of the file
             -h | --help)
                 usage
                 return 0
