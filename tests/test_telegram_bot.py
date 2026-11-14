@@ -1709,6 +1709,8 @@ class TestJobWatching:
         """No fakes: command -> request file -> (host answers) -> message."""
         (reboot.cfg.app_dir / "docker-compose.yml").write_text(COMPOSE)
         reboot.cfg.job_poll = 0.01
+        reboot.sleep = time.sleep  # the fixture's sleep is a no-op: the thread would burn through
+        # its 'host did not pick the request up' polls at once and delete the file under the test
         send(reboot, f"/restart frigate {code_now()}")
         req(reboot, "restart-request").unlink()  # the host picked it up
         req(reboot, "restart-result").write_text(json.dumps({"status": "ok", "service": "frigate"}))

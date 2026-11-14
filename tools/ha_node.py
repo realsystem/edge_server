@@ -6,6 +6,8 @@ docs/design/ha-node.md. It reaches the node over SSH (the "Advanced SSH & Web Te
 add-on, key login) and the HA API (a long-lived token).
 
 Commands:
+  ha_node.py wizard [--site FILE] [--yes]        ask what to deploy, show the plan, apply it
+                                                 (the deploy script's --ha-node runs this)
   ha_node.py init  --out FILE ...                write the per-site file (no secrets in it)
   ha_node.py check FILE                          SSH, /config, the ha CLI and the API token
   ha_node.py plan  FILE --source DIR             what a sync would add, change and remove
@@ -25,6 +27,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -369,6 +372,111 @@ def do_sync(
     return True
 
 
+# --------------------------------------------------------------------------- wizard
+
+
+def default_site_file() -> str:
+    base = Path(os.environ.get("EDGE_SERVER_DIR", "/opt/edge-server"))
+    return (
+        str(base / "ha-node.yaml") if base.is_dir() and os.access(base, os.W_OK) else "ha-node.yaml"
+    )
+
+
+def fetch_source(spec: str) -> Path:
+    """A directory, or ``URL[#subdir]`` of a git repository (cloned shallowly into a cache)."""
+    if not spec.startswith(("http://", "https://", "git@", "ssh://")):
+        return Path(spec).expanduser()
+    url, _, sub = spec.partition("#")
+    cache = Path.home() / ".cache" / "ha-node" / hashlib.sha256(url.encode()).hexdigest()[:16]
+    if (cache / ".git").is_dir():
+        cmd = ["git", "-C", str(cache), "pull", "--ff-only", "-q"]
+    else:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cmd = ["git", "clone", "--depth", "1", "-q", url, str(cache)]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise HaNodeError(f"cannot fetch {url}: {exc}") from exc
+    return cache / sub if sub else cache
+
+
+def run_wizard(
+    site_file: str,
+    yes: bool,
+    ask: Any = input,
+    out: Any = print,
+    connect_fn: Any = None,
+    fetch_fn: Any = None,
+) -> int:
+    """Ask, check, show the plan, apply. With --yes the saved answers are used without asking."""
+    import yaml
+
+    connect_fn = connect_fn or connect
+    fetch_fn = fetch_fn or fetch_source
+    path = Path(site_file)
+    site: dict[str, Any] = yaml.safe_load(path.read_text()) if path.is_file() else {}
+    site = site if isinstance(site, dict) else {}
+
+    def q(label: str, key: str, default: str = "") -> str:
+        have = str(site.get(key, default))
+        if yes:
+            return have
+        answer = str(ask(f"{label}" + (f" [{have}]" if have else "") + ": ")).strip()
+        return answer or have
+
+    def yn(label: str, key: str, default: bool) -> bool:
+        have = bool(site.get(key, default))
+        if yes:
+            return have
+        answer = str(ask(f"{label} [{'Y/n' if have else 'y/N'}]: ")).strip().lower()
+        return have if not answer else answer.startswith("y")
+
+    site["host"] = q("Address of the Home Assistant node (name or IP)", "host")
+    if not site["host"]:
+        raise HaNodeError("the node's address is required")
+    site["ssh_user"] = q("SSH user (the Advanced SSH & Web Terminal add-on)", "ssh_user", "root")
+    site["ssh_port"] = int(q("SSH port", "ssh_port", "22"))
+    key_default = str(Path.home() / ".ssh" / "id_ed25519")
+    site["ssh_key"] = q("SSH private key file", "ssh_key", key_default)
+    site["token_file"] = q("File holding a long-lived HA access token", "token_file")
+    site["source"] = q(
+        "Config to deploy: a directory, or a git URL[#subdir] (empty = none)", "source"
+    )
+    site["add_include"] = yn(
+        "Add the packages: include to configuration.yaml if it is missing", "add_include", False
+    )
+    site["restart"] = yn("Restart Home Assistant after a successful check", "restart", False)
+
+    node, api = connect_fn(site)
+    out("Checking the node...")
+    if not do_check(node, api, out):
+        out("Fix the points above and run the wizard again; nothing was changed.")
+        return 1
+    plan_changes = False
+    wanted: dict[str, bytes] = {}
+    if site["source"]:
+        wanted = read_source(fetch_fn(site["source"]))
+        plan = make_plan(node, wanted)
+        for kind in ("add", "change", "remove", "conflict"):
+            for rel in plan[kind]:
+                out(f"  {kind:9} {rel}")
+        plan_changes = bool(plan["add"] or plan["change"] or plan["remove"])
+        if not plan_changes and not plan["conflict"]:
+            out("The node already matches.")
+    path.write_text(
+        "# Per-site file for tools/ha_node.py. No secrets: the token stays in its own file.\n"
+        + yaml.safe_dump(site, sort_keys=False)
+    )
+    out(f"Answers saved in {path}")
+    if site["source"] and (plan_changes or site["add_include"]):
+        if not yes and not yn("Apply these changes now", "_never_saved", False):
+            out("Nothing applied. Run the wizard again, or 'ha_node.py sync', when ready.")
+            return 0
+        ok = do_sync(node, api, wanted, bool(site["restart"]), bool(site["add_include"]), out)
+        return 0 if ok else 1
+    return 0
+
+
 def do_init(args: argparse.Namespace) -> int:
     import yaml
 
@@ -395,6 +503,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--ssh-key", default="")
     p.add_argument("--token-file", default="")
     p.add_argument("--url", default="")
+    p = sub.add_parser("wizard")
+    p.add_argument("--site", default="")
+    p.add_argument("--yes", action="store_true", help="use the saved answers, ask nothing")
     for name in ("check", "plan", "backup", "sync"):
         p = sub.add_parser(name)
         p.add_argument("file")
@@ -409,6 +520,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.cmd == "init":
             return do_init(args)
+        if args.cmd == "wizard":
+            return run_wizard(args.site or default_site_file(), args.yes)
         node, api = connect(load_site(args.file))
         if args.cmd == "check":
             return 0 if do_check(node, api) else 1
