@@ -185,6 +185,9 @@ class Config:
     farm_status: Path | None = None  # Field Station cell's status.json; /farm is off without it
     farm_stale: float = 120.0  # seconds without a status update before "not reporting"
     farm_alert_station: bool = True  # alert when the cell stops reporting or loses Home Assistant
+    peer_grants: str = (
+        ""  # PEER_GRANTS: what fleet peers may ask of this node (peercmd.py); "" = nothing
+    )
     farm_alert_confirm: int = 0  # checks in a row before a farm alert; 0 = alert_confirm
     farm_alerts: str = (
         ""  # threshold rules, e.g. "sensor.wh51_ch1_soil_moisture<20,sensor.ws90_temperature>40"
@@ -225,7 +228,13 @@ class Config:
             raise ValueError("ALERT_DISK_FREE_PERCENT must be a number") from None
         if not 0 <= percent <= 100:
             raise ValueError("ALERT_DISK_FREE_PERCENT must be between 0 and 100")
-        totp_secret = normalize_secret(env.get("REBOOT_TOTP_SECRET", ""))
+        if env.get("PEER_GRANTS"):
+            import peercmd  # next to this file
+
+            peercmd.parse_grants(env["PEER_GRANTS"])  # a typo stops the start, not a later request
+        totp_secret = normalize_secret(
+            env.get("OWNER_TOTP_SECRET") or env.get("REBOOT_TOTP_SECRET", "")
+        )
         try:
             temp = float(env.get("ALERT_TEMP_C", cls.alert_temp_c))
             wear = float(env.get("ALERT_DISK_WEAR_PERCENT", cls.alert_wear_percent))
@@ -292,6 +301,7 @@ class Config:
             farm_alert_station=env.get("FARM_ALERT_STATION", "true").lower() != "false",
             farm_alert_confirm=max(0, int(env.get("FARM_ALERT_CONFIRM", cls.farm_alert_confirm))),
             farm_alerts=env.get("FARM_ALERTS", ""),
+            peer_grants=env.get("PEER_GRANTS", ""),
             control_bind=env.get("CONTROL_BIND", cls.control_bind),
             totp_secret=totp_secret,
             requests_dir=Path(env.get("REQUESTS_DIR", str(cls.requests_dir))),
@@ -1046,6 +1056,8 @@ class Bot:
     _jobs_lock: threading.Lock = field(default_factory=threading.Lock)
     _logs_last: float = 0.0
     control: Any = None  # controlplane.ControlPlane when this node is in a fleet
+    _peer_guard: Any = None
+    _remote_last: dict = field(default_factory=dict)
     governance: Any = None  # governance.Governance: host actions through PDP and gateway
     assistant: Any = None  # assistant.Assistant: /ask (Autonomy M7)
     _governed: dict[str, str] = field(default_factory=dict)  # job kind -> action id
@@ -1739,6 +1751,7 @@ class Bot:
             log.error("fleet control plane is off: %s: %s", type(e).__name__, e)
             return
         self.control = plane
+        self.setup_peer_commands()
         log.info(
             "fleet control plane on: node %s, public key %s", plane.me, controlplane.public_b64(key)
         )
@@ -1842,6 +1855,201 @@ class Bot:
         except TelegramError as e:
             log.info("could not delete the code message: %s", e)
         return now
+
+    def verify_owner_code(self, code: str, now: float) -> bool:
+        """The owner's code for this node, single use per 30 s window (shared with /reboot and
+        /restart: a code spent on one cannot be spent on another). For peer requests."""
+        cfg = self.cfg
+        if not cfg.totp_secret or not cfg.requests_dir.is_dir() or not re.fullmatch(r"\d{6}", code):
+            return False
+        step = verify_totp(cfg.totp_secret, code, now, self._load_last_step())
+        if step is None:
+            return False
+        try:
+            self._save_last_step(step)
+        except OSError:
+            return False
+        return True
+
+    def _owner(self) -> int | None:
+        return min(self.cfg.allowed) if self.cfg.allowed else None
+
+    def _tell_owners(self, text: str) -> None:
+        """Off the caller's thread: the control plane holds a lock while it handles a message."""
+        threading.Thread(target=self.broadcast, args=([text],), daemon=True).start()
+
+    def setup_peer_commands(self) -> None:
+        """Accept signed requests from fleet peers (ADR-018). Off unless PEER_GRANTS names a peer
+        and the owner's TOTP is set up: nothing a peer sends can then run without the code."""
+        cfg = self.cfg
+        if self.control is None or not cfg.peer_grants or not cfg.totp_secret:
+            return
+        try:
+            import peercmd  # next to this file
+            from autonomy_core import peer as core_peer
+
+            grants = {
+                f"cell:{node}": core_peer.Grant(actions, services)
+                for node, (actions, services) in peercmd.parse_grants(cfg.peer_grants).items()
+            }
+            self._peer_guard = core_peer.RequestGuard(
+                me=f"cell:{self.control.me}",
+                keys=self.control.keyring,
+                grants=grants,
+                verify_code=self.verify_owner_code,
+                clock=self.clock,
+            )
+        except Exception as e:  # noqa: BLE001 - a broken grant list must not take the bot down
+            log.error("peer commands are off: %s: %s", type(e).__name__, e)
+            return
+        self.control.on_command = self._on_peer_command
+        log.info("peer commands on for: %s", ", ".join(sorted(g[4:] for g in grants)))
+
+    def _on_peer_command(self, peer: Any, request: dict) -> None:
+        """Called by the control plane for a ``command_request``. Raises Reject (the sender is
+        refused and the owner is told); otherwise starts the action through this node's own path."""
+        import peercmd
+        from autonomy_core.errors import Reject
+
+        guard = self._peer_guard
+        try:
+            action, service = guard.check(request)
+        except Reject as why:
+            self._tell_owners(
+                f"Refused a request from {peer.name}: {peercmd.describe(request)} ({why.reason})."
+            )
+            raise
+        self._tell_owners(
+            f"{peer.name} asked to {peercmd.describe(request)}, with your code. Doing it."
+        )
+        if action == "reboot_host":
+            self._peer_reboot(peer.name)
+        else:
+            self._peer_restart(peer.name, str(service))
+
+    def _peer_restart(self, who: str, service: str) -> None:
+        from autonomy_core.errors import Reject
+
+        cfg = self.cfg
+        known = [s for s in compose_services(cfg) if s not in HIDDEN_FROM_RESTART]
+        if service not in known:
+            raise Reject("unknown service", service)
+        if self._job_busy("restart"):
+            raise Reject("busy", "a restart is already in progress")
+        owner = self._owner()
+        if owner is None:
+            raise Reject("no owner")
+        fake = {"message_id": None, "chat": {"type": "private"}}
+        if self.governance is not None:
+            if not self._govern(owner, owner, fake, "host.restart_service", service, "restart"):
+                raise Reject("governance refused")
+        elif not self._submit_job("restart", {"service": service}):
+            raise Reject("busy", "a restart is already in progress")
+        log.warning("restart of %s requested by peer %s with the owner's code", service, who)
+        self._start_job_watch("restart", owner, cfg.restart_max_wait, self._deliver_restart)
+
+    def _peer_reboot(self, who: str) -> None:
+        from autonomy_core.errors import Reject
+
+        cfg = self.cfg
+        up = self.uptime()
+        if up is None or up < cfg.reboot_min_uptime:
+            raise Reject("uptime too short", "protects against reboot loops")
+        if (cfg.requests_dir / "reboot").exists():
+            raise Reject("busy", "a reboot is already pending")
+        owner = self._owner()
+        if owner is None:
+            raise Reject("no owner")
+        marker = cfg.requests_dir / "reboot-notify"
+        marker.write_text(json.dumps({"chat_id": owner, "at": self.clock()}))
+        fake = {"message_id": None, "chat": {"type": "private"}}
+        if self.governance is not None:
+            if not self._govern(owner, owner, fake, "host.reboot", "host", "reboot"):
+                marker.unlink(missing_ok=True)
+                raise Reject("governance refused")
+        else:
+            self._create_request("reboot")
+        log.warning("reboot requested by peer %s with the owner's code", who)
+        timer = threading.Timer(cfg.reboot_wait, self._reboot_not_done, args=(owner,))
+        timer.daemon = True
+        self._reboot_timer = timer
+        timer.start()
+
+    def cmd_remote(self, chat_id: int, user_id: int, message: dict, args: list[str]) -> None:
+        """/remote <node> restart <service> <code> | /remote <node> reboot <code>: ask a fleet
+        peer. The code is the owner's code for THAT node; it is checked there, not here."""
+        from autonomy_core import peer as core_peer
+
+        plane = self.control
+        usage = "Usage: /remote <node> restart <service> <code>  or  /remote <node> reboot <code>"
+        if plane is None:
+            self.reply(chat_id, "This node is not in a fleet.")
+            return
+        if (message.get("chat") or {}).get("type") != "private":
+            self.reply(chat_id, "Use /remote in a private chat with the bot, not in a group.")
+            return
+        if len(args) < 3 or args[1] not in ("restart", "reboot"):
+            self.reply(chat_id, usage)
+            return
+        node, action = args[0].lower(), args[1]
+        peer = plane.peers.get(node)
+        if peer is None:
+            self.reply(
+                chat_id, f"Unknown node '{node}'. Nodes: {', '.join(sorted(plane.peers)) or 'none'}"
+            )
+            return
+        if action == "restart" and len(args) != 4:
+            self.reply(chat_id, usage)
+            return
+        if action == "reboot" and len(args) != 3:
+            self.reply(chat_id, usage)
+            return
+        code = args[-1]
+        service = args[2].lower() if action == "restart" else None
+        if not re.fullmatch(r"\d{6}", code):
+            self.reply(chat_id, f"The code is 6 digits. {usage}")
+            return
+        now = self.clock()
+        if now - float(message.get("date") or 0) > TOTP_FILE_AGE:
+            self.reply(chat_id, "That message is too old. Send it again with a fresh code.")
+            return
+        if now - self._remote_last.get(user_id, 0.0) < 10:
+            self.reply(chat_id, "One moment: wait a few seconds between /remote commands.")
+            return
+        self._remote_last[user_id] = now
+        request = core_peer.make_request(
+            f"cell:{plane.me}",
+            f"cell:{node}",
+            "restart_service" if action == "restart" else "reboot_host",
+            plane.key,
+            code,
+            service,
+            now=now,
+        )
+        try:
+            self.api.call(
+                "deleteMessage", {"chat_id": chat_id, "message_id": message.get("message_id")}
+            )
+        except TelegramError as e:
+            log.info("could not delete the code message: %s", e)
+        path = plane.send_command(node, request)
+        log.warning(
+            "remote %s on %s requested by user id %s: %s",
+            action,
+            node,
+            user_id,
+            path or "not delivered",
+        )
+        what = "reboot" if action == "reboot" else f"restart of {service}"
+        if path is None:
+            self.reply(
+                chat_id,
+                f"Not delivered: {node} did not accept the {what}. It may be unreachable, the "
+                f"code may be wrong or used, or the request is outside what {node} allows. "
+                f"{node}'s own bot tells its owner what it refused.",
+            )
+        else:
+            self.reply(chat_id, f"Sent to {node} ({path}). {node}'s bot will report the result.")
 
     def _create_request(self, name: str) -> None:
         fd = os.open(self.cfg.requests_dir / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -2381,6 +2589,8 @@ class Bot:
             self.cmd_restart(chat_id, user_id, message, args)
         elif command == "/logs":
             self.cmd_logs(chat_id, args)
+        elif command == "/remote":
+            self.cmd_remote(chat_id, user_id, message, args)
         else:
             self.reply(chat_id, self.help_text())
 

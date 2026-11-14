@@ -351,7 +351,12 @@ class ControlPlane:
         self.servers: list[ThreadingHTTPServer] = []
         self.stop = threading.Event()
         self.last_path_check = 0.0
-        self.handled: dict[str, Callable[[Peer, dict], None]] = {"heartbeat": self._on_heartbeat}
+        self.handled: dict[str, Callable[[Peer, dict], None]] = {
+            "heartbeat": self._on_heartbeat,
+            "command_request": self._on_command_request,
+        }
+        # set by the bot (peer commands, ADR-018); raises Reject to refuse a request
+        self.on_command: Callable[[Peer, dict], None] | None = None
         self._log_times: dict[tuple, float] = {}
 
     # ------------------------------------------------------------ receiving
@@ -575,6 +580,24 @@ class ControlPlane:
         if now - self._log_times.get(key, 0.0) >= 60:
             self._log_times[key] = now
             log.warning("control: rejected a message from %s: %s", who, reason)
+
+    def _on_command_request(self, peer: Peer, message: dict) -> None:
+        """A request to restart a service or reboot (a signed ``peer-request`` in ``request``).
+        Receiving is not doing: the bot's guard checks signature, grant and the owner's code."""
+        request = message["body"].get("request")
+        if not isinstance(request, dict):
+            raise Reject("malformed")
+        if self.on_command is None:
+            raise Reject("peer commands are off")
+        self.on_command(peer, request)
+
+    def send_command(self, node: str, request: dict, ttl: float = 120.0) -> str | None:
+        """Send a signed ``peer-request`` to ``node`` once (no retries: its code expires). Returns the
+        path that answered with a valid ack, or None."""
+        peer = self.peers.get(node)
+        if peer is None:
+            return None
+        return self.send(peer, self.message_for(peer, "command_request", {"request": request}, ttl))
 
     def _on_heartbeat(self, peer: Peer, message: dict) -> None:
         now = self.clock()

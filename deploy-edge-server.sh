@@ -1033,7 +1033,7 @@ prepare_telegram_bot() {
         return 0
     fi
     # Optional authenticator secret for /reboot (base32; spaces, dashes and case ignored)
-    totp_secret=$(sed -n 's/^REBOOT_TOTP_SECRET=//p' "$cred" | tail -n 1 | tr -d '\r[:space:]=-' | tr '[:lower:]' '[:upper:]')
+    totp_secret=$(sed -n 's/^\(OWNER\|REBOOT\)_TOTP_SECRET=//p' "$cred" | tail -n 1 | tr -d '\r[:space:]=-' | tr '[:lower:]' '[:upper:]')
     if [[ -n "$totp_secret" && ! "$totp_secret" =~ ^[A-Z2-7]{16,}$ ]]; then
         warn "$cred: REBOOT_TOTP_SECRET must be base32 (A-Z, 2-7), 16+ characters - skipping the Telegram bot. Make one with: python3 telegram-bot/bot.py --totp-setup"
         return 0
@@ -1051,7 +1051,7 @@ prepare_telegram_bot() {
     install_if_changed "$script_dir/telegram-bot/bot.py" "$APP_DIR/telegram-bot/bot.py" 644
     install_if_changed "$script_dir/telegram-bot/Dockerfile" "$APP_DIR/telegram-bot/Dockerfile" 644
     local mod
-    for mod in controlplane.py governance.py assistant.py farm.py; do
+    for mod in controlplane.py governance.py assistant.py farm.py peercmd.py; do
         if [[ -f "$script_dir/telegram-bot/$mod" ]]; then
             install_if_changed "$script_dir/telegram-bot/$mod" "$APP_DIR/telegram-bot/$mod" 644
         fi
