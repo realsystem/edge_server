@@ -1,0 +1,36 @@
+name: Autonomy node
+version: "0.1.0"
+slug: autonomy_node
+description: Telegram bot for this Home Assistant node (status, restart and reboot with a code, fleet peers)
+url: https://github.com/realsystem/edge_server
+arch:
+  - aarch64
+  - amd64
+init: false
+startup: services
+boot: auto
+# Home Assistant Core's API (a /status check) and the Supervisor (restart, logs, reboot).
+# hassio_role "manager" is meant to allow add-on and host control without the rest; if the
+# Supervisor refuses /host/reboot on your install, "admin" is the next step up (see DOCS.md).
+homeassistant_api: true
+hassio_api: true
+hassio_role: manager
+map:
+  - share:ro
+options:
+  telegram_bot_token: ""
+  allowed_ids: ""
+  owner_totp_secret: ""
+  node: ""
+  restart_addons: []
+  peer_grants: ""
+  fleet_file: /share/autonomy/fleet.yaml
+schema:
+  telegram_bot_token: password
+  allowed_ids: str
+  owner_totp_secret: password
+  node: str?
+  restart_addons:
+    - str
+  peer_grants: str?
+  fleet_file: str?

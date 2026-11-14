@@ -292,6 +292,29 @@ jobs:
           docker run --rm -v "$PWD/telegram-bot:/app:ro" -w /app edge-telegram-bot:fleet \
             python3 -c "import controlplane, autonomy_core; print('autonomy-core', autonomy_core.__version__)"
 
+  ha-addon:
+    name: Home Assistant add-on image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      # The ha-addon packaging (ha-addon/, docs/design/ha-node.md): the image builds, the pinned
+      # autonomy-core and the bot's modules import in it, and the setup script turns options into a
+      # bot environment. amd64 only here; the same Dockerfile builds for aarch64 on the Pi.
+      - name: Build the add-on image
+        run: docker build -q -f ha-addon/Dockerfile -t edge-ha-addon .
+
+      - name: The image starts from options
+        run: |
+          mkdir -p /tmp/d
+          printf '{"telegram_bot_token":"123456789:%s","allowed_ids":"1001","owner_totp_secret":"","node":"","restart_addons":["core_mosquitto"]}' \
+            "$(printf 'A%.0s' {1..35})" > /tmp/o.json
+          docker run --rm -v /tmp/o.json:/tmp/o.json:ro -v /tmp/d:/data --entrypoint python3 edge-ha-addon \
+            /app/ha-addon/addon-setup.py /tmp/o.json /data
+          docker run --rm -v /tmp/d:/data --entrypoint bash edge-ha-addon -c \
+            '. /data/app/env && test -z "$FRIGATE_URL" && cd /app/telegram-bot && python3 -c "import bot, controlplane, peercmd; from autonomy_core import peer; print(\"imports ok\")"'
+
   integration-test:
     name: Integration test (Docker)
     runs-on: ubuntu-latest

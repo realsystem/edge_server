@@ -23,7 +23,8 @@ requests to api.telegram.org: no port is opened.
 Environment:
   TELEGRAM_BOT_TOKEN    from @BotFather (required)
   TELEGRAM_ALLOWED_IDS  comma-separated Telegram user ids
-  FRIGATE_URL           default http://frigate:5000
+  FRIGATE_URL           default http://frigate:5000; empty = this node has no Frigate (a Home
+                        Assistant node): no Frigate lines in /status, no Frigate alerts
   EDGE_SERVER_DIR       default /opt/edge-server (the stack directory)
   STORAGE_PATH          default /media/frigate (recordings, for the disk check)
   STORAGE_LABEL         host path shown in /status for that disk, default /mnt/storage
@@ -818,7 +819,9 @@ def disabled_cameras(cfg: Config) -> set[str]:
 
 
 def frigate_status(cfg: Config) -> tuple[list[str], list[str]]:
-    """Lines about Frigate and a list of problems."""
+    """Lines about Frigate and a list of problems. FRIGATE_URL empty = this node has no Frigate."""
+    if not cfg.frigate_url:
+        return [], []
     try:
         version = http_get(f"{cfg.frigate_url}/api/version").decode().strip()
         stats = json.loads(http_get(f"{cfg.frigate_url}/api/stats"))
@@ -1224,6 +1227,8 @@ class Bot:
 
     def watch_frigate(self, now: float) -> list[str]:
         cfg = self.cfg
+        if not cfg.frigate_url:
+            return []
         try:
             stats = json.loads(http_get(f"{cfg.frigate_url}/api/stats"))
         except (OSError, ValueError, urllib.error.URLError):
@@ -1624,6 +1629,8 @@ class Bot:
     def frigate_started(self) -> float | None:
         """When Frigate's process started, from Frigate's own API (independent of the host
         helper that restarted it)."""
+        if not self.cfg.frigate_url:
+            return None
         try:
             stats = json.loads(http_get(f"{self.cfg.frigate_url}/api/stats"))
             up = float((stats.get("service") or {})["uptime"])

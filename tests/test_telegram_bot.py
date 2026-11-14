@@ -2160,3 +2160,23 @@ class TestFleetCommand:
         b = self.fleet_bot(telegram, frigate, host, fleet_files)
         b.setup_control()
         assert b.control is None and "fleet control plane is off" in caplog.text
+
+
+class TestNodeWithoutFrigate:
+    """A Home Assistant node (ha-addon) has no Frigate: FRIGATE_URL= turns every Frigate part off."""
+
+    def test_status_has_no_frigate_line_and_no_problem(self, telegram, host):
+        b = make_bot(telegram, None, host)
+        b.cfg.frigate_url = ""
+        assert bot.frigate_status(b.cfg) == ([], [])
+        assert "Frigate" not in bot.build_status(b.cfg, b.sleep)
+
+    def test_the_watcher_and_start_time_do_nothing(self, telegram, host):
+        b = make_bot(telegram, None, host)
+        b.cfg.frigate_url = ""
+        assert b.watch_frigate(T0) == []
+        assert b.frigate_started() is None
+
+    def test_an_empty_url_is_read_from_the_environment(self):
+        env = {"TELEGRAM_BOT_TOKEN": TOKEN, "FRIGATE_URL": ""}
+        assert bot.Config.from_env(env).frigate_url == ""
