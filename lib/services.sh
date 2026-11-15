@@ -323,7 +323,7 @@ EOF
 start_services() {
     info "Starting application stack..."
 
-    cd "$APP_DIR"
+    cd "$APP_DIR" || fatal "Cannot enter $APP_DIR"
 
     # Pull images (the Telegram bot image is built locally, there is nothing to pull)
     local -a pullable

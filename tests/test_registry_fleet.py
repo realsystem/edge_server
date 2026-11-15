@@ -357,7 +357,7 @@ class TestFleetTool:
         )  # the saved copy
 
     def test_deploy_keeps_the_signature_with_the_saved_file(self):
-        text = (REPO / "deploy-edge-server.sh").read_text()
+        text = (REPO / "lib" / "fleet.sh").read_text()
         assert (
             'sig_src="${FLEET_FILE%.*}.sig.json" sig_dst="${FLEET_SAVED_FILE%.*}.sig.json"' in text
         )
