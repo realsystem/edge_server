@@ -12,6 +12,7 @@ preflight_checks() {
     # Ubuntu or Debian (lib/os.sh); anything else stops here, before any change
     os_require
     success "OS: $OS_PRETTY_NAME"
+    check_platform # OpenMediaVault: what is left to OMV, and what must exist already
 
     # Check internet connectivity
     info "Testing internet connectivity..."
@@ -40,8 +41,10 @@ preflight_checks() {
     # Laptop or server: decides the power settings and the power loss monitor (lib/host.sh)
     resolve_host_type
 
-    # Prompt for external drive UUID if not set
-    if [[ -z "$EXTERNAL_DRIVE_UUID" ]] && [[ "$BATCH_MODE" != "true" ]]; then
+    # Where the recordings go: a drive to mount, or on OpenMediaVault a folder on its file systems
+    if platform_is_omv; then
+        choose_omv_storage
+    elif [[ -z "$EXTERNAL_DRIVE_UUID" ]] && [[ "$BATCH_MODE" != "true" ]]; then
         info "Available block devices:"
         lsblk -o NAME,UUID,SIZE,FSTYPE,MOUNTPOINT
         echo

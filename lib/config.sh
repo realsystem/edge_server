@@ -11,6 +11,10 @@ TAILSCALE_AUTH_KEY="${TAILSCALE_AUTH_KEY:-}"
 # Leave empty to be prompted during installation
 EXTERNAL_DRIVE_UUID="${EXTERNAL_DRIVE_UUID:-}"
 
+# Files the deploy edits on the host (variables so tests can point them elsewhere)
+FSTAB_FILE="${FSTAB_FILE:-/etc/fstab}"
+APT_CONF_DIR="${APT_CONF_DIR:-/etc/apt/apt.conf.d}"
+
 # Storage mount point
 STORAGE_MOUNT="${EDGE_STORAGE_DIR:-/mnt/storage}"
 
@@ -110,6 +114,11 @@ BATCH_MODE="${BATCH_MODE:-false}"
 
 # Frigate config: kept on re-deploy unless this is "true" (old one is backed up)
 FRIGATE_CONFIG_OVERWRITE="${FRIGATE_CONFIG_OVERWRITE:-false}"
+
+# Platform: "omv" (OpenMediaVault: its firewall, network, time zone, drive mounts and
+# update settings are left to OMV, see lib/platform.sh), "generic" (plain Ubuntu or
+# Debian), or empty to detect. "generic" on OMV deploys as plain Debian anyway.
+HOST_PLATFORM="${HOST_PLATFORM:-}"
 
 # What kind of machine this is: "laptop" or "server" (see lib/host.sh). Empty asks on
 # a manual run, with the type detected from the hardware as the answer offered; batch

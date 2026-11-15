@@ -1,35 +1,36 @@
 # shellcheck shell=bash
 # System packages, Docker Engine and Tailscale. What differs between Ubuntu and Debian
-# comes from lib/os/*.sh.
+# comes from lib/os/*.sh; what OpenMediaVault manages itself from lib/platform.sh.
 
 install_packages() {
-    local -a packages
+    local -a packages=(
+        ca-certificates curl gnupg lsb-release jq net-tools git smartmontools
+        htop iotop ncdu vim tmux
+    )
+    local -a extra
     os_require
+    # what only this distribution needs (lib/os/*.sh)
+    IFS=" " read -ra extra <<< "$(os_extra_packages)"
+    packages+=(${extra[@]+"${extra[@]}"})
+    # OpenMediaVault has its own firewall and Update Management (lib/platform.sh)
+    platform_is_omv || packages+=(unattended-upgrades ufw)
+
     info "Updating package lists..."
     apt-get update -qq
 
     info "Installing core packages..."
-    # the common list, plus what only this distribution needs (lib/os/*.sh)
-    IFS=" " read -ra packages <<< "$(os_extra_packages)"
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-        "${packages[@]}" \
-        ca-certificates \
-        curl \
-        gnupg \
-        lsb-release \
-        jq \
-        net-tools \
-        git \
-        unattended-upgrades \
-        smartmontools \
-        ufw \
-        htop \
-        iotop \
-        ncdu \
-        vim \
-        tmux
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${packages[@]}"
 
-    # Configure unattended-upgrades
+    if platform_is_omv; then
+        info "OpenMediaVault: automatic updates left to OMV (System > Update Management)"
+    else
+        configure_unattended_upgrades
+    fi
+
+    success "Core packages installed"
+}
+
+configure_unattended_upgrades() {
     info "Configuring unattended-upgrades..."
     {
         os_unattended_origins
@@ -39,9 +40,9 @@ Unattended-Upgrade::Remove-Unused-Dependencies "true";
 Unattended-Upgrade::Automatic-Reboot "false";
 Unattended-Upgrade::SyslogEnable "true";
 EOF
-    } > /etc/apt/apt.conf.d/50unattended-upgrades
+    } > "$APT_CONF_DIR/50unattended-upgrades"
 
-    cat > /etc/apt/apt.conf.d/20auto-upgrades << 'EOF'
+    cat > "$APT_CONF_DIR/20auto-upgrades" << 'EOF'
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 APT::Periodic::AutocleanInterval "7";
@@ -49,8 +50,6 @@ EOF
 
     systemctl enable unattended-upgrades
     systemctl start unattended-upgrades
-
-    success "Core packages installed"
 }
 
 install_docker() {

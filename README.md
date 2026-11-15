@@ -161,6 +161,27 @@ offering what it detects from the hardware (chassis type, battery):
 `HOST_TYPE=laptop` or `HOST_TYPE=server` answers it in advance; batch runs take the
 detected type. The answer is saved, so `--auto` keeps it.
 
+### OpenMediaVault
+
+OpenMediaVault (OMV) keeps its network, firewall, time zone, drive mounts and update policy
+in its own database and writes the files behind them itself, so a change made from outside
+is lost the next time a setting is saved in its web UI (or leaves the UI out of step with the
+machine). When the deploy finds OMV (`/etc/openmediavault/config.xml`) it adds only its own
+things (the Docker stack, Tailscale, Frigate, the bot, the helper timers) and leaves these to OMV:
+
+| Left to OMV | What to do instead |
+|---|---|
+| Firewall: no UFW, and no rule in Docker's `DOCKER-USER` chain (that rule would also cut off your other containers) | Frigate's port 5000 has no login. If the NAS can be reached from outside your LAN, restrict it in OMV (Network > Firewall) |
+| Drive mounts and `/etc/fstab` (`EXTERNAL_DRIVE_UUID` is ignored) | The deploy asks for a folder on one of OMV's file systems (`/srv/dev-disk-by-uuid-.../frigate`), or set `EDGE_STORAGE_DIR` |
+| System time zone | Set it in OMV; the containers still use `TIMEZONE` |
+| Automatic updates (`unattended-upgrades` is not installed or configured) | OMV's Update Management |
+| Static IP and drive formatting in `initial-setup.sh` | OMV's Network > Interfaces and Storage pages |
+| Installing Docker | Install it with omv-extras first; the deploy stops before changing anything if Docker is missing (a second Docker apt source breaks `apt update`) |
+
+`HOST_PLATFORM=generic` deploys as plain Debian even on OMV; `HOST_PLATFORM=omv` forces the
+OMV rules on a machine that is not detected. The setting is saved for `--auto`. The code is in
+`lib/platform.sh`.
+
 ### Cameras (automatic discovery)
 
 ONVIF cameras on the same network are found and added to Frigate

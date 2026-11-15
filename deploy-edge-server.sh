@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #===============================================================================
 # Edge Server Deployment Script
-# Idempotent provisioning for Ubuntu Server and Debian (OpenMediaVault included)
+# Idempotent provisioning for Ubuntu Server, Debian and OpenMediaVault
 #
 # Usage: sudo ./deploy-edge-server.sh           deploy or update by hand
 #        sudo ./deploy-edge-server.sh --auto    unattended update, see lib/redeploy.sh
@@ -16,6 +16,7 @@
 #   fleet.sh settings.sh config.sh   where settings come from, and their defaults
 #   common.sh                        logging and small helpers
 #   os.sh os/ubuntu.sh os/debian.sh  what differs between distributions
+#   platform.sh                      OpenMediaVault: what is left to OMV
 #   host.sh                          laptop or server, and the power settings for it
 #   preflight.sh packages.sh network.sh storage.sh
 #   stack.sh control-plane.sh telegram.sh services.sh plugins.sh redeploy.sh
@@ -54,7 +55,7 @@ source "$EDGE_LIB_DIR/config.sh"
 #-------------------------------------------------------------------------------
 # STEPS (functions only: loading them changes nothing)
 #-------------------------------------------------------------------------------
-for _lib in common os host preflight packages network storage \
+for _lib in common os platform host preflight packages network storage \
     control-plane telegram stack services plugins redeploy; do
     # shellcheck source=/dev/null
     source "$EDGE_LIB_DIR/$_lib.sh"
@@ -112,7 +113,8 @@ run_deploy() {
     fi
 
     preflight_checks
-    resolve_local_subnet # before anything changes: fail early if the network is unknown
+    # before anything changes: fail early if the network is unknown (only the firewall needs it)
+    platform_is_omv || resolve_local_subnet
     configure_system
     install_packages
     install_docker

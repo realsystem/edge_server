@@ -3,24 +3,10 @@
 # (firewall for Docker ports, image cleanup, SMART, snapshots); starting the stack;
 # and the summary at the end of a deploy.
 
-# Host-side helpers, each a small script plus a systemd unit:
-#  - edge-docker-firewall: Docker publishes ports around UFW, so the "allow from
-#    the local network" rules do not apply to them. This puts the same rule in
-#    Docker's own DOCKER-USER chain.
-#  - edge-docker-clean (weekly): remove images nothing uses, so updates do not
-#    slowly fill the disk.
-#  - edge-smart (every 6 h): disk health for the Telegram bot (it cannot read
-#    SMART from inside its locked-down container).
-#  - edge-snapshot (every 10 min): firewall rules, open ports, SSH settings and
-#    service state for /diag, for the same reason.
-install_host_helpers() {
-    local dir="$SYSTEMD_DIR" script_dir containers
-    script_dir="$EDGE_SCRIPT_DIR"
-    containers=$(stack_containers)
-    mkdir -p "$dir" "$APP_DIR"
-    resolve_local_subnet
-    info "Installing the Docker firewall, image cleanup and disk health timers..."
-
+# The Docker rule: only the local network and Tailscale reach Docker's published ports.
+# Not on OpenMediaVault: the rule covers every container on the host, not just this stack's.
+install_docker_firewall_helper() {
+    local dir="$SYSTEMD_DIR"
     cat > "$APP_DIR/docker-firewall.sh" << 'SCRIPT'
 #!/usr/bin/env bash
 # Only the local network and Tailscale may reach the ports Docker publishes
@@ -58,6 +44,32 @@ ExecStart=$APP_DIR/docker-firewall.sh
 [Install]
 WantedBy=multi-user.target
 UNIT
+}
+
+# Host-side helpers, each a small script plus a systemd unit:
+#  - edge-docker-firewall: Docker publishes ports around UFW, so the "allow from
+#    the local network" rules do not apply to them. This puts the same rule in
+#    Docker's own DOCKER-USER chain.
+#  - edge-docker-clean (weekly): remove images nothing uses, so updates do not
+#    slowly fill the disk.
+#  - edge-smart (every 6 h): disk health for the Telegram bot (it cannot read
+#    SMART from inside its locked-down container).
+#  - edge-snapshot (every 10 min): firewall rules, open ports, SSH settings and
+#    service state for /diag, for the same reason.
+install_host_helpers() {
+    local dir="$SYSTEMD_DIR" script_dir containers
+    script_dir="$EDGE_SCRIPT_DIR"
+    containers=$(stack_containers)
+    mkdir -p "$dir" "$APP_DIR"
+    local firewall=true
+    platform_is_omv && firewall=false
+    if [[ "$firewall" == "true" ]]; then
+        resolve_local_subnet
+        info "Installing the Docker firewall, image cleanup and disk health timers..."
+        install_docker_firewall_helper
+    else
+        info "Installing the image cleanup and disk health timers (no Docker firewall rule on OpenMediaVault)..."
+    fi
 
     cat > "$APP_DIR/docker-clean.sh" << 'SCRIPT'
 #!/usr/bin/env bash
@@ -172,8 +184,10 @@ UNIT
     systemctl daemon-reload
     # restart, not just "enable --now": the unit stays active after it has run once, so
     # without this a changed LOCAL_SUBNET would not reach Docker's chain until a reboot
-    systemctl enable edge-docker-firewall.service
-    systemctl restart edge-docker-firewall.service
+    if [[ "$firewall" == "true" ]]; then
+        systemctl enable edge-docker-firewall.service
+        systemctl restart edge-docker-firewall.service
+    fi
     systemctl enable --now edge-docker-clean.timer
     if [[ "$smart" == "true" ]]; then
         chmod 644 "$dir/edge-smart.service" "$dir/edge-smart.timer"
@@ -199,13 +213,15 @@ stack_containers() {
 
 create_systemd_service() {
     info "Creating systemd service for auto-start..."
+    local firewall_unit=" edge-docker-firewall.service"
+    platform_is_omv && firewall_unit=""
 
     cat > /etc/systemd/system/edge-server.service << EOF
 [Unit]
 Description=Edge Server Docker Compose Stack
 Documentation=https://docs.frigate.video
-After=network-online.target docker.service edge-docker-firewall.service
-Wants=network-online.target edge-docker-firewall.service
+After=network-online.target docker.service${firewall_unit}
+Wants=network-online.target${firewall_unit}
 Requires=docker.service
 
 [Service]
@@ -406,6 +422,12 @@ show_summary() {
         echo "  - View logs:       journalctl -u victron-shunt -f"
         echo "  - MQTT topics:     victron/smartshunt/voltage, current, soc, power"
         echo "  - Config:          /etc/victron-shunt/config.yaml"
+    fi
+    if platform_is_omv; then
+        echo
+        echo "OpenMediaVault: left to OMV, not changed by this deploy:"
+        echo "  - firewall (no UFW, no Docker rule): Frigate's port 5000 has no login; restrict it in OMV if needed"
+        echo "  - network, system time zone, drive mounts, automatic updates"
     fi
     echo
     echo "Next Steps:"

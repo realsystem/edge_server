@@ -4,7 +4,7 @@ Automated provisioning for an Ubuntu- or Debian-based edge server running Frigat
 
 ## Prerequisites
 
-- Ubuntu Server 22.04+ or Debian 12+ (OpenMediaVault included; see the README on laptop or server)
+- Ubuntu Server 22.04+ or Debian 12+ (OpenMediaVault included: see the README on laptop or server, and on what is left to OMV)
 - Minimum 4GB RAM (8GB recommended for Frigate)
 - External USB drive for video storage (recommended)
 - Network connectivity

@@ -92,8 +92,12 @@ resolve_host_type() {
 configure_system() {
     info "Configuring system settings..."
 
-    # Set timezone
-    timedatectl set-timezone "$TIMEZONE" || true
+    # Set timezone (OpenMediaVault keeps its own and would change it back)
+    if platform_is_omv; then
+        info "OpenMediaVault: system time zone left to OMV (the containers use $TIMEZONE)"
+    else
+        timedatectl set-timezone "$TIMEZONE" || true
+    fi
 
     if [[ "$HOST_TYPE" == "laptop" ]]; then
         configure_laptop_power

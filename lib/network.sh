@@ -53,6 +53,11 @@ resolve_local_subnet() {
 }
 
 configure_firewall() {
+    if platform_is_omv; then
+        warn "OpenMediaVault: UFW is not set up (it can conflict with OMV's firewall settings)"
+        warn "Frigate's web UI (port 5000) has no login: if this machine can be reached from outside your LAN, restrict it in OMV (Network > Firewall)"
+        return 0
+    fi
     resolve_local_subnet
     info "Configuring UFW firewall..."
 
