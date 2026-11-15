@@ -2,7 +2,7 @@
 
 [![Test](https://github.com/realsystem/edge_server/actions/workflows/test.yml/badge.svg)](https://github.com/realsystem/edge_server/actions/workflows/test.yml)
 
-Headless Ubuntu edge server for Frigate NVR and Tailscale, with optional Home Assistant and
+Headless Ubuntu or Debian edge server for Frigate NVR and Tailscale, with optional Home Assistant and
 Mosquitto MQTT.
 
 **Planned:** a fleet of nodes at one or more sites that watch each other, fix known problems
@@ -142,6 +142,46 @@ broker with `INSTALL_HOMEASSISTANT=true` / `INSTALL_MQTT=true` (environment, or
 their containers but keeps `ha-config/` and `mosquitto/`, so they can be
 switched back on later.
 
+### Ubuntu or Debian, laptop or server
+
+The deploy script runs on **Ubuntu Server 22.04+** and **Debian 12+** (OpenMediaVault
+is Debian underneath). It stops on anything else before changing the machine. What
+differs between the two (Docker's apt repository, the unattended-upgrades origins, a
+package or two) lives in `lib/os/ubuntu.sh` and `lib/os/debian.sh`.
+
+On a manual run it first asks whether the machine is a **laptop** or a **server**,
+offering what it detects from the hardware (chassis type, battery):
+
+| | laptop | server (NAS, mini PC, VM) |
+|---|---|---|
+| Lid close | ignored (keeps running) | left as it is |
+| Sleep, suspend, hibernate | switched off | left as they are |
+| Power loss monitor (NUT) | offered if there is a battery | not offered (`NUT_POWER_INSTALL=true` forces it) |
+
+`HOST_TYPE=laptop` or `HOST_TYPE=server` answers it in advance; batch runs take the
+detected type. The answer is saved, so `--auto` keeps it.
+
+### OpenMediaVault
+
+OpenMediaVault (OMV) keeps its network, firewall, time zone, drive mounts and update policy
+in its own database and writes the files behind them itself, so a change made from outside
+is lost the next time a setting is saved in its web UI (or leaves the UI out of step with the
+machine). When the deploy finds OMV (`/etc/openmediavault/config.xml`) it adds only its own
+things (the Docker stack, Tailscale, Frigate, the bot, the helper timers) and leaves these to OMV:
+
+| Left to OMV | What to do instead |
+|---|---|
+| Firewall: no UFW, and no rule in Docker's `DOCKER-USER` chain (that rule would also cut off your other containers) | Frigate's port 5000 has no login. If the NAS can be reached from outside your LAN, restrict it in OMV (Network > Firewall) |
+| Drive mounts and `/etc/fstab` (`EXTERNAL_DRIVE_UUID` is ignored) | The deploy asks for a folder on one of OMV's file systems (`/srv/dev-disk-by-uuid-.../frigate`), or set `EDGE_STORAGE_DIR` |
+| System time zone | Set it in OMV; the containers still use `TIMEZONE` |
+| Automatic updates (`unattended-upgrades` is not installed or configured) | OMV's Update Management |
+| Static IP and drive formatting in `initial-setup.sh` | OMV's Network > Interfaces and Storage pages |
+| Installing Docker | Install it with omv-extras first; the deploy stops before changing anything if Docker is missing (a second Docker apt source breaks `apt update`) |
+
+`HOST_PLATFORM=generic` deploys as plain Debian even on OMV; `HOST_PLATFORM=omv` forces the
+OMV rules on a machine that is not detected. The setting is saved for `--auto`. The code is in
+`lib/platform.sh`.
+
 ### Cameras (automatic discovery)
 
 ONVIF cameras on the same network are found and added to Frigate
@@ -198,7 +238,7 @@ A small bot that runs next to Frigate and answers you in a Telegram chat:
 | `/status` | One screen: load, CPU, memory, disk (free space, plus a separate `storage /mnt/storage` line with used space), temperature, AC/battery, Frigate detector speed and every camera's FPS, with a list of problems on top; with `HA_HOST` set, two more lines for Home Assistant (ping and HTTP, see below) |
 | `/diag` | The full diagnostics report from `collect-diagnostics.sh`, sent as a file (about 15 s): hardware, load, Docker, Frigate, config, and the host's **firewall rules, open ports**, SSH settings and service state |
 | `/testalert [percent]` | Sends you a simulated low-disk alert (default 5% free) plus the real disk state, so you can check delivery without filling a disk |
-| `/reboot <code>` | Reboots the laptop; needs a code from your authenticator app (off until set up, see below) |
+| `/reboot <code>` | Reboots the server; needs a code from your authenticator app (off until set up, see below) |
 | `/redeploy <code>` | Deploys the newest **release tag** (`vX.Y`) from GitHub, same authenticator code (see below) |
 | `/restart <service> <code>` | Restarts one container (`frigate`, `mosquitto`, ...) without rebooting; same authenticator code (see below) |
 | `/logs <service> [lines]` | The last log lines of a container (default 100, up to 1000), passwords removed; a message, or a file when long (see below) |
@@ -318,7 +358,7 @@ Safeguards:
 - Only listed user ids, only in a private chat, and the message must be under a minute old.
 - A code works once (replays are refused, even after a restart) and drifts by at most
   one 30-second step. Three wrong codes lock that user out for 15 minutes.
-- No reboot loops: a laptop that booted less than 10 minutes ago is not rebooted, and
+- No reboot loops: a server that booted less than 10 minutes ago is not rebooted, and
   Telegram re-delivering an old command does nothing because of the age and replay checks.
 - The bot container still has no power over the host. It can only create a file in
   `bot-requests/` (a root-only folder); a systemd unit (`edge-reboot.path`) on the host
@@ -419,7 +459,7 @@ Both need the authenticator set up, because they use the same host helper as `/r
 
 Keep the secret like a password. Anyone who has it can generate valid codes (but
 still needs to be one of the listed Telegram users). Test it once while you are
-sitting at the laptop.
+sitting at the server.
 
 ### Built for unattended operation
 
@@ -709,9 +749,9 @@ results appear only in `/audit`.
 **Orchestrator (runs on laptop):**
 - `bootstrap.sh` — Python deployment orchestrator with progress display, rollback support
 
-**Target scripts (run on Ubuntu server via SSH):**
+**Target scripts (run on the Ubuntu or Debian server via SSH):**
 - `initial-setup.sh` — System setup (static IP, Docker, storage)
-- `deploy-edge-server.sh` — Deploy the stack (Frigate, Tailscale, firewall, Telegram bot; optional Home Assistant, MQTT)
+- `deploy-edge-server.sh` — Deploy the stack (Frigate, Tailscale, firewall, Telegram bot; optional Home Assistant, MQTT). An outline that runs the steps in `lib/` (one file per area; `lib/os/` holds what differs between Ubuntu and Debian)
 - `tools/fleet.py` — reads and checks the optional `fleet.yaml` (or signed registry) for the deploy script (`examples/fleet.*.yaml`)
 - `telegram-bot/governance.py` — host actions through the Autonomy policy check and action gateway, with an audit log (`/audit`)
 - `telegram-bot/controlplane.py` — signed heartbeats between the nodes of a fleet (only used with two or more nodes); built on [`autonomy-core`](https://github.com/realsystem/autonomy/tree/main/core), and speaks Autonomy envelopes to peers that support them

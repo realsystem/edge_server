@@ -107,8 +107,8 @@ FARM_HELP = "\n/farm - the Field Station's latest readings (read only)"
 ASK_COMMAND = {"command": "ask", "description": "Ask the assistant about this node"}
 ASK_HELP = "\n/ask <question> - ask the assistant about this node (a model on your GPU machine)"
 FLEET_HELP = "\n/fleet - the other nodes of the fleet: last contact, versions, fleet file"
-REBOOT_COMMAND = {"command": "reboot", "description": "Reboot the laptop (authenticator code)"}
-REBOOT_HELP = "\n/reboot <code> - reboot the laptop; code from your authenticator app"
+REBOOT_COMMAND = {"command": "reboot", "description": "Reboot the server (authenticator code)"}
+REBOOT_HELP = "\n/reboot <code> - reboot the server; code from your authenticator app"
 REDEPLOY_COMMAND = {
     "command": "redeploy",
     "description": "Deploy the newest release and redeploy (authenticator code)",
@@ -2070,7 +2070,7 @@ class Bot:
             if up is None or up < cfg.reboot_min_uptime:
                 shown = "unknown" if up is None else human_duration(up)
                 return (
-                    f"Not rebooting: uptime is {shown}. The laptop must have been up for "
+                    f"Not rebooting: uptime is {shown}. The server must have been up for "
                     f"{human_duration(cfg.reboot_min_uptime)} (protects against reboot loops)."
                 )
             if (cfg.requests_dir / "reboot").exists():
@@ -2458,7 +2458,7 @@ class Bot:
             (self.cfg.requests_dir / name).unlink(missing_ok=True)
         self.reply(
             chat_id,
-            "The laptop did not reboot. On the server check: systemctl status edge-reboot.path "
+            "The server did not reboot. On it, check: systemctl status edge-reboot.path "
             "edge-reboot.service (it also refuses within 10 minutes of boot).",
         )
 
@@ -2478,7 +2478,7 @@ class Bot:
         if up is not None and up < age:
             text = f"Back online after reboot (uptime {human_duration(up)})."
         else:
-            text = "The bot restarted but the laptop did not reboot."
+            text = "The bot restarted but the server did not reboot."
         for _ in range(6):  # the network may still be coming up
             try:
                 self.api.call("sendMessage", {"chat_id": chat_id, "text": text})

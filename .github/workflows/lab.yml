@@ -5,7 +5,7 @@ name: Lab
 # no hardware. On changes to lab/ and the bot, and nightly.
 on:
   pull_request:
-    paths: ["lab/**", "telegram-bot/**", "ha-addon/**", "deploy-edge-server.sh", ".github/workflows/lab.yml"]
+    paths: ["lab/**", "telegram-bot/**", "ha-addon/**", "deploy-edge-server.sh", "lib/**", ".github/workflows/lab.yml"]
   push:
     branches: [main]
     paths: ["lab/**"]

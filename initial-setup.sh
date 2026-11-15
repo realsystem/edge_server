@@ -9,6 +9,20 @@ set -euo pipefail
 
 BATCH_MODE="${BATCH_MODE:-false}"
 
+# OpenMediaVault manages the network and the drives itself (see lib/platform.sh): its
+# static IP and drive formatting are left to its web UI. HOST_PLATFORM=generic|omv
+# overrides the detection. (Kept here, not sourced from lib/: this script is often
+# copied to a fresh server on its own.)
+HOST_PLATFORM="${HOST_PLATFORM:-}"
+OMV_CONFIG_FILE="${OMV_CONFIG_FILE:-/etc/openmediavault/config.xml}"
+is_omv() {
+    case "$HOST_PLATFORM" in
+        omv) return 0 ;;
+        generic) return 1 ;;
+    esac
+    [[ -f "$OMV_CONFIG_FILE" ]]
+}
+
 # Optional non-interactive network config (set by bootstrap):
 #   STATIC_IP=192.168.1.50[/24]  GATEWAY=192.168.1.1  DNS=1.1.1.1
 STATIC_IP="${STATIC_IP:-}"
@@ -37,7 +51,10 @@ apt-get install -y vim curl wget htop parted
 configure_ip="n"
 static_ip=""
 new_gateway=""
-if [[ -n "$STATIC_IP" ]]; then
+if is_omv; then
+    warn "OpenMediaVault detected: no static IP is written here. Set the address in its web UI (Network > Interfaces)."
+    [[ -z "$STATIC_IP" ]] || warn "STATIC_IP is ignored on OpenMediaVault"
+elif [[ -n "$STATIC_IP" ]]; then
     configure_ip="y"
 elif [[ "$BATCH_MODE" != "true" ]]; then
     echo
@@ -107,7 +124,9 @@ fi
 # Prepare external storage
 #-------------------------------------------------------------------------------
 format_drive="n"
-if [[ "$BATCH_MODE" != "true" ]]; then
+if is_omv; then
+    warn "OpenMediaVault detected: drives are not formatted here. Create the file system under Storage in its web UI."
+elif [[ "$BATCH_MODE" != "true" ]]; then
     echo
     info "Available block devices:"
     lsblk -o NAME,SIZE,TYPE,MOUNTPOINT,UUID | grep -v "loop"

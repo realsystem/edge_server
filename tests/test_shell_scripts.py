@@ -19,6 +19,15 @@ import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parent.parent
+
+
+def deploy_text():
+    """The deploy code: deploy-edge-server.sh (the outline) followed by lib/*.sh and lib/os/*.sh."""
+    files = [REPO / "deploy-edge-server.sh"]
+    files += sorted((REPO / "lib").glob("*.sh")) + sorted((REPO / "lib" / "os").glob("*.sh"))
+    return "\n".join(f.read_text() for f in files)
+
+
 BASH = shutil.which("bash")
 OPENSSL = shutil.which("openssl")
 
@@ -676,7 +685,7 @@ class TestFrigateOnlyDefault:
         assert "subnet=172.16.4.0/22" in pinned
 
     def test_resolve_runs_before_anything_changes(self):
-        text = (REPO / "deploy-edge-server.sh").read_text()
+        text = deploy_text()
         body = text[text.index("run_deploy() {") : text.index("main() {")]
         assert body.index("resolve_local_subnet") < body.index("configure_system")
 
@@ -804,7 +813,7 @@ class TestDiscoverCamerasInDeploy:
         assert "add cameras to" in result.stdout
 
     def test_deploy_main_runs_discovery_before_start(self):
-        text = (REPO / "deploy-edge-server.sh").read_text()
+        text = deploy_text()
         main_body = text[text.index("run_deploy() {") :]
         assert main_body.index("discover_cameras") < main_body.index("start_services")
 
@@ -1323,7 +1332,7 @@ class TestTelegramBotInDeploy:
         assert "force-recreate" not in (stub_path / "log").read_text()
 
     def test_deploy_main_prepares_bot_before_compose(self):
-        text = (REPO / "deploy-edge-server.sh").read_text()
+        text = deploy_text()
         main_body = text[text.index("run_deploy() {") :]
         assert main_body.index("prepare_telegram_bot") < main_body.index("create_app_stack")
 
@@ -1619,7 +1628,7 @@ class TestUnattendedHardening:
         assert "systemctl disable --now edge-snapshot.timer" in (stub_path / "log").read_text()
 
     def test_smartmontools_is_installed(self):
-        assert "smartmontools" in (REPO / "deploy-edge-server.sh").read_text()
+        assert "smartmontools" in deploy_text()
 
 
 # --------------------------------------------------------------------------
@@ -1740,7 +1749,7 @@ class TestAutoRedeploy:
         assert bad.returncode == 2 and "Unknown option: --bogus" in bad.stderr
 
     def test_run_deploy_order(self):
-        text = (REPO / "deploy-edge-server.sh").read_text()
+        text = deploy_text()
         body = text[text.index("run_deploy() {") : text.index("main() {")]
         order = [
             body.index(step)
@@ -1992,7 +2001,7 @@ class TestAutoRedeploy:
         assert f"commits/{tagged}/check-runs" in world.log()
 
     def test_branch_setting_no_longer_exists(self):
-        text = (REPO / "deploy-edge-server.sh").read_text()
+        text = deploy_text()
         assert "REDEPLOY_BRANCH" not in text
         assert "readonly RELEASE_TAG_REGEX" in text  # a constant, not overridable
 
@@ -2330,7 +2339,7 @@ class TestAddonUninstall:
 
 
 def test_bot_container_may_send_unprivileged_ping():
-    text = (Path(__file__).resolve().parent.parent / "deploy-edge-server.sh").read_text()
+    text = deploy_text()
     bot_block = text[text.index("  telegram-bot:") :]
     assert "net.ipv4.ping_group_range=0 2147483647" in bot_block.split("\nEOF")[0]
 
@@ -2950,3 +2959,460 @@ class TestProcessor:
         app, _ = self.run(stub_path, tmp_path, body='mkdir -p "$APP_DIR"\nsave_settings')
         saved = (app / "deploy.env").read_text()
         assert "INSTALL_PROCESSOR=true" in saved and f"PROCESSOR_IMAGE={self.IMAGE}" in saved
+
+
+# --------------------------------------------------------------------------
+# lib/os.sh: Ubuntu and Debian
+# --------------------------------------------------------------------------
+
+UBUNTU_RELEASE = """PRETTY_NAME="Ubuntu 24.04.1 LTS"
+NAME="Ubuntu"
+VERSION_ID="24.04"
+VERSION_CODENAME=noble
+ID=ubuntu
+ID_LIKE=debian
+UBUNTU_CODENAME=noble
+"""
+# OpenMediaVault 7 keeps Debian's os-release
+DEBIAN_RELEASE = """PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"
+NAME="Debian GNU/Linux"
+VERSION_ID="12"
+VERSION="12 (bookworm)"
+VERSION_CODENAME=bookworm
+ID=debian
+"""
+FEDORA_RELEASE = 'NAME="Fedora Linux"\nVERSION_ID=40\nID=fedora\nPRETTY_NAME="Fedora Linux 40"\n'
+
+
+class TestOsLibrary:
+    def run(self, stub_path, tmp_path, release, body):
+        f = tmp_path / "os-release"
+        f.write_text(release)
+        return run_sourced("deploy-edge-server.sh", body, stub_path, {"OS_RELEASE_FILE": str(f)})
+
+    def test_ubuntu(self, stub_path, tmp_path):
+        r = self.run(
+            stub_path,
+            tmp_path,
+            UBUNTU_RELEASE,
+            'os_require; echo "family=$OS_FAMILY codename=$OS_CODENAME"; os_docker_repo_url;'
+            " os_archive_url; os_extra_packages; os_unattended_origins",
+        )
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "family=ubuntu codename=noble" in r.stdout
+        assert "https://download.docker.com/linux/ubuntu\n" in r.stdout
+        assert "https://archive.ubuntu.com" in r.stdout
+        assert "apt-transport-https" in r.stdout
+        assert '"${distro_id}ESM:${distro_codename}-infra-security";' in r.stdout
+
+    def test_debian_and_openmediavault(self, stub_path, tmp_path):
+        r = self.run(
+            stub_path,
+            tmp_path,
+            DEBIAN_RELEASE,
+            'os_require; echo "family=$OS_FAMILY codename=$OS_CODENAME"; os_docker_repo_url;'
+            ' os_archive_url; echo "extra=[$(os_extra_packages)]"; os_unattended_origins',
+        )
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "family=debian codename=bookworm" in r.stdout
+        assert "https://download.docker.com/linux/debian\n" in r.stdout
+        assert "https://deb.debian.org" in r.stdout
+        assert "extra=[]" in r.stdout
+        assert "Origins-Pattern" in r.stdout and "label=Debian-Security" in r.stdout
+        assert "ESM" not in r.stdout  # Ubuntu Pro origins do not exist on Debian
+
+    def test_unsupported_system_stops(self, stub_path, tmp_path):
+        r = self.run(stub_path, tmp_path, FEDORA_RELEASE, "os_require; echo not-reached")
+        assert r.returncode == 1
+        assert "Unsupported system: Fedora Linux 40" in r.stdout
+        assert "not-reached" not in r.stdout
+
+    def test_missing_codename_stops(self, stub_path, tmp_path):
+        release = DEBIAN_RELEASE.replace("VERSION_CODENAME=bookworm\n", "")
+        r = self.run(stub_path, tmp_path, release, "os_require; echo not-reached")
+        assert r.returncode == 1 and "codename" in r.stdout
+
+    def test_install_packages_uses_the_distribution_list(self, stub_path, tmp_path):
+        # apt-get logs its arguments; the unattended-upgrades file goes to a temp dir
+        apt = stub_path / "apt-get"
+        apt.write_text('#!/usr/bin/env bash\necho "apt-get $*" >> "$STUB_LOG"\n')
+        apt.chmod(0o755)
+        etc = tmp_path / "apt.conf.d"
+        etc.mkdir()
+        body = f"APT_CONF_DIR={etc}\ninstall_packages"
+        r = self.run(stub_path, tmp_path, DEBIAN_RELEASE, body)
+        assert r.returncode == 0, r.stdout + r.stderr
+        log = (stub_path / "log").read_text()
+        assert "smartmontools" in log and "apt-transport-https" not in log
+        conf = (etc / "50unattended-upgrades").read_text()
+        assert conf.startswith("Unattended-Upgrade::Origins-Pattern {")
+        assert 'Unattended-Upgrade::Automatic-Reboot "false";' in conf
+
+
+# --------------------------------------------------------------------------
+# lib/host.sh: laptop or server
+# --------------------------------------------------------------------------
+
+
+class TestHostType:
+    @pytest.fixture
+    def hw(self, tmp_path):
+        """A fake /sys: no battery, chassis type 3 (desktop), a logind.conf to edit."""
+        power = tmp_path / "power_supply"
+        power.mkdir()
+        (power / "AC").mkdir()
+        chassis = tmp_path / "chassis_type"
+        chassis.write_text("3\n")
+        logind = tmp_path / "logind.conf"
+        logind.write_text("[Login]\n#HandleLidSwitch=suspend\n")
+        return {
+            "POWER_SUPPLY_DIR": str(power),
+            "DMI_CHASSIS_FILE": str(chassis),
+            "LOGIND_CONF": str(logind),
+        }
+
+    def run(self, stub_path, hw, body, input=None, **env):
+        prelude = (
+            f"source {REPO / 'deploy-edge-server.sh'}\n"
+            'log() { printf \'%s\\n\' "$*"; }; info() { log "$@"; }; warn() { log "$@"; }\n'
+            'error() { log "$@"; }\n'
+        )
+        full_env = {"PATH": f"{stub_path}:{os.environ['PATH']}", "STUB_LOG": str(stub_path / "log")}
+        full_env.update(hw)
+        full_env.update(env)
+        return run_bash(prelude + body, env=full_env, input=input)
+
+    def test_detects_server_and_laptop(self, stub_path, hw, tmp_path):
+        assert self.run(stub_path, hw, "detect_host_type").stdout.strip() == "server"
+        (tmp_path / "chassis_type").write_text("10\n")  # notebook
+        assert self.run(stub_path, hw, "detect_host_type").stdout.strip() == "laptop"
+        (tmp_path / "chassis_type").write_text("3\n")
+        (tmp_path / "power_supply" / "BAT0").mkdir()  # a desktop chassis with a battery
+        assert self.run(stub_path, hw, "detect_host_type").stdout.strip() == "laptop"
+
+    def test_batch_takes_the_detected_type(self, stub_path, hw):
+        r = self.run(stub_path, hw, 'resolve_host_type; echo "type=$HOST_TYPE"', BATCH_MODE="true")
+        assert "type=server" in r.stdout
+
+    def test_setting_wins_and_is_checked(self, stub_path, hw):
+        r = self.run(stub_path, hw, 'resolve_host_type; echo "type=$HOST_TYPE"', HOST_TYPE="laptop")
+        assert "type=laptop" in r.stdout
+        bad = self.run(stub_path, hw, "resolve_host_type", HOST_TYPE="desktop")
+        assert bad.returncode == 1 and "must be 'laptop' or 'server'" in bad.stdout
+
+    def test_manual_run_asks(self, stub_path, hw):
+        body = 'resolve_host_type; echo "type=$HOST_TYPE"'
+        assert "type=laptop" in self.run(stub_path, hw, body, input="laptop\n").stdout
+        # a wrong answer is asked again; Enter takes the detected type
+        again = self.run(stub_path, hw, body, input="maybe\n\n")
+        assert "Please answer laptop or server." in again.stdout and "type=server" in again.stdout
+        # no terminal at all: the detected type, no endless loop
+        assert "type=server" in self.run(stub_path, hw, body, input="").stdout
+
+    def test_server_power_settings_are_left_alone(self, stub_path, hw, tmp_path):
+        before = (tmp_path / "logind.conf").read_text()
+        r = self.run(stub_path, hw, "configure_system", HOST_TYPE="server", TIMEZONE="UTC")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert (tmp_path / "logind.conf").read_text() == before
+        log = stub_path / "log"
+        assert not log.exists() or "mask" not in log.read_text()
+        assert "left as they are" in r.stdout
+
+    def test_laptop_lid_and_sleep_are_configured(self, stub_path, hw, tmp_path):
+        r = self.run(stub_path, hw, "configure_system", HOST_TYPE="laptop", TIMEZONE="UTC")
+        assert r.returncode == 0, r.stdout + r.stderr
+        conf = (tmp_path / "logind.conf").read_text()
+        assert "HandleLidSwitch=ignore" in conf and "HandleLidSwitchDocked=ignore" in conf
+        assert (tmp_path / "logind.conf.orig").exists()
+        assert "systemctl mask sleep.target" in (stub_path / "log").read_text()
+
+    def test_power_loss_monitor_is_not_offered_on_a_server(self, stub_path, hw, tmp_path):
+        (tmp_path / "power_supply" / "BAT0").mkdir()  # even with a battery (a UPS-backed NAS, say)
+        r = self.run(stub_path, hw, "install_nut_power", input="y\n", HOST_TYPE="server")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "skipping power loss monitor" in r.stdout
+        assert "Install power loss monitor?" not in r.stdout
+
+    def test_host_type_is_saved_for_auto(self, stub_path, hw, tmp_path):
+        app = tmp_path / "app"
+        r = self.run(stub_path, hw, "save_settings", HOST_TYPE="server", EDGE_SERVER_DIR=str(app))
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "HOST_TYPE=server" in (app / "deploy.env").read_text()
+
+    def test_preflight_asks_before_changing_anything(self):
+        text = deploy_text()
+        body = text[text.index("preflight_checks() {") :]
+        assert body.index("os_require") < body.index("resolve_host_type") < body.index("read -rp")
+
+
+# --------------------------------------------------------------------------
+# lib/platform.sh: OpenMediaVault (what is left to OMV)
+# --------------------------------------------------------------------------
+
+
+class TestOpenMediaVault:
+    FSTAB = "UUID=aaaa / ext4 defaults 0 1\n"
+
+    @pytest.fixture
+    def omv(self, stub_path, tmp_path):
+        """An OMV machine in a temp dir: OMV's config file, and stubs that log what they are asked."""
+        (tmp_path / "omv-config.xml").write_text("<config/>")
+        (tmp_path / "os-release").write_text(DEBIAN_RELEASE)
+        (tmp_path / "fstab").write_text(self.FSTAB)
+        (tmp_path / "apt.conf.d").mkdir()
+        (tmp_path / "units").mkdir()
+        for name in ("ufw", "timedatectl", "mount", "blkid", "apt-get", "iptables"):
+            stub = stub_path / name
+            stub.write_text(f'#!/usr/bin/env bash\necho "{name} $*" >> "$STUB_LOG"\nexit 0\n')
+            stub.chmod(0o755)
+        return {
+            "OMV_CONFIG_FILE": str(tmp_path / "omv-config.xml"),
+            "OS_RELEASE_FILE": str(tmp_path / "os-release"),
+            "FSTAB_FILE": str(tmp_path / "fstab"),
+            "APT_CONF_DIR": str(tmp_path / "apt.conf.d"),
+            "SYSTEMD_DIR": str(tmp_path / "units"),
+            "EDGE_SERVER_DIR": str(tmp_path / "app"),
+            "EDGE_STORAGE_DIR": str(tmp_path / "storage"),
+            "LOCAL_SUBNET": "10.0.0.0/24",
+            "HOST_TYPE": "server",
+            "TIMEZONE": "UTC",
+            "BATCH_MODE": "true",
+        }
+
+    def run(self, stub_path, env, body, input=None):
+        prelude = (
+            f"source {REPO / 'deploy-edge-server.sh'}\n"
+            'log() { printf \'%s\\n\' "$*"; }; info() { log "$@"; }; warn() { log "$@"; }\n'
+            'error() { log "$@"; }; success() { log "$@"; }\n'
+        )
+        full_env = {"PATH": f"{stub_path}:{os.environ['PATH']}", "STUB_LOG": str(stub_path / "log")}
+        full_env.update(env)
+        return run_bash(prelude + body, env=full_env, input=input)
+
+    def log(self, stub_path):
+        f = stub_path / "log"
+        return f.read_text() if f.exists() else ""
+
+    # ---- detection ----
+
+    def test_detection_and_override(self, stub_path, omv, tmp_path):
+        assert self.run(stub_path, omv, "host_platform").stdout.strip() == "omv"
+        no_omv = {**omv, "OMV_CONFIG_FILE": str(tmp_path / "missing.xml")}
+        assert self.run(stub_path, no_omv, "host_platform").stdout.strip() == "generic"
+        # an override wins in both directions
+        assert (
+            self.run(stub_path, {**omv, "HOST_PLATFORM": "generic"}, "host_platform").stdout.strip()
+            == "generic"
+        )
+        assert (
+            self.run(stub_path, {**no_omv, "HOST_PLATFORM": "omv"}, "host_platform").stdout.strip()
+            == "omv"
+        )
+
+    def test_invalid_platform_is_refused(self, stub_path, omv):
+        r = self.run(stub_path, {**omv, "HOST_PLATFORM": "nas"}, "check_platform; echo not-reached")
+        assert r.returncode == 1 and "must be 'omv' or 'generic'" in r.stdout
+        assert "not-reached" not in r.stdout
+
+    def test_docker_must_exist_on_omv(self, stub_path, omv):
+        # command -v docker fails, whatever is installed where the test runs
+        no_docker = (
+            'command() { [[ "$1 $2" == \'-v docker\' ]] && return 1; builtin command "$@"; }\n'
+        )
+        r = self.run(stub_path, omv, no_docker + "check_platform; echo not-reached")
+        assert r.returncode == 1 and "omv-extras" in r.stdout and "not-reached" not in r.stdout
+        # plain Debian installs Docker itself, so nothing is required
+        r = self.run(
+            stub_path, {**omv, "HOST_PLATFORM": "generic"}, no_docker + "check_platform; echo ok"
+        )
+        assert r.returncode == 0 and "ok" in r.stdout
+        # with Docker there (the stub), OMV passes
+        r = self.run(stub_path, omv, "check_platform; echo ok")
+        assert r.returncode == 0 and "OpenMediaVault detected" in r.stdout and "ok" in r.stdout
+
+    # ---- firewall ----
+
+    def test_no_ufw_on_omv(self, stub_path, omv):
+        r = self.run(stub_path, omv, "configure_firewall")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "ufw" not in self.log(stub_path)
+        assert "port 5000" in r.stdout and "OMV" in r.stdout  # says what is left to the user
+
+    def test_ufw_is_still_set_up_on_plain_debian(self, stub_path, omv):
+        r = self.run(stub_path, {**omv, "HOST_PLATFORM": "generic"}, "configure_firewall")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "ufw --force enable" in self.log(stub_path)
+
+    def test_no_docker_rule_and_no_subnet_needed_on_omv(self, stub_path, omv, tmp_path):
+        # no usable network at all: the firewall is the only thing that needs the subnet
+        env = {**omv, "LOCAL_SUBNET": "", "STUB_IP_LINK": "fail", "STUB_IP_DEFAULT": ""}
+        r = self.run(stub_path, env, "install_host_helpers")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert not (tmp_path / "app" / "docker-firewall.sh").exists()
+        assert not (tmp_path / "units" / "edge-docker-firewall.service").exists()
+        assert "edge-docker-firewall" not in self.log(stub_path)
+        assert "iptables" not in self.log(stub_path)
+        # the rest of the helpers are still installed
+        assert (tmp_path / "units" / "edge-docker-clean.timer").exists()
+        assert "systemctl enable --now edge-docker-clean.timer" in self.log(stub_path)
+
+    def test_docker_rule_is_installed_on_plain_debian(self, stub_path, omv, tmp_path):
+        r = self.run(stub_path, {**omv, "HOST_PLATFORM": "generic"}, "install_host_helpers")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert (tmp_path / "app" / "docker-firewall.sh").exists()
+        assert "systemctl restart edge-docker-firewall.service" in self.log(stub_path)
+
+    def test_stack_unit_does_not_wait_for_the_missing_firewall_unit(self, stub_path, omv, tmp_path):
+        body = (
+            f"export UNIT_DIR={tmp_path}/units\n"
+            'mkdir -p "$APP_DIR"\n'
+            "eval \"$(declare -f create_systemd_service | sed 's|/etc/systemd/system|'$UNIT_DIR'|g')\"\n"
+            "create_systemd_service\n"
+        )
+        assert self.run(stub_path, omv, body).returncode == 0
+        unit = (tmp_path / "units" / "edge-server.service").read_text()
+        assert "edge-docker-firewall" not in unit
+        assert "After=network-online.target docker.service\n" in unit
+        assert "Wants=network-online.target\n" in unit
+        # unchanged elsewhere
+        r = self.run(stub_path, {**omv, "HOST_PLATFORM": "generic"}, body)
+        assert r.returncode == 0
+        unit = (tmp_path / "units" / "edge-server.service").read_text()
+        assert "After=network-online.target docker.service edge-docker-firewall.service\n" in unit
+        assert "Wants=network-online.target edge-docker-firewall.service\n" in unit
+
+    # ---- packages, updates, time zone ----
+
+    def test_no_ufw_or_unattended_upgrades_on_omv(self, stub_path, omv, tmp_path):
+        r = self.run(stub_path, omv, "install_packages")
+        assert r.returncode == 0, r.stdout + r.stderr
+        log = self.log(stub_path)
+        assert "smartmontools" in log  # the rest is installed
+        assert "ufw" not in log and "unattended-upgrades" not in log
+        assert (
+            list((tmp_path / "apt.conf.d").iterdir()) == []
+        )  # OMV's Update Management is untouched
+        assert "enable unattended-upgrades" not in log
+
+    def test_ufw_and_unattended_upgrades_on_plain_debian(self, stub_path, omv, tmp_path):
+        r = self.run(stub_path, {**omv, "HOST_PLATFORM": "generic"}, "install_packages")
+        assert r.returncode == 0, r.stdout + r.stderr
+        log = self.log(stub_path)
+        assert "ufw" in log and "unattended-upgrades" in log
+        assert (tmp_path / "apt.conf.d" / "50unattended-upgrades").exists()
+        assert (tmp_path / "apt.conf.d" / "20auto-upgrades").exists()
+
+    def test_time_zone_is_left_to_omv(self, stub_path, omv):
+        r = self.run(stub_path, omv, "configure_system")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "timedatectl" not in self.log(stub_path)
+        r = self.run(stub_path, {**omv, "HOST_PLATFORM": "generic"}, "configure_system")
+        assert "timedatectl set-timezone UTC" in self.log(stub_path)
+
+    # ---- storage ----
+
+    def test_no_fstab_entry_or_mount_on_omv(self, stub_path, omv, tmp_path):
+        env = {**omv, "EXTERNAL_DRIVE_UUID": "1234-ABCD"}
+        r = self.run(stub_path, env, "configure_storage")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert (tmp_path / "fstab").read_text() == self.FSTAB
+        log = self.log(stub_path)
+        assert "blkid" not in log and "mount" not in log
+        assert (tmp_path / "storage" / "frigate" / "recordings").is_dir()
+
+    def test_fstab_entry_is_still_added_on_plain_debian(self, stub_path, omv, tmp_path):
+        env = {**omv, "HOST_PLATFORM": "generic", "EXTERNAL_DRIVE_UUID": "1234-ABCD"}
+        r = self.run(stub_path, env, "configure_storage")
+        assert r.returncode == 0, r.stdout + r.stderr
+        fstab = (tmp_path / "fstab").read_text()
+        assert fstab.startswith(self.FSTAB) and f"UUID=1234-ABCD {tmp_path}/storage auto" in fstab
+
+    def test_storage_folder_is_asked_on_omv(self, stub_path, omv):
+        env = {k: v for k, v in omv.items() if k not in ("EDGE_STORAGE_DIR", "BATCH_MODE")}
+        body = 'choose_omv_storage; echo "storage=$STORAGE_MOUNT"'
+        r = self.run(stub_path, env, body, input="/srv/dev-disk-by-uuid-abc/frigate/\n")
+        assert "storage=/srv/dev-disk-by-uuid-abc/frigate" in r.stdout
+        assert "Recordings: /srv/dev-disk-by-uuid-abc/frigate/frigate" in r.stdout
+        # a relative path is asked again
+        r = self.run(stub_path, env, body, input="mnt/x\n/srv/dev-disk-by-uuid-abc/nvr\n")
+        assert "absolute path" in r.stdout and "storage=/srv/dev-disk-by-uuid-abc/nvr" in r.stdout
+        # Enter keeps the default, with a warning: that is the system disk
+        r = self.run(stub_path, env, body, input="\n")
+        assert "storage=/mnt/storage" in r.stdout and "fill the system disk" in r.stdout
+        # no terminal: the default, no endless loop
+        assert "storage=/mnt/storage" in self.run(stub_path, env, body, input="").stdout
+
+    def test_storage_folder_is_not_asked_when_set_or_in_batch(self, stub_path, omv):
+        body = 'choose_omv_storage; echo "storage=$STORAGE_MOUNT"'
+        # EDGE_STORAGE_DIR set (also what deploy.env restores for --auto)
+        env = {**omv, "EDGE_STORAGE_DIR": "/srv/dev-disk-by-uuid-abc/nvr", "BATCH_MODE": "false"}
+        r = self.run(stub_path, env, body, input="/elsewhere\n")
+        assert (
+            "storage=/srv/dev-disk-by-uuid-abc/nvr" in r.stdout
+            and "Folder for recordings" not in r.stdout
+        )
+        env = {k: v for k, v in omv.items() if k != "EDGE_STORAGE_DIR"}  # batch, nothing set
+        r = self.run(stub_path, env, body, input="/elsewhere\n")
+        assert "storage=/mnt/storage" in r.stdout and "Folder for recordings" not in r.stdout
+
+    def test_drive_uuid_is_ignored_with_a_warning_on_omv(self, stub_path, omv):
+        r = self.run(stub_path, {**omv, "EXTERNAL_DRIVE_UUID": "1234-ABCD"}, "choose_omv_storage")
+        assert "EXTERNAL_DRIVE_UUID is ignored on OpenMediaVault" in r.stdout
+
+    # ---- the order of the steps, the summary, what is saved ----
+
+    def test_preflight_and_deploy_order(self):
+        text = deploy_text()
+        pre = text[text.index("preflight_checks() {") :]
+        assert (
+            pre.index("os_require") < pre.index("check_platform") < pre.index("resolve_host_type")
+        )
+        assert pre.index("choose_omv_storage") < pre.index("Enter UUID for external storage drive")
+        body = text[text.index("run_deploy() {") : text.index("main() {")]
+        assert "platform_is_omv || resolve_local_subnet" in body
+        assert body.index("platform_is_omv || resolve_local_subnet") < body.index(
+            "configure_system"
+        )
+
+    def test_summary_lists_what_was_left_to_omv(self, stub_path, omv):
+        r = self.run(stub_path, omv, "show_summary")
+        assert "OpenMediaVault: left to OMV" in r.stdout
+        r = self.run(stub_path, {**omv, "HOST_PLATFORM": "generic"}, "show_summary")
+        assert "left to OMV" not in r.stdout
+
+    def test_platform_setting_is_saved_for_auto(self, stub_path, omv, tmp_path):
+        r = self.run(stub_path, {**omv, "HOST_PLATFORM": "generic"}, "save_settings")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "HOST_PLATFORM=generic" in (tmp_path / "app" / "deploy.env").read_text()
+
+    # ---- initial-setup.sh keeps its own copy of the detection ----
+
+    def test_initial_setup_detects_like_the_deploy(self, stub_path, omv, tmp_path):
+        setup = (REPO / "initial-setup.sh").read_text()
+        func = setup[
+            setup.index("is_omv() {") : setup.index("\n}\n", setup.index("is_omv() {")) + 3
+        ]
+        for env in (
+            omv,
+            {**omv, "OMV_CONFIG_FILE": str(tmp_path / "missing.xml")},
+            {**omv, "HOST_PLATFORM": "generic"},
+            {**omv, "OMV_CONFIG_FILE": str(tmp_path / "missing.xml"), "HOST_PLATFORM": "omv"},
+        ):
+            expected = self.run(
+                stub_path, env, "platform_is_omv && echo omv || echo generic"
+            ).stdout.strip()
+            got = run_bash(
+                'HOST_PLATFORM="${HOST_PLATFORM:-}"\n'
+                'OMV_CONFIG_FILE="${OMV_CONFIG_FILE}"\n'
+                + func
+                + "is_omv && echo omv || echo generic",
+                env=env,
+            ).stdout.strip()
+            assert got == expected, env
+
+    def test_initial_setup_skips_ip_and_formatting_on_omv(self):
+        setup = (REPO / "initial-setup.sh").read_text()
+        ip = setup[setup.index('configure_ip="n"') :]
+        assert ip.index("if is_omv; then") < ip.index('read -rp "Configure static IP?')
+        fmt = setup[setup.index('format_drive="n"') :]
+        assert fmt.index("if is_omv; then") < fmt.index('read -rp "Format external drive')

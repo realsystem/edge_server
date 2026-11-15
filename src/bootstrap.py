@@ -40,6 +40,7 @@ class Bootstrap:
     SCRIPTS = [
         "initial-setup.sh",
         "deploy-edge-server.sh",
+        "lib",  # deploy-edge-server.sh loads its steps from lib/ next to itself
         "secrets.sh",
         "discover-cameras.sh",
         "collect-diagnostics.sh",
@@ -233,10 +234,10 @@ class Bootstrap:
         # Check OS
         with self.progress.task("OS detection"):
             os_info = self.ssh.get_os_info()
-            if os_info and "Ubuntu" in os_info:
+            if os_info and any(name in os_info for name in ("Ubuntu", "Debian")):
                 self.progress.ok(f"OS: {os_info}")
             else:
-                self.progress.warn(f"OS: {os_info or 'Unknown'} (expected Ubuntu)")
+                self.progress.warn(f"OS: {os_info or 'Unknown'} (expected Ubuntu or Debian)")
                 if self.mode == "manual" and not self._confirm("Continue anyway?"):
                     return False
 
