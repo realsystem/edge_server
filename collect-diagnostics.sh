@@ -129,7 +129,7 @@ report() {
     run lsblk -o NAME,SIZE,TYPE,ROTA,FSTYPE,MOUNTPOINT
     run df -h / "$APP_DIR"
 
-    section "Laptop / board"
+    section "Server / board"
     for f in sys_vendor product_name product_version bios_version bios_date; do
         printf '%s: %s\n' "$f" "$(cat "/sys/class/dmi/id/$f" 2> /dev/null || echo '?')"
     done

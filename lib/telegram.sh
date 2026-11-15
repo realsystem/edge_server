@@ -167,11 +167,11 @@ WantedBy=multi-user.target
 UNIT
     cat > "$dir/edge-reboot.service" << UNIT
 [Unit]
-Description=Reboot this machine on request from the Telegram bot
+Description=Reboot this server on request from the Telegram bot
 
 [Service]
 Type=oneshot
-# Consume the request first, then refuse if the machine booted under 10 minutes ago
+# Consume the request first, then refuse if the server booted under 10 minutes ago
 ExecStartPre=/bin/rm -f $APP_DIR/bot-requests/reboot
 ExecStartPre=/usr/bin/awk '{ exit !(\$\$1 > 600) }' /proc/uptime
 ExecStart=/usr/bin/systemctl reboot

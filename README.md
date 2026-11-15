@@ -238,7 +238,7 @@ A small bot that runs next to Frigate and answers you in a Telegram chat:
 | `/status` | One screen: load, CPU, memory, disk (free space, plus a separate `storage /mnt/storage` line with used space), temperature, AC/battery, Frigate detector speed and every camera's FPS, with a list of problems on top; with `HA_HOST` set, two more lines for Home Assistant (ping and HTTP, see below) |
 | `/diag` | The full diagnostics report from `collect-diagnostics.sh`, sent as a file (about 15 s): hardware, load, Docker, Frigate, config, and the host's **firewall rules, open ports**, SSH settings and service state |
 | `/testalert [percent]` | Sends you a simulated low-disk alert (default 5% free) plus the real disk state, so you can check delivery without filling a disk |
-| `/reboot <code>` | Reboots the laptop; needs a code from your authenticator app (off until set up, see below) |
+| `/reboot <code>` | Reboots the server; needs a code from your authenticator app (off until set up, see below) |
 | `/redeploy <code>` | Deploys the newest **release tag** (`vX.Y`) from GitHub, same authenticator code (see below) |
 | `/restart <service> <code>` | Restarts one container (`frigate`, `mosquitto`, ...) without rebooting; same authenticator code (see below) |
 | `/logs <service> [lines]` | The last log lines of a container (default 100, up to 1000), passwords removed; a message, or a file when long (see below) |
@@ -358,7 +358,7 @@ Safeguards:
 - Only listed user ids, only in a private chat, and the message must be under a minute old.
 - A code works once (replays are refused, even after a restart) and drifts by at most
   one 30-second step. Three wrong codes lock that user out for 15 minutes.
-- No reboot loops: a laptop that booted less than 10 minutes ago is not rebooted, and
+- No reboot loops: a server that booted less than 10 minutes ago is not rebooted, and
   Telegram re-delivering an old command does nothing because of the age and replay checks.
 - The bot container still has no power over the host. It can only create a file in
   `bot-requests/` (a root-only folder); a systemd unit (`edge-reboot.path`) on the host
@@ -459,7 +459,7 @@ Both need the authenticator set up, because they use the same host helper as `/r
 
 Keep the secret like a password. Anyone who has it can generate valid codes (but
 still needs to be one of the listed Telegram users). Test it once while you are
-sitting at the laptop.
+sitting at the server.
 
 ### Built for unattended operation
 
