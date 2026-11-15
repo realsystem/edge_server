@@ -1,10 +1,10 @@
 # Edge Server Deployment
 
-Automated provisioning for an Ubuntu-based edge server running Frigate NVR, Home Assistant, Mosquitto MQTT, and Tailscale.
+Automated provisioning for an Ubuntu- or Debian-based edge server running Frigate NVR, Home Assistant, Mosquitto MQTT, and Tailscale.
 
 ## Prerequisites
 
-- Fresh Ubuntu Server 22.04+ installation
+- Ubuntu Server 22.04+ or Debian 12+ (OpenMediaVault included; see the README on laptop or server)
 - Minimum 4GB RAM (8GB recommended for Frigate)
 - External USB drive for video storage (recommended)
 - Network connectivity

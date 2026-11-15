@@ -2,7 +2,7 @@
 
 [![Test](https://github.com/realsystem/edge_server/actions/workflows/test.yml/badge.svg)](https://github.com/realsystem/edge_server/actions/workflows/test.yml)
 
-Headless Ubuntu edge server for Frigate NVR and Tailscale, with optional Home Assistant and
+Headless Ubuntu or Debian edge server for Frigate NVR and Tailscale, with optional Home Assistant and
 Mosquitto MQTT.
 
 **Planned:** a fleet of nodes at one or more sites that watch each other, fix known problems
@@ -141,6 +141,25 @@ broker with `INSTALL_HOMEASSISTANT=true` / `INSTALL_MQTT=true` (environment, or
 `[deploy]` in `bootstrap.cfg`). Turning them off on an existing server removes
 their containers but keeps `ha-config/` and `mosquitto/`, so they can be
 switched back on later.
+
+### Ubuntu or Debian, laptop or server
+
+The deploy script runs on **Ubuntu Server 22.04+** and **Debian 12+** (OpenMediaVault
+is Debian underneath). It stops on anything else before changing the machine. What
+differs between the two (Docker's apt repository, the unattended-upgrades origins, a
+package or two) lives in `lib/os/ubuntu.sh` and `lib/os/debian.sh`.
+
+On a manual run it first asks whether the machine is a **laptop** or a **server**,
+offering what it detects from the hardware (chassis type, battery):
+
+| | laptop | server (NAS, mini PC, VM) |
+|---|---|---|
+| Lid close | ignored (keeps running) | left as it is |
+| Sleep, suspend, hibernate | switched off | left as they are |
+| Power loss monitor (NUT) | offered if there is a battery | not offered (`NUT_POWER_INSTALL=true` forces it) |
+
+`HOST_TYPE=laptop` or `HOST_TYPE=server` answers it in advance; batch runs take the
+detected type. The answer is saved, so `--auto` keeps it.
 
 ### Cameras (automatic discovery)
 
@@ -709,9 +728,9 @@ results appear only in `/audit`.
 **Orchestrator (runs on laptop):**
 - `bootstrap.sh` — Python deployment orchestrator with progress display, rollback support
 
-**Target scripts (run on Ubuntu server via SSH):**
+**Target scripts (run on the Ubuntu or Debian server via SSH):**
 - `initial-setup.sh` — System setup (static IP, Docker, storage)
-- `deploy-edge-server.sh` — Deploy the stack (Frigate, Tailscale, firewall, Telegram bot; optional Home Assistant, MQTT)
+- `deploy-edge-server.sh` — Deploy the stack (Frigate, Tailscale, firewall, Telegram bot; optional Home Assistant, MQTT). An outline that runs the steps in `lib/` (one file per area; `lib/os/` holds what differs between Ubuntu and Debian)
 - `tools/fleet.py` — reads and checks the optional `fleet.yaml` (or signed registry) for the deploy script (`examples/fleet.*.yaml`)
 - `telegram-bot/governance.py` — host actions through the Autonomy policy check and action gateway, with an audit log (`/audit`)
 - `telegram-bot/controlplane.py` — signed heartbeats between the nodes of a fleet (only used with two or more nodes); built on [`autonomy-core`](https://github.com/realsystem/autonomy/tree/main/core), and speaks Autonomy envelopes to peers that support them

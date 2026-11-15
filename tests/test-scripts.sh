@@ -42,7 +42,7 @@ section() {
 
 section "Syntax Validation"
 
-for script in initial-setup.sh deploy-edge-server.sh secrets.sh; do
+for script in initial-setup.sh deploy-edge-server.sh secrets.sh lib/*.sh lib/os/*.sh; do
     if [ -f "$script" ]; then
         if bash -n "$script" 2>/dev/null; then
             pass "$script syntax OK"
@@ -229,7 +229,7 @@ else
 fi
 
 # Test: Has docker-compose generation
-if grep -q "docker.compose\|docker compose" deploy-edge-server.sh 2>/dev/null; then
+if grep -q "docker.compose\|docker compose" deploy-edge-server.sh lib/*.sh 2>/dev/null; then
     pass "Contains docker compose logic"
 else
     fail "Missing docker compose logic"

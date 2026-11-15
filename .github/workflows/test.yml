@@ -186,7 +186,7 @@ jobs:
       - name: Check bash syntax
         run: |
           shopt -s nullglob
-          for script in ./*.sh tests/*.sh tests/*/*.sh plugins/*/*.sh; do
+          for script in ./*.sh lib/*.sh lib/os/*.sh tests/*.sh tests/*/*.sh plugins/*/*.sh; do
             echo "Checking $script..."
             bash -n "$script"
           done
@@ -195,7 +195,7 @@ jobs:
         run: |
           shopt -s nullglob
           shellcheck -e SC1090,SC1091,SC2034,SC2016,SC2329 -- \
-            ./*.sh tests/*.sh tests/*/*.sh plugins/*/*.sh
+            ./*.sh lib/*.sh lib/os/*.sh tests/*.sh tests/*/*.sh plugins/*/*.sh
 
       - name: Set up Python (for the bootstrap CLI checks)
         uses: actions/setup-python@v6
