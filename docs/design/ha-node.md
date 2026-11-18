@@ -18,7 +18,7 @@ HAOS runs on the Pi from a flash card or USB; our scripts do not install it. The
 
 Run by `deploy-edge-server.sh` ("manage a Home Assistant node") and also directly as `tools/ha_node.py` (`init`, `check`, `plan`, `backup`, `sync`; step 1 and 2 of the order of work are built). It asks, and saves the answers to a per-site file (`ha-node.yaml`, no secrets in it), so a rerun asks nothing:
 1. the node's address and how to reach it (SSH user, key path, token file);
-2. what to deploy, each item opt-in: config packages from a git repo (any repo with the layout `homeassistant/packages/*.yaml`, such as farm_automation), integrations, add-ons, the `autonomy-node` add-on (bot token, TOTP secret, peers);
+2. what to deploy, each item opt-in: config packages from a git repo (any repo with the layout `homeassistant/packages/*.yaml`, and optionally `dashboards/`, such as farm_automation), integrations, add-ons, the `autonomy-node` add-on (bot token, TOTP secret, peers);
 3. a summary of changes, then confirmation.
 
 Secrets go through the existing `secrets.sh` (SOPS/age); the wizard never prints them.

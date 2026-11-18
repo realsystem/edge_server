@@ -229,6 +229,14 @@ def test_source_reads_only_allowed_roots_and_refuses_symlinks(tmp_path):
         hn.read_source(tmp_path)
 
 
+def test_dashboards_are_synced_too(tmp_path):
+    """farm_automation registers a YAML dashboard from dashboards/farm.yaml (outside packages/, which HA would
+    load as a package)."""
+    (tmp_path / "dashboards").mkdir()
+    (tmp_path / "dashboards/farm.yaml").write_text("title: Farm\nviews: []\n")
+    assert hn.read_source(tmp_path) == {"dashboards/farm.yaml": b"title: Farm\nviews: []\n"}
+
+
 def test_a_damaged_manifest_stops_the_sync():
     node = FakeNode()
     node.files[hn.MANIFEST] = b"not json"

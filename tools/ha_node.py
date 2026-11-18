@@ -39,7 +39,7 @@ from typing import Any, Protocol
 
 CONFIG_DIR = "/config"
 MANIFEST = f"{CONFIG_DIR}/.autonomy-managed.json"
-ALLOWED_ROOTS = ("packages", "custom_components", "blueprints", "www")
+ALLOWED_ROOTS = ("packages", "custom_components", "blueprints", "www", "dashboards")
 INCLUDE_BLOCK = "homeassistant:\n  packages: !include_dir_named packages\n"
 
 
