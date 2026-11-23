@@ -6,7 +6,7 @@ Deploy scripts and a Telegram bot for unattended Frigate NVR + Tailscale nodes (
 - Install: `pip install -e ".[dev]"` (or `make setup`, which makes `.venv`). It pulls the pinned `autonomy-core` from GitHub; the tests import it. (unverified: PyPI was blocked here; I ran the tests with the pinned `autonomy-core` source on `PYTHONPATH`)
 - All Python tests: `pytest` (about 4 min, 1196 passed, 2 skipped). One file: `pytest tests/test_fleet.py`. One test: `pytest tests/test_fleet.py::TestCommandLine::test_check_ok_and_error_exit_codes`. Works without an editable install (`pythonpath = src, tools`).
 - Shell tests: `./tests/test-scripts.sh` (under 1 s; run it as a normal user, the "refuses without root" checks need that).
-- Lint, as CI runs it (unverified, tools not installable here): `black --check src tests tools telegram-bot`; `ruff check src tests tools telegram-bot`; `mypy src tools telegram-bot/bot.py telegram-bot/controlplane.py --ignore-missing-imports`; `make lint` (shellcheck).
+- Lint, as CI runs it (black, ruff and mypy verified clean here; shellcheck not installed, unverified): `black --check src tests tools telegram-bot`; `ruff check src tests tools telegram-bot`; `mypy src tools telegram-bot/bot.py telegram-bot/controlplane.py --ignore-missing-imports`; `make lint` (shellcheck).
 - Everything except Docker jobs: `make ci-local` (unverified).
 - Plugins are separate packages: `cd plugins/<name> && pip install -e ".[dev]" && pytest` (unverified).
 - Needs a Docker daemon (unverified, none here): `make test`, `lab/lab.sh up --mock-telegram` (add `--nodes` for the Home Assistant add-on node), `make ha-test`.
