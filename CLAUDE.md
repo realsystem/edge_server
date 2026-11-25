@@ -41,3 +41,10 @@ Deploy scripts and a Telegram bot for unattended Frigate NVR + Tailscale nodes (
 - For bot, compose or deploy changes: `lab/lab.sh up --mock-telegram` still works, or the Docker CI jobs pass.
 - All CI checks green on the PR, including the secret scan.
 - README and the status line of `docs/design/edge-system.md` updated when behavior or phases change.
+
+## GitHub Free-plan limits
+This repo is public, so GitHub Actions minutes are free here. The account is on the GitHub Free plan and these limits still apply.
+
+- **Workflows:** keep jobs lean. Use `ubuntu-latest`, add `concurrency` with `cancel-in-progress: true` and `timeout-minutes` to new jobs, and set `retention-days` (3-7) on uploaded artifacts. The account-wide cap is 20 concurrent jobs (5 macOS); extra jobs queue.
+- **Files:** never commit a file over 50 MiB (GitHub warns) or 100 MiB (the push is blocked). Keep datasets, video, model weights and build output out of git; use Git LFS only if truly needed.
+- **GitHub API:** 5,000 requests/hour authenticated (60 unauthenticated), search 30/min, plus secondary limits. Scripts or agents that call the API must paginate, use conditional requests, and not fan out across repos in parallel.
