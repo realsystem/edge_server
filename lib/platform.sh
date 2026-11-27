@@ -58,7 +58,22 @@ check_platform() {
 # (/srv/dev-disk-by-uuid-...). Recordings written to the default /mnt/storage would
 # fill the system disk.
 choose_omv_storage() {
-    local answer
+    local answer saved="" saved_file="${SETTINGS_FILE:-${EDGE_SERVER_DIR:-/opt/edge-server}/deploy.env}"
+    # A manual re-deploy without EDGE_STORAGE_DIR must not move the recordings: use the
+    # folder the last deploy saved, else Frigate silently switches to /mnt/storage on the
+    # system disk.
+    if [[ -z "${EDGE_STORAGE_DIR:-}" && -r "$saved_file" ]]; then
+        saved=$(
+            unset EDGE_STORAGE_DIR
+            # shellcheck source=/dev/null
+            source "$saved_file" &> /dev/null || true
+            echo "${EDGE_STORAGE_DIR:-}"
+        )
+        if [[ "$saved" == /* && "$saved" != "$STORAGE_MOUNT" ]]; then
+            STORAGE_MOUNT="${saved%/}"
+            info "Recordings folder from the last deploy: $STORAGE_MOUNT (set EDGE_STORAGE_DIR to change it)"
+        fi
+    fi
     [[ -z "$EXTERNAL_DRIVE_UUID" ]] \
         || warn "EXTERNAL_DRIVE_UUID is ignored on OpenMediaVault: OMV mounts its drives itself"
     if [[ -z "${EDGE_STORAGE_DIR:-}" && "$BATCH_MODE" != "true" ]]; then
