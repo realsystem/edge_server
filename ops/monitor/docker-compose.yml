@@ -1,0 +1,31 @@
+# Off-site heartbeat monitor: Uptime Kuma, plus our own Caddy (HTTPS) only when no Caddy runs on the VM already.
+# Deployed by deploy.sh into /opt/edge-monitor, which also writes .env (COMPOSE_PROFILES=docker-caddy switches our
+# Caddy on) and, in that mode, the Caddyfile. Kuma listens on the VM's loopback only, never on the internet.
+services:
+  kuma:
+    image: ${KUMA_IMAGE:-louislam/uptime-kuma:2}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3001:3001"   # for the Caddy that runs on the VM itself
+    volumes:
+      - ./data/kuma:/app/data
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  caddy:
+    image: caddy:2
+    profiles: ["docker-caddy"]
+    restart: unless-stopped
+    depends_on:
+      - kuma
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data/caddy:/data
+      - ./data/caddy-config:/config
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
