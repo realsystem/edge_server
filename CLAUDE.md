@@ -26,6 +26,7 @@ Deploy scripts and a Telegram bot for unattended Frigate NVR + Tailscale nodes (
 - Python 3.10 to 3.13; black and ruff line length 100; `mypy` with `disallow_untyped_defs`. CI fails under 85% coverage for `src` and `tools`, 75% for each plugin.
 - Shell is shellcheck clean with the exclusions in `make lint`; `lib/*.sh` are sourced, never executed.
 - The deploy script stays idempotent, and the default "classic" mode (no `--config`) must keep behaving exactly as before. Node and site names are labels: never use them in paths, container names or systemd unit names.
+- This repository is **public**. Never commit or paste into a PR: names of private repositories, real host names or public addresses of your sites, tokens, push URLs, Telegram bot names or chat ids, passwords, or personal data. Examples use `acme/webapp`, `example.com`, `203.0.113.x` and `<uuid>`. Secrets go through `secrets.sh` or a git-ignored file on the machine that needs them. A private repository may refer to this one, not the other way round (the older mentions of `farm_automation` in `docs/design/ha-node.md` and `tests/test_ha_node.py` are the exception).
 - Commits: a short subject with an area prefix (`ha_node:`, `feat:`, `docs:`, `Lab:`) and the PR number; PRs are squash-merged to `main` after all CI jobs pass.
 
 ## Gotchas
