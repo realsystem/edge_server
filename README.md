@@ -539,6 +539,24 @@ the next deploy recreates them (Frigate restarts once) and the old log goes with
 the old container. To see their size first:
 `sudo du -sh /var/lib/docker/containers/*/*-json.log`.
 
+### Moving and sharing the recordings (optional)
+
+Where the recordings live is `EDGE_STORAGE_DIR` (a folder `frigate/` is created inside it). To
+move them, say where and ask for the move:
+
+```bash
+sudo EDGE_STORAGE_DIR=/srv/dev-disk-by-label-main STORAGE_MIGRATE=true FRIGATE_SHARE=true ./deploy-edge-server.sh
+```
+
+| Setting | What it does |
+|---|---|
+| `STORAGE_MIGRATE=true` | When `EDGE_STORAGE_DIR` differs from the folder the running stack uses, the stack is stopped, the existing recordings are copied to the new folder (`rsync`, then verified with a dry run), and the stack starts on the new one. The old folder is **kept**: delete it when you have looked at the new one. `false` never moves; empty asks on a manual run and, in batch mode, leaves the old recordings and says so. The copy takes a while (about 10 minutes per 20 GB on hard disks) and Frigate does not record during it; a failed copy starts the old stack again. Not saved in `deploy.env`: it is a one-time action. |
+| `FRIGATE_SHARE=true` | **OpenMediaVault only.** Publishes the recordings folder as an OMV shared folder `frigate` with a **read-only** NFS share (`/export/frigate`) for `FRIGATE_SHARE_CLIENT` (default: the local network), the same way you would in the web UI, so the footage can be browsed from a Mac or PC (`nfs://<server>/export/frigate`). Reused if it already exists; never removed. OMV's pending changes are applied only if nothing else was waiting in the UI, otherwise you are told to press Apply. |
+
+The recordings are plain MP4 files in `recordings/<date>/<hour>/<camera>/<minute.second>.mp4`; the
+date and hour in the folder names are UTC. The code is `lib/recordings.sh` and
+`host/omv-share-recordings.py`.
+
 ### Host protection (optional, off by default)
 
 Two things worth having on a NAS that holds the recordings. Neither is installed unless you ask,

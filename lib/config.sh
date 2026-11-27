@@ -152,6 +152,14 @@ CONFIG_BACKUP_DIR="${CONFIG_BACKUP_DIR:-}"
 CONFIG_BACKUP_KEEP="${CONFIG_BACKUP_KEEP:-14}"
 MD_ALERT="${MD_ALERT:-false}"
 
+# Recordings folder (lib/recordings.sh). STORAGE_MIGRATE: when EDGE_STORAGE_DIR changes, move the
+# recordings already there to the new folder (true), leave them (false), or ask (empty; batch
+# runs leave them with a warning). FRIGATE_SHARE=true publishes the recordings on OpenMediaVault
+# as a shared folder with a read-only NFS share for FRIGATE_SHARE_CLIENT (default: the local network).
+STORAGE_MIGRATE="${STORAGE_MIGRATE:-}"
+FRIGATE_SHARE="${FRIGATE_SHARE:-false}"
+FRIGATE_SHARE_CLIENT="${FRIGATE_SHARE_CLIENT:-}"
+
 # Uninstall (--uninstall): "true" removes without asking, "false" skips without
 # asking, empty asks. REMOVE_ADDON_CONFIG does the same for the saved settings
 # (device key, MQTT password) of the Bluetooth add-ons; they are kept by default.
