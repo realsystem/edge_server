@@ -56,7 +56,7 @@ source "$EDGE_LIB_DIR/config.sh"
 # STEPS (functions only: loading them changes nothing)
 #-------------------------------------------------------------------------------
 for _lib in common os platform host preflight packages network storage \
-    control-plane telegram stack services plugins redeploy; do
+    control-plane telegram stack services protect plugins redeploy; do
     # shellcheck source=/dev/null
     source "$EDGE_LIB_DIR/$_lib.sh"
 done
@@ -130,6 +130,8 @@ run_deploy() {
     install_auto_redeploy
     install_service_requests
     install_host_helpers
+    install_config_backup
+    install_md_alert
     start_services
     install_victron
     install_nut_power
