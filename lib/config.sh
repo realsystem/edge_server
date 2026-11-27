@@ -143,6 +143,15 @@ NUT_LOW_BATTERY="${NUT_LOW_BATTERY:-20}"          # Shutdown below this battery 
 RENOGY_INSTALL="${RENOGY_INSTALL:-}"
 RENOGY_ADDRESS="${RENOGY_ADDRESS:-}"
 
+# Host protection (lib/protect.sh), off unless asked for:
+# CONFIG_BACKUP_DIR=/some/folder  nightly backup of this server's configuration there (put it
+#   on another disk); the newest CONFIG_BACKUP_KEEP archives are kept.
+# MD_ALERT=true  local alert program for the software RAID monitor; only where mdadm arrays
+#   exist and mdadm.conf has no MAILADDR/PROGRAM.
+CONFIG_BACKUP_DIR="${CONFIG_BACKUP_DIR:-}"
+CONFIG_BACKUP_KEEP="${CONFIG_BACKUP_KEEP:-14}"
+MD_ALERT="${MD_ALERT:-false}"
+
 # Uninstall (--uninstall): "true" removes without asking, "false" skips without
 # asking, empty asks. REMOVE_ADDON_CONFIG does the same for the saved settings
 # (device key, MQTT password) of the Bluetooth add-ons; they are kept by default.

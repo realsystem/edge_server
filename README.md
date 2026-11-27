@@ -538,6 +538,34 @@ the next deploy recreates them (Frigate restarts once) and the old log goes with
 the old container. To see their size first:
 `sudo du -sh /var/lib/docker/containers/*/*-json.log`.
 
+### Host protection (optional, off by default)
+
+Two things worth having on a NAS that holds the recordings. Neither is installed unless you ask,
+both are saved in `deploy.env` (so `--auto` keeps them), setting one back to empty/`false` removes
+what it installed, and neither can stop the rest of the deploy.
+
+| Setting | What it does |
+|---|---|
+| `CONFIG_BACKUP_DIR=/srv/.../backup` | A nightly (03:30) archive of this server's own configuration: the compose file, Frigate config, `.cam`, `.telegram`, `deploy.env`, the `edge-*` units, `fstab`, `exports`, `mdadm.conf`, the OpenMediaVault config, Tailscale state. No recordings. Newest `CONFIG_BACKUP_KEEP` (default 14) are kept; one is written at deploy time. |
+| `MD_ALERT=true` | Gives the software-RAID monitor (`mdmonitor`) a local alert program, so a failed disk or a degraded array lands in the system log (tag `md-alert`) and `/var/log/md-alert.log`. |
+
+```bash
+sudo CONFIG_BACKUP_DIR=/srv/dev-disk-by-label-main/config-backup MD_ALERT=true ./deploy-edge-server.sh
+```
+
+The backup archive holds the camera logins and the bot token, so the folder is created root-only
+(`0700`, archives `0600`). Put it on **another disk** than the system disk: the deploy warns if it
+is on the same one, and the nightly job refuses to write if the drive it lives on is not mounted
+(instead of silently filling the system disk). To restore after a disk failure: reinstall,
+extract the newest archive over `/` and run the deploy again.
+
+`MD_ALERT` is applied only where it makes sense: `mdadm` is installed, an array exists in
+`/proc/mdstat`, there is a `mdmonitor.service`, and `mdadm.conf` has no `MAILADDR` or `PROGRAM` of
+its own (otherwise it says so and leaves RAID alerting alone). It does not send e-mail.
+
+The scripts are `host/config-backup.sh` and `host/md-alert.sh`; the install logic is
+`lib/protect.sh`.
+
 ### Job processor (optional, `INSTALL_PROCESSOR=true`)
 
 This node can host the control plane of [processor](https://github.com/realsystem/processor), a durable job queue. Workers on other machines poll it over Tailscale, for example a GPU machine at home that runs Ollama. Nothing is opened to the internet, and the GPU machine accepts no incoming connections.

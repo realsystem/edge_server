@@ -186,7 +186,7 @@ jobs:
       - name: Check bash syntax
         run: |
           shopt -s nullglob
-          for script in ./*.sh lib/*.sh lib/os/*.sh tests/*.sh tests/*/*.sh plugins/*/*.sh ops/*/*.sh; do
+          for script in ./*.sh lib/*.sh lib/os/*.sh tests/*.sh tests/*/*.sh plugins/*/*.sh ops/*/*.sh host/*.sh; do
             echo "Checking $script..."
             bash -n "$script"
           done
