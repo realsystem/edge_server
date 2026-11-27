@@ -12,8 +12,10 @@ Commands:
   ha_node.py check FILE                          SSH, /config, the ha CLI and the API token
   ha_node.py plan  FILE --source DIR             what a sync would add, change and remove
   ha_node.py backup FILE                         take an HA backup and print its id
-  ha_node.py sync  FILE --source DIR [--restart] [--add-include]
+  ha_node.py sync  FILE --source DIR [--restart] [--add-include] [--backup-args ARGS]
                                                  backup, copy, check_config, roll back on failure
+  ha_node.py sync  FILE --source DIR --reload    for a small node (a Raspberry Pi 3): no check_config, no
+                                                 restart; reload each changed domain, roll back if one fails
 
 Rules: only files this tool put there (listed in ``/config/.autonomy-managed.json``) are
 ever replaced or removed; an existing file it does not own is a conflict and stops the
@@ -65,6 +67,10 @@ class Api(Protocol):
     def check_config(self) -> tuple[bool, str]: ...
 
     def restart(self) -> None: ...
+
+    def services(self) -> dict[str, list[str]]: ...
+
+    def reload(self, domain: str) -> None: ...
 
     def request(self, method: str, path: str, body: Any = None) -> Any: ...
 
@@ -150,6 +156,13 @@ class HttpApi:
 
     def restart(self) -> None:
         self._call("POST", "/api/services/homeassistant/restart", {})
+
+    def services(self) -> dict[str, list[str]]:
+        found = self._call("GET", "/api/services") or []
+        return {str(d["domain"]): sorted(d.get("services") or {}) for d in found}
+
+    def reload(self, domain: str) -> None:
+        self._call("POST", f"/api/services/{domain}/reload", {})
 
 
 # --------------------------------------------------------------------------- site file
@@ -283,9 +296,15 @@ def do_check(node: Node, api: Api, out: Any = print) -> bool:
     return bool(ok)
 
 
-def do_backup(node: Node) -> str:
+def do_backup(node: Node, extra_args: str = "") -> str:
+    """An HA backup. ``extra_args`` (a lighter backup for a small node, say) are options of ``ha backups new``."""
     name = "autonomy-" + time.strftime("%Y%m%d-%H%M%S", time.gmtime())
-    rc, text = node.run(f"ha backups new --name {shlex.quote(name)} --raw-json")
+    extra = ""
+    if extra_args.strip():
+        if any(ch in extra_args for ch in ";&|$`<>\n"):
+            raise HaNodeError("--backup-args may only hold options of 'ha backups new'")
+        extra = " " + " ".join(shlex.quote(part) for part in shlex.split(extra_args))
+    rc, text = node.run(f"ha backups new --name {shlex.quote(name)}{extra} --raw-json")
     if rc != 0:
         raise HaNodeError(f"backup failed: {text.strip()[:300]}")
     try:
@@ -296,6 +315,69 @@ def do_backup(node: Node) -> str:
     return slug
 
 
+# Reload order: helpers first (templates and automations refer to them), automations last.
+RELOAD_ORDER = [
+    "input_boolean",
+    "input_button",
+    "input_datetime",
+    "input_number",
+    "input_select",
+    "input_text",
+    "counter",
+    "timer",
+    "schedule",
+    "group",
+    "template",
+    "rest_command",
+    "script",
+    "scene",
+    "automation",
+]
+
+
+def package_domains(content: bytes) -> list[str]:
+    """The top-level keys (HA domains) of a package file, found without parsing it (a package may use !include tags)."""
+    found: list[str] = []
+    for line in content.decode("utf-8", "replace").splitlines():
+        if line and line[0].isalpha() and ":" in line:
+            key = line.split(":", 1)[0].strip()
+            if key.replace("_", "").isalnum() and key not in found:
+                found.append(key)
+    return found
+
+
+def reload_plan(changed: dict[str, bytes], api: Api) -> tuple[list[str], list[str]]:
+    """Which domains to reload, and which changes need a restart instead (no reload service, or a custom component)."""
+    available = api.services()
+    domains: list[str] = []
+    needs_restart: list[str] = []
+    for rel, content in changed.items():
+        if rel.startswith("custom_components/"):
+            needs_restart.append(rel)
+            continue
+        if not rel.startswith("packages/"):
+            continue  # dashboards and the like are read by HA when the page is opened
+        for domain in package_domains(content):
+            if "reload" in available.get(domain, []):
+                if domain not in domains:
+                    domains.append(domain)
+            elif f"{domain} (in {rel})" not in needs_restart:
+                needs_restart.append(f"{domain} (in {rel})")
+    domains.sort(key=lambda d: RELOAD_ORDER.index(d) if d in RELOAD_ORDER else len(RELOAD_ORDER))
+    return domains, needs_restart
+
+
+def do_reload(api: Api, domains: list[str], out: Any) -> str | None:
+    """Reload the domains one by one. Returns None when all worked, else a text naming the first that failed."""
+    for domain in domains:
+        try:
+            api.reload(domain)
+        except HaNodeError as exc:
+            return f"{domain}: {exc}"
+        out(f"reloaded {domain}")
+    return None
+
+
 def do_sync(
     node: Node,
     api: Api,
@@ -303,7 +385,11 @@ def do_sync(
     restart: bool = False,
     add_include: bool = False,
     out: Any = print,
+    reload: bool = False,
+    backup_args: str = "",
 ) -> bool:
+    if reload and restart:
+        raise HaNodeError("--reload and --restart are two ways to load the change: choose one")
     plan = make_plan(node, wanted)
     if plan["conflict"]:
         raise HaNodeError(
@@ -322,7 +408,7 @@ def do_sync(
         out("nothing to change")
         return True
 
-    backup = do_backup(node)
+    backup = do_backup(node, backup_args)
     out(f"backup {backup} taken")
 
     manifest = load_manifest(node)
@@ -356,7 +442,23 @@ def do_sync(
             MANIFEST,
             json.dumps({"files": files, "backup": backup}, indent=1, sort_keys=True).encode(),
         )
-        valid, errors = api.check_config()
+        needs_restart: list[str] = []
+        if reload:
+            # what changed, and what a removed file used to hold: both decide what to reload
+            touched = {rel: wanted[rel] for rel in plan["add"] + plan["change"]}
+            touched.update(
+                {rel: old for rel, old in saved.items() if rel in plan["remove"] and old}
+            )
+            domains, needs_restart = reload_plan(touched, api)
+            failure = do_reload(api, domains, out)
+            if failure:
+                undo()
+                do_reload(api, domains, lambda _line: None)  # load the previous state again
+                out(f"reload FAILED ({failure}); the previous files are back and reloaded")
+                return False
+            valid, errors = True, ""
+        else:
+            valid, errors = api.check_config()
     except Exception:
         undo()
         raise
@@ -366,9 +468,17 @@ def do_sync(
         if errors:
             out(errors[:600])
         return False
-    out(
-        f"check_config ok; {len(plan['add'])} added, {len(plan['change'])} changed, {len(plan['remove'])} removed"
+    counts = (
+        f"{len(plan['add'])} added, {len(plan['change'])} changed, {len(plan['remove'])} removed"
     )
+    if reload:
+        out(
+            f"reload mode: {counts}; check_config and restart skipped (each reload checks its own domain)"
+        )
+        if needs_restart:
+            out("needs a restart to load: " + ", ".join(needs_restart))
+        return True
+    out(f"check_config ok; {counts}")
     if restart:
         api.restart()
         out("Home Assistant is restarting")
@@ -700,7 +810,17 @@ def main(argv: list[str] | None = None) -> int:
             )
         if name == "sync":
             p.add_argument("--restart", action="store_true")
+            p.add_argument(
+                "--reload",
+                action="store_true",
+                help="load by reloading the changed domains: no check_config, no restart (small nodes)",
+            )
             p.add_argument("--add-include", action="store_true")
+            p.add_argument(
+                "--backup-args",
+                default="",
+                help="options added to 'ha backups new' (a lighter backup)",
+            )
     args = ap.parse_args(argv)
     try:
         if args.cmd == "init":
@@ -719,7 +839,16 @@ def main(argv: list[str] | None = None) -> int:
                 for rel in items:
                     print(f"{kind:9} {rel}")
             return 0
-        return 0 if do_sync(node, api, wanted, args.restart, args.add_include) else 1
+        ok = do_sync(
+            node,
+            api,
+            wanted,
+            args.restart,
+            args.add_include,
+            reload=args.reload,
+            backup_args=args.backup_args,
+        )
+        return 0 if ok else 1
     except HaNodeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

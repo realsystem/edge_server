@@ -62,12 +62,34 @@ class FakeNode:
         self.files.pop(path, None)
 
 
+RELOADABLE = [
+    "input_boolean",
+    "input_button",
+    "input_datetime",
+    "input_number",
+    "input_select",
+    "input_text",
+    "counter",
+    "timer",
+    "schedule",
+    "group",
+    "template",
+    "rest_command",
+    "script",
+    "scene",
+    "automation",
+]
+
+
 class FakeApi:
-    def __init__(self, valid=True, up=True, entries=None, flows=None):
+    def __init__(self, valid=True, up=True, entries=None, flows=None, reload_fails=None):
         self.valid, self.up, self.restarted = valid, up, False
         self.entries = list(entries or [])
         self.flows = flows or {}  # domain -> list of answers, in order
         self.posted = []
+        self.check_calls = 0
+        self.reloaded = []
+        self.reload_fails = dict(reload_fails or {})  # domain -> how many times its reload fails
 
     def request(self, method, path, body=None):
         if path.endswith("/entry"):
@@ -88,10 +110,24 @@ class FakeApi:
         return self.up
 
     def check_config(self):
+        self.check_calls += 1
         return self.valid, "" if self.valid else "bad yaml"
 
     def restart(self):
         self.restarted = True
+
+    def services(self):
+        return {
+            **{d: ["reload"] for d in RELOADABLE},
+            "homeassistant": ["restart"],
+            "recorder": ["purge"],
+        }
+
+    def reload(self, domain):
+        if self.reload_fails.get(domain):
+            self.reload_fails[domain] -= 1
+            raise hn.HaNodeError(f"HA API /api/services/{domain}/reload: HTTP 500")
+        self.reloaded.append(domain)
 
 
 def sync(node, wanted, api=None, **kw):
@@ -473,3 +509,154 @@ def test_wizard_asks_for_addons_and_integrations_and_applies_them(tmp_path):
     assert "mqtt" in api.entries
     saved = site.read_text()
     assert "core_mosquitto" in saved and "mqtt" in saved and "_csv" not in saved
+
+
+# --------------------------------------------------------------------------- reload mode (small nodes)
+
+PKG_YAML = b"input_text:\n  a:\n    name: A\ntemplate:\n  - sensor: []\nautomation:\n  - id: x\n"
+
+
+def test_reload_mode_reloads_the_changed_domains_in_order_with_no_check_and_no_restart():
+    node = FakeNode()
+    ok, out, api = sync(node, {PKG: PKG_YAML}, reload=True)
+    assert ok
+    assert api.reloaded == [
+        "input_text",
+        "template",
+        "automation",
+    ]  # helpers first, automations last
+    assert api.check_calls == 0 and not api.restarted
+    assert node.files["/config/" + PKG] == PKG_YAML
+    assert any("reload mode" in line and "check_config and restart skipped" in line for line in out)
+
+
+def test_reload_mode_with_nothing_changed_reloads_nothing():
+    node = FakeNode()
+    sync(node, {PKG: PKG_YAML}, reload=True)
+    ok, out, api = sync(node, {PKG: PKG_YAML}, reload=True)
+    assert ok and api.reloaded == [] and out == ["nothing to change"]
+
+
+def test_only_what_a_changed_file_holds_is_reloaded():
+    node = FakeNode()
+    sync(
+        node,
+        {PKG: PKG_YAML, "packages/other.yaml": b"input_number:\n  n:\n    min: 0\n"},
+        reload=True,
+    )
+    _, _, api = sync(
+        node,
+        {PKG: PKG_YAML, "packages/other.yaml": b"input_number:\n  n:\n    min: 1\n"},
+        reload=True,
+    )
+    assert api.reloaded == ["input_number"]
+
+
+def test_a_domain_without_a_reload_service_is_reported_as_needing_a_restart():
+    node = FakeNode()
+    ok, out, api = sync(
+        node,
+        {PKG: b"recorder:\n  purge_keep_days: 30\ninput_text:\n  a:\n    name: A\n"},
+        reload=True,
+    )
+    assert ok and api.reloaded == ["input_text"]
+    assert any(
+        "needs a restart to load: recorder (in packages/farm_soil.yaml)" in line for line in out
+    )
+
+
+def test_a_custom_component_needs_a_restart_and_is_not_reloaded():
+    node = FakeNode()
+    ok, out, api = sync(node, {"custom_components/x/__init__.py": b"# x\n"}, reload=True)
+    assert ok and api.reloaded == []
+    assert any("needs a restart to load: custom_components/x/__init__.py" in line for line in out)
+
+
+def test_a_failed_reload_puts_the_files_back_and_loads_them_again():
+    node = FakeNode()
+    sync(node, {PKG: PKG_YAML}, reload=True)
+    before = dict(node.files)
+    api = FakeApi(reload_fails={"template": 1})  # the new content is refused once
+    ok, out, api = sync(
+        node,
+        {PKG: PKG_YAML + b"# changed\n", "packages/new.yaml": b"input_text:\n  b:\n    name: B\n"},
+        api,
+        reload=True,
+    )
+    assert not ok and node.files == before  # files and manifest are as they were
+    assert any(
+        "reload FAILED (template" in line and "previous files are back" in line for line in out
+    )
+    assert api.reloaded[-3:] == [
+        "input_text",
+        "template",
+        "automation",
+    ]  # the old state was loaded again
+
+
+def test_removing_a_package_reloads_the_domains_it_held():
+    node = FakeNode()
+    sync(
+        node,
+        {PKG: PKG_YAML, "packages/other.yaml": b"input_boolean:\n  flag:\n    name: F\n"},
+        reload=True,
+    )
+    ok, _, api = sync(node, {PKG: PKG_YAML}, reload=True)
+    assert ok and api.reloaded == ["input_boolean"]
+    assert "/config/packages/other.yaml" not in node.files
+
+
+def test_reload_and_restart_cannot_be_combined():
+    with pytest.raises(hn.HaNodeError, match="choose one"):
+        sync(FakeNode(), {PKG: PKG_YAML}, reload=True, restart=True)
+
+
+def test_the_default_mode_still_checks_the_config_and_never_reloads():
+    ok, _, api = sync(FakeNode(), {PKG: PKG_YAML})
+    assert ok and api.check_calls == 1 and api.reloaded == []
+
+
+def test_backup_options_are_passed_to_ha_and_shell_syntax_is_refused():
+    node = FakeNode()
+    sync(node, {PKG: b"a: 1\n"}, backup_args="--folders homeassistant --name-suffix x")
+    command = next(c for c in node.commands if c.startswith("ha backups new"))
+    assert "--folders homeassistant --name-suffix x --raw-json" in command
+    for bad in ("; rm -rf /", "--x $(id)", "--x `id`", "a | b", "--x > /tmp/y"):
+        with pytest.raises(hn.HaNodeError, match="backup-args"):
+            sync(FakeNode(), {PKG: b"a: 1\n"}, backup_args=bad)
+
+
+def test_the_package_domains_are_the_top_level_keys():
+    text = b"# a comment\ninput_text:\n  x:\n    name: n\ntemplate:\n  - sensor: []\nhomeassistant:\n  customize: {}\n"
+    assert hn.package_domains(text) == ["input_text", "template", "homeassistant"]
+
+
+def test_the_http_api_lists_services_and_reloads_a_domain(monkeypatch):
+    calls = []
+
+    def call(self, method, path, body=None):
+        calls.append((method, path))
+        if path == "/api/services":
+            return [
+                {"domain": "template", "services": {"reload": {}}},
+                {"domain": "light", "services": {"turn_on": {}}},
+            ]
+        return {}
+
+    monkeypatch.setattr(hn.HttpApi, "_call", call)
+    api = hn.HttpApi("http://ha:8123/", "tok")
+    assert api.services() == {"template": ["reload"], "light": ["turn_on"]}
+    api.reload("template")
+    assert calls[-1] == ("POST", "/api/services/template/reload")
+
+
+def test_the_command_line_reload_flag_loads_by_reloading(monkeypatch, tmp_path, capsys):
+    node, api = FakeNode(), FakeApi()
+    monkeypatch.setattr(hn, "load_site", lambda f: {})
+    monkeypatch.setattr(hn, "connect", lambda site: (node, api))
+    src = make_source(tmp_path)
+    (src / "packages/farm.yaml").write_text("input_text:\n  a:\n    name: A\n")
+    assert hn.main(["sync", "site.yaml", "--source", str(src), "--reload"]) == 0
+    assert api.reloaded == ["input_text"] and api.check_calls == 0 and not api.restarted
+    assert hn.main(["sync", "site.yaml", "--source", str(src), "--reload", "--restart"]) == 1
+    assert "choose one" in capsys.readouterr().err
