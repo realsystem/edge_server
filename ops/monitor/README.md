@@ -24,8 +24,11 @@ for regions and limits).
    Find your address at https://api.ipify.org. Add `--domain monitor.example.com` if you have a domain (an A record
    must point at the VM); without it the script uses `<address>.sslip.io`, which needs no DNS. (To clone a *private*
    repo on the VM instead, see [`ops/vm/setup-github-key.sh`](../vm/setup-github-key.sh).)
-4. **Do what the script prints at the end** (create the admin account at once, add a Telegram or Pushover
-   notification, add a *Push* monitor, point your heartbeat sender at its URL, test).
+4. **Do what the script prints at the end.** Kuma 2's first screen asks for a database: choose **SQLite** (MariaDB needs far
+   more memory than a small VM has). Then create the admin account at once, add a Telegram or Pushover notification, add a
+   *Push* monitor, point your heartbeat sender at its URL, and test. The first start of Kuma can take several minutes on a
+   small VM (the image is large); the script waits for it before it finishes. A `403` from its own final check is normal when
+   `--admin-ip` is set, because the check runs from the VM's own address.
 
 The script installs swap (if the VM is small), Docker, automatic security updates, the monitor, a nightly backup and the
 optional watchdog ping. Run it again to update or to change an option; your data and earlier options are kept.

@@ -364,6 +364,22 @@ docker compose up -d --remove-orphans
 ok "containers started"
 docker compose ps --format 'table {{.Name}}\t{{.Status}}' || true
 
+say "Waiting for Uptime Kuma to start (the first start can take several minutes on a small VM)"
+kuma_up=0
+for _ in $(seq 1 72); do
+  kcode="$(curl -s -o /dev/null -m 5 -w '%{http_code}' http://127.0.0.1:3001/ 2>/dev/null || true)"
+  case "$kcode" in
+    200 | 301 | 302 | 303) kuma_up=1; break ;;
+  esac
+  sleep 5
+done
+if [ "$kuma_up" -eq 1 ]; then
+  ok "Kuma answers on 127.0.0.1:3001"
+else
+  warn "Kuma did not answer within 6 minutes; visitors get 502 Bad Gateway until it does"
+  hint "what Kuma says: sudo docker compose -f $APP_DIR/docker-compose.yml logs --tail 50 kuma"
+fi
+
 if [ "$CADDY_MODE" = host ]; then
   apply_caddy_block
 fi
@@ -383,6 +399,7 @@ else
   done
   if [ "$up" -eq 1 ]; then
     ok "https://$DOMAIN answers (HTTP $code). Let's Encrypt reached this VM, so ports 80 and 443 are open."
+    [ "$code" != 403 ] || hint "403 is expected with --admin-ip: this check runs from the VM, whose own address is not allowed. It proves HTTPS works and the restriction is on."
   else
     warn "https://$DOMAIN did not answer within 3 minutes"
     hint "most likely the GCP firewall: ports 80 and 443 must be open to the internet (Let's Encrypt needs port 80). Commands are below."
@@ -411,7 +428,9 @@ cat <<EOF
 ============================================================
 
 DO THESE NEXT (in this order)
- 1. Open https://$DOMAIN and create the admin account right now. Until you do, the first visitor can.
+ 1. Open https://$DOMAIN (from an address allowed by --admin-ip). Kuma 2 first asks which database to use:
+    choose SQLite (light; MariaDB needs far more memory than a small VM has). Then create the admin account
+    right now: until you do, the first visitor can.
  2. Settings > Notifications > Setup Notification: pick Telegram or Pushover (no mail server needed), tick
     "Default enabled", and press Test. Alerts must reach your phone, not just this page.
  3. Add New Monitor:  Type = Push,  Friendly Name = "Site heartbeat",
@@ -427,9 +446,10 @@ IF THE SENDER'S POST IS REJECTED (the monitor stays "pending"; the sender logs 4
     with GET instead of POST.
 
 KEEP IT HEALTHY
- - Reserve a static address so the sslip.io name never changes:
-     gcloud compute addresses create edge-monitor-ip --region ${VM_REGION:-REGION}
-     (then attach it to the VM's network interface in the console: VM > Edit > Network interfaces > External IP)
+ - Keep the address (and so the sslip.io name) from changing: promote the VM's CURRENT address to a reserved one.
+   Skip this if the VM already has a static address.
+     gcloud compute addresses create edge-monitor-ip --region ${VM_REGION:-REGION} --addresses ${PUBLIC_IP:-CURRENT_ADDRESS}
+   (without --addresses it would reserve a different address and the name would change)
  - Open the web ports if they are not open yet (skip if you already did):
      gcloud compute firewall-rules create edge-monitor-web --allow tcp:80,tcp:443 --target-tags edge-monitor
      gcloud compute instances add-tags ${VM_NAME:-VM_NAME} --zone ${VM_ZONE:-ZONE} --tags edge-monitor
