@@ -90,3 +90,5 @@ containers, untar `kuma-<date>.tgz` into `/opt/edge-monitor/data/`, start them).
 `bash -n`, shellcheck, the Caddyfile generation (`./ops/monitor/deploy.sh --print-caddyfile`) and `tests/test_monitor.py`,
 which runs the real Caddyfile edit against a temporary file with stub `caddy` and `systemctl`. The install itself needs
 a VM: report the first run's output if anything fails.
+
+See [`docs/design/external-heartbeat.md`](../../docs/design/external-heartbeat.md) for the whole system (senders, monitor, alert path, watchdog, secrets, the end-to-end test).
