@@ -433,11 +433,11 @@ DO THESE NEXT (in this order)
     right now: until you do, the first visitor can.
  2. Settings > Notifications > Setup Notification: pick Telegram or Pushover (no mail server needed), tick
     "Default enabled", and press Test. Alerts must reach your phone, not just this page.
- 3. Add New Monitor:  Type = Push,  Friendly Name = "Site heartbeat",
+ 3. Add New Monitor:  Type = Push,  Friendly Name = "<site> heartbeat" (one monitor per site),
       Heartbeat Interval = 900 seconds (a sender that beats every 5 minutes then tolerates three misses
       before an alert),  Retries = 0.  Save.  Copy the Push URL it shows.
- 4. Point the heartbeat sender at that URL, sending about every 5 minutes. For the farm_automation Home Assistant
-    package: paste it into the helper "Farm heartbeat URL" (input_text.farm_heartbeat_url).
+ 4. Point the heartbeat sender at that URL, sending about every 5 minutes: a Home Assistant helper that holds the URL,
+    a timer on a host, or any HTTP client. The URL is a secret: keep it out of git and out of chat logs.
  5. Test the whole chain: stop the sender (or pull the site's network cable) and confirm the alert reaches
     your phone about 15 minutes later. An alarm you have never seen fire is not an alarm.
 

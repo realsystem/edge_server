@@ -65,6 +65,28 @@ With `--admin-ip`, only those addresses can open the admin UI. The heartbeat URL
 everyone because a site's public address changes (Starlink, mobile data); the secret in the URL is what protects it, so
 keep it private and HTTPS-only.
 
+## Setting Kuma up from code
+
+Instead of clicking through Kuma's pages, `ops/monitor/kuma-provision.sh` (a wrapper around `tools/kuma_provision.py`) does the
+first-run work and can be run again at any time. It chooses SQLite, creates the admin account, adds the Telegram notification,
+and makes one push monitor per site, saving each monitor's push URL to a private file. Run it on the VM, against Kuma's
+loopback address (the admin page of a public monitor is normally limited to your own address):
+
+```
+# secrets live in files only you can read; the admin password file is created for you if it does not exist
+sudo ./ops/monitor/kuma-provision.sh --plan \
+    --url http://127.0.0.1:3001 --public-url https://monitor.example.com \
+    --admin-password-file /root/.kuma-admin \
+    --telegram-token-file /root/.kuma-telegram-token --telegram-chat-id 123456789 \
+    --monitor "Home HA heartbeat" --monitor "Farm HA heartbeat" --urls-out /root/heartbeat-urls.env
+```
+
+Drop `--plan` to apply. The push URLs are written as `HOME_HA_HEARTBEAT_URL=...` lines (mode 600) and **never printed**: copy
+each into its sender (an HA helper, a host's heartbeat file). Running it again changes nothing that is already right; a changed
+`--interval` or a new `--monitor` is applied. The Telegram step sends a test message first and stops if it fails (a bot can only
+message a chat that has started a conversation with it). The Socket.IO client library is installed into a private venv, not
+system-wide. Kuma has no setup API, so this drives the same channel its web page uses; a Kuma upgrade could change it.
+
 ## Heartbeat details to know
 
 - A sender may use POST or GET. Uptime Kuma 2 accepts any method on the push URL; version 1 only accepted GET. The script
@@ -90,3 +112,5 @@ containers, untar `kuma-<date>.tgz` into `/opt/edge-monitor/data/`, start them).
 `bash -n`, shellcheck, the Caddyfile generation (`./ops/monitor/deploy.sh --print-caddyfile`) and `tests/test_monitor.py`,
 which runs the real Caddyfile edit against a temporary file with stub `caddy` and `systemctl`. The install itself needs
 a VM: report the first run's output if anything fails.
+
+See [`docs/design/external-heartbeat.md`](../../docs/design/external-heartbeat.md) for the whole system (senders, monitor, alert path, watchdog, secrets, the end-to-end test).
