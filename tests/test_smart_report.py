@@ -100,6 +100,15 @@ class TestCollect:
         assert [d["device"] for d in report["disks"]] == ["sda", "nvme0"]
         assert "error" not in report and report["generated"] > 0
 
+    def test_scsi_label_is_not_forwarded(self):
+        # --scan calls SATA disks behind some controllers "scsi"; "-d scsi" hides their ATA data
+        replies = {
+            ("--scan",): {"devices": [{"name": "/dev/sdb", "type": "scsi"}]},
+            ("-a", "/dev/sdb"): ata([attr(5, raw=24)]),
+        }
+        report = smart.collect(self.runner(replies))
+        assert [d["reallocated"] for d in report["disks"]] == [24]
+
     def test_a_disk_that_does_not_answer_is_left_out(self):
         replies = {("--scan",): {"devices": [{"name": "/dev/sda", "type": "sat"}]}}
         assert smart.collect(self.runner(replies))["disks"] == []

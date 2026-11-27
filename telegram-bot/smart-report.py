@@ -42,7 +42,9 @@ def parse_disk(data: dict) -> dict | None:
     if isinstance(support, dict) and support.get("available") is False:
         return None
     device = data.get("device") or {}
-    name = str(device.get("name", "?")).removeprefix("/dev/")
+    name = str(device.get("name", "?"))
+    if name.startswith("/dev/"):  # not removeprefix: the host may run Python 3.7 (OMV 5)
+        name = name[len("/dev/") :]
     status = data.get("smart_status")
     disk: dict = {
         "device": name,
@@ -81,13 +83,15 @@ def collect(runner: Callable[[list[str]], dict | None] = run_smartctl) -> dict:
     if scan is None:
         return {
             "generated": time.time(),
-            "error": "smartctl is not installed or failed",
+            "error": "smartctl is not installed, older than 7.0 (no JSON output) or failed",
             "disks": [],
         }
     disks = []
     for entry in scan.get("devices") or []:
         args = ["-a", entry.get("name", "")]
-        if entry.get("type"):
+        # --scan labels SATA disks behind some controllers "scsi"; forcing that hides their
+        # ATA attributes, so let smartctl detect those itself
+        if entry.get("type") and entry["type"] != "scsi":
             args += ["-d", entry["type"]]
         data = runner(args)
         disk = parse_disk(data) if data else None

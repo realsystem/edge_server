@@ -340,11 +340,14 @@ def ws_discover(
         found: dict[str, str] = {}
         replies = 0
         deadline = time.monotonic() + timeout
-        while (remaining := deadline - time.monotonic()) > 0:
+        while True:  # no walrus: the deploy may run this with Python 3.7 (OMV 5)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
             sock.settimeout(remaining)
             try:
                 data, sender = sock.recvfrom(65535)
-            except TimeoutError:
+            except (socket.timeout, TimeoutError):  # noqa: UP041  (separate classes before 3.10)
                 break
             replies += 1
             urls = parse_probe_matches(data)

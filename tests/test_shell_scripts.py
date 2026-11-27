@@ -3355,6 +3355,29 @@ class TestOpenMediaVault:
         r = self.run(stub_path, env, body, input="/elsewhere\n")
         assert "storage=/mnt/storage" in r.stdout and "Folder for recordings" not in r.stdout
 
+    def test_storage_folder_of_the_last_deploy_is_kept(self, stub_path, omv, tmp_path):
+        # a manual re-deploy without EDGE_STORAGE_DIR must not fall back to /mnt/storage
+        saved = tmp_path / "deploy.env"
+        saved.write_text(
+            "[[ -v EDGE_STORAGE_DIR ]] || EDGE_STORAGE_DIR=/srv/dev-disk-by-uuid-abc/frigate\n"
+        )
+        env = {k: v for k, v in omv.items() if k != "EDGE_STORAGE_DIR"}  # batch, nothing set
+        body = 'choose_omv_storage; echo "storage=$STORAGE_MOUNT"'
+        r = self.run(stub_path, {**env, "EDGE_SERVER_DIR": str(tmp_path)}, body)
+        assert "storage=/srv/dev-disk-by-uuid-abc/frigate" in r.stdout, r.stdout + r.stderr
+        assert "from the last deploy" in r.stdout and "fill the system disk" not in r.stdout
+        # an explicit EDGE_STORAGE_DIR still wins
+        r = self.run(
+            stub_path,
+            {
+                **env,
+                "EDGE_SERVER_DIR": str(tmp_path),
+                "EDGE_STORAGE_DIR": "/srv/dev-disk-by-uuid-x/n",
+            },
+            body,
+        )
+        assert "storage=/srv/dev-disk-by-uuid-x/n" in r.stdout
+
     def test_drive_uuid_is_ignored_with_a_warning_on_omv(self, stub_path, omv):
         r = self.run(stub_path, {**omv, "EXTERNAL_DRIVE_UUID": "1234-ABCD"}, "choose_omv_storage")
         assert "EXTERNAL_DRIVE_UUID is ignored on OpenMediaVault" in r.stdout
