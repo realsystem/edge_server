@@ -33,7 +33,7 @@ that stops sending is always an alert. Look at the last beats with `journalctl -
 
 ## Home Assistant package
 
-Copy `ha/edge_heartbeat.yaml` into the `packages/` folder of the HA configuration (`tools/ha_node.py sync` does this for a node),
+Copy `ha/edge_heartbeat.yaml` into the `packages/` folder of the HA configuration (`tools/ha_node.py sync` does this for a node; add `--reload` on a small node such as a Raspberry Pi 3, so that no configuration check runs and nothing restarts),
 set the URL in the HA UI (Settings > Devices & services > Helpers > "Edge heartbeat URL"), and reload `input_text`,
 `input_datetime`, `template`, `rest_command` and `automation` (a first-time `rest_command` needs one restart). Nothing is sent until
 the helper starts with `http`: an unset helper reads `unknown`, which is why the check is for `http`, not for a length. It
@@ -41,7 +41,7 @@ reports `ok | HA up 12.3 h | 3 unavailable`.
 
 ## Testing a sender end to end
 
-A sender is not proven until an alert has reached a phone. With the sender running and the monitor up: stop the sender (or unplug
+The whole system is described in [`docs/design/external-heartbeat.md`](../../docs/design/external-heartbeat.md). A sender is not proven until an alert has reached a phone. With the sender running and the monitor up: stop the sender (or unplug
 the network cable of the site) and wait for the monitor's window to pass (15 minutes with the default 900-second Kuma monitor).
 The "Down" message must arrive on the phone; then restore the sender and the "Up" message must follow. An alarm that has never
 been seen to fire is not an alarm.
