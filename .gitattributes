@@ -1,0 +1,3 @@
+# Scripts that run on a Linux VM must keep LF line endings even when checked out on Windows.
+ops/**/*.sh text eol=lf
+ops/monitor/docker-compose.yml text eol=lf

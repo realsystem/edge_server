@@ -52,6 +52,13 @@ Optional monitoring plugins. They publish to Home Assistant via MQTT when
 | **Renogy Rover MPPT** | Solar charger monitor via BLE. Reads PV voltage/power, battery status, charge state. | Renogy MPPT controller with BT-2 module |
 | **NUT Power Monitor** | Auto-shutdown on power loss. Monitors laptop battery and triggers shutdown after configurable time on battery. | Laptop with battery (Linux) |
 
+## Off-site heartbeat monitor and VM helpers
+
+Sites can send a heartbeat to a small VM that is not on the site, which alerts you when the heartbeats stop.
+[`ops/monitor/`](ops/monitor/README.md) deploys it (Uptime Kuma behind Caddy, optionally appending to a Caddy that already
+runs on the VM), and [`ops/vm/setup-github-key.sh`](ops/vm/setup-github-key.sh) gives a VM a read-only deploy key for one
+private repository. Both are Linux-only and idempotent.
+
 ## Quick Start (from laptop)
 
 ```bash

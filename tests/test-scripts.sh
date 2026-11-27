@@ -42,7 +42,7 @@ section() {
 
 section "Syntax Validation"
 
-for script in initial-setup.sh deploy-edge-server.sh secrets.sh lib/*.sh lib/os/*.sh; do
+for script in initial-setup.sh deploy-edge-server.sh secrets.sh lib/*.sh lib/os/*.sh ops/*/*.sh; do
     if [ -f "$script" ]; then
         if bash -n "$script" 2>/dev/null; then
             pass "$script syntax OK"
@@ -73,7 +73,7 @@ done
 section "ShellCheck Linting"
 
 if command -v shellcheck >/dev/null 2>&1; then
-    for script in *.sh tests/*.sh plugins/*/*.sh; do
+    for script in *.sh tests/*.sh plugins/*/*.sh ops/*/*.sh; do
         if [ -f "$script" ]; then
             # SC1090: Can't follow non-constant source
             # SC1091: Not following sourced file

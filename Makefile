@@ -243,7 +243,7 @@ test-scripts:
 
 lint:
 	@command -v shellcheck >/dev/null || (echo "Install shellcheck: brew install shellcheck" && exit 1)
-	@shellcheck -e SC1090,SC1091,SC2034,SC2016,SC2329 *.sh lib/*.sh lib/os/*.sh tests/*.sh tests/*/*.sh plugins/*/*.sh
+	@shellcheck -e SC1090,SC1091,SC2034,SC2016,SC2329 *.sh lib/*.sh lib/os/*.sh tests/*.sh tests/*/*.sh plugins/*/*.sh ops/*/*.sh
 	@echo "Lint complete"
 
 # Show memory usage of running test containers
