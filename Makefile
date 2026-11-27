@@ -105,8 +105,8 @@ pytest: $(VENV_DIR)
 
 # Same checks as CI (.github/workflows/test.yml), without Docker
 ci-local: $(VENV_DIR)
-	@$(PYTHON) -m ruff check src tests tools telegram-bot
-	@$(PYTHON) -m black --check src tests tools telegram-bot
+	@$(PYTHON) -m ruff check src tests tools telegram-bot host
+	@$(PYTHON) -m black --check src tests tools telegram-bot host
 	@$(PYTHON) -m mypy src tools telegram-bot/bot.py --ignore-missing-imports
 	@$(PYTHON) -m pytest tests/ --cov=src --cov=tools --cov-report=term-missing
 	@./tests/test-scripts.sh
