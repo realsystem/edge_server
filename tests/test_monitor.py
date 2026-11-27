@@ -113,6 +113,22 @@ class DeployScript(unittest.TestCase):
         self.assertIn("reverse_proxy kuma:3001", docker)  # our own Caddy reaches it by service name
         self.assertIn("reverse_proxy 127.0.0.1:3001", none)
 
+    def test_the_next_steps_say_to_choose_sqlite_and_the_static_ip_hint_pins_the_current_address(
+        self,
+    ):
+        text = (MON / "deploy.sh").read_text(encoding="utf-8")
+        self.assertIn("choose SQLite", text)  # Kuma 2 asks for a database on first visit
+        self.assertIn(
+            "--addresses ${PUBLIC_IP", text
+        )  # without it a NEW address would be reserved and the name would change
+
+    def test_the_script_waits_for_kuma_before_it_touches_caddy_and_checks_https(self):
+        text = (MON / "deploy.sh").read_text(encoding="utf-8")
+        waits = text.index("Waiting for Uptime Kuma to start")
+        self.assertIn("http://127.0.0.1:3001/", text[waits : waits + 600])
+        self.assertLess(waits, text.rindex("apply_caddy_block"))  # the call, not the definition
+        self.assertLess(waits, text.index("Waiting for HTTPS"))
+
     def test_no_secret_or_token_is_written_into_the_repository_files(self):
         for path in MON.iterdir():
             text = path.read_text(encoding="utf-8")
