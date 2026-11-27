@@ -1,0 +1,76 @@
+# Generic heartbeat for any Home Assistant: every 5 minutes HA tells an outside monitor that it is alive.
+# Copy this file into the packages/ folder of the HA configuration (`ha_node.py sync` can do it), set the monitor's URL in the
+# HA UI (Settings > Devices & services > Helpers > "Edge heartbeat URL"), then reload: input_text, input_datetime, template,
+# rest_command and automation (a first-time rest_command needs one restart). Nothing is sent until the URL starts with http.
+#
+# For an Uptime Kuma push URL (/api/push/...) the request is <url>?status=up&msg=<summary>, and the query part of the stored
+# URL is ignored, so it can be pasted exactly as Kuma shows it. Any other URL is called as stored. The JSON body goes either
+# way. The URL is a secret: it lives in the helper, never in a file or a repository.
+#
+# It reports only that HA is alive, how long it has been up and how many entities are unavailable. Health that belongs to one
+# site (soil sensors, a pump, a controller) belongs in that site's own configuration. Use this OR a richer sender for the same
+# monitor, not both. Names start with edge_, so it does not clash with other packages.
+
+input_text:
+  edge_heartbeat_url:
+    name: Edge heartbeat URL
+    icon: mdi:heart-pulse
+    mode: password
+    max: 255
+
+input_datetime:
+  edge_heartbeat_last:
+    name: Edge heartbeat last sent
+    has_date: true
+    has_time: true
+
+rest_command:
+  edge_heartbeat:
+    url: "{% set u = states('input_text.edge_heartbeat_url') %}{% if '/api/push/' in u %}{{ u.split('?')[0] }}?status=up&msg={{ (state_attr('sensor.edge_heartbeat', 'summary') or 'no data') | urlencode }}{% else %}{{ u }}{% endif %}"
+    method: post
+    content_type: application/json
+    payload: "{% set p = state_attr('sensor.edge_heartbeat', 'payload') %}{{ p | tojson if p is mapping else p }}"
+    timeout: 20
+
+template:
+  - trigger:
+      - platform: homeassistant
+        event: start
+    sensor:
+      - name: Edge HA Started
+        unique_id: edge_ha_started
+        device_class: timestamp
+        state: "{{ now().isoformat() }}"
+  - sensor:
+      - name: Edge Heartbeat
+        unique_id: edge_heartbeat
+        icon: mdi:heart-pulse
+        state: "ok"
+        attributes:
+          summary: >-
+            {% set hours = ((now().timestamp() - as_timestamp(states('sensor.edge_ha_started'), now().timestamp())) / 3600) | round(1) %}
+            {% set unavailable = states | selectattr('state', 'eq', 'unavailable') | list | length %}
+            ok | HA up {{ hours }} h | {{ unavailable }} unavailable
+          payload: >-
+            {% set hours = ((now().timestamp() - as_timestamp(states('sensor.edge_ha_started'), now().timestamp())) / 3600) | round(1) %}
+            {% set unavailable = states | selectattr('state', 'eq', 'unavailable') | list | length %}
+            {{ {'site': state_attr('zone.home', 'friendly_name') or 'Home Assistant', 'status': 'ok', 'ha_uptime_hours': hours, 'unavailable_entities': unavailable} | tojson }}
+
+automation:
+  - id: edge_heartbeat
+    alias: Edge heartbeat
+    mode: single
+    trigger:
+      - platform: time_pattern
+        minutes: "/5"
+    condition:
+      # an input_text that was never set reads 'unknown' (7 characters), so test for a real address, not for a length
+      - condition: template
+        value_template: "{{ states('input_text.edge_heartbeat_url').startswith('http') }}"
+    action:
+      - service: rest_command.edge_heartbeat
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.edge_heartbeat_last
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"

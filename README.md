@@ -57,7 +57,8 @@ Optional monitoring plugins. They publish to Home Assistant via MQTT when
 Sites can send a heartbeat to a small VM that is not on the site, which alerts you when the heartbeats stop.
 [`ops/monitor/`](ops/monitor/README.md) deploys it (Uptime Kuma behind Caddy, optionally appending to a Caddy that already
 runs on the VM), and [`ops/vm/setup-github-key.sh`](ops/vm/setup-github-key.sh) gives a VM a read-only deploy key for one
-private repository. Both are Linux-only and idempotent.
+private repository. [`ops/heartbeat/`](ops/heartbeat/README.md) has the generic senders that make the heartbeats: a systemd timer
+for a NAS, the video server or a VM, and a package for any Home Assistant. All of these are Linux-only and idempotent.
 
 ## Quick Start (from laptop)
 

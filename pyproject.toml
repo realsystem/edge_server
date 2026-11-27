@@ -43,6 +43,7 @@ dev = [
     "mypy>=1.0.0",
     "pyyaml>=6.0",  # tests parse the configs the deploy scripts generate
     "jsonschema>=4.0",  # CI checks examples/fleet.*.yaml against examples/fleet.schema.json
+    "jinja2>=3.0",  # tests render the Home Assistant templates of ops/heartbeat/ha/
 ]
 
 [project.scripts]
