@@ -172,6 +172,57 @@ def test_a_file_we_do_not_own_is_never_overwritten():
     assert not any(c.startswith("ha backups") for c in node.commands)
 
 
+def test_identical_hand_copied_files_are_adopted_without_touching_them():
+    """Copied by hand, byte for byte what the source holds: the sync only records that they are ours."""
+    node = FakeNode({"configuration.yaml": b"x\n", PKG: b"a: 1\n"})
+    assert hn.make_plan(node, {PKG: b"a: 1\n"})["adopt"] == [PKG]
+    ok, out, api = sync(node, {PKG: b"a: 1\n"}, reload=True)
+    assert ok and len(out) == 1 and out[0].startswith("adopted 1 identical file(s)")
+    assert node.files["/config/" + PKG] == b"a: 1\n"
+    assert json.loads(node.files[hn.MANIFEST])["files"] == {PKG: hn.sha(b"a: 1\n")}
+    assert not any(c.startswith("ha backups") for c in node.commands)  # nothing changed: no backup
+    assert api.reloaded == [] and api.check_calls == 0 and not api.restarted
+
+
+def test_after_adopting_a_second_run_changes_nothing_and_a_later_edit_is_a_normal_change():
+    node = FakeNode({"configuration.yaml": b"x\n", PKG: b"a: 1\n"})
+    sync(node, {PKG: b"a: 1\n"})
+    manifest = node.files[hn.MANIFEST]
+    ok, out, _ = sync(node, {PKG: b"a: 1\n"})
+    assert ok and out == ["nothing to change"] and node.files[hn.MANIFEST] == manifest
+    ok, _, _ = sync(node, {PKG: b"a: 2\n"})  # ours now, so it is replaced, not a conflict
+    assert ok and node.files["/config/" + PKG] == b"a: 2\n"
+
+
+def test_a_file_that_differs_even_slightly_is_still_a_conflict_not_adopted():
+    node = FakeNode(
+        {"configuration.yaml": b"x\n", PKG: b"a: 1\r\n"}
+    )  # same text, other line endings
+    assert hn.make_plan(node, {PKG: b"a: 1\n"})["conflict"] == [PKG]
+    with pytest.raises(hn.HaNodeError, match="not ours"):
+        sync(node, {PKG: b"a: 1\n"})
+    assert hn.MANIFEST not in node.files
+
+
+def test_adoption_alongside_a_real_change_is_recorded_in_the_same_manifest():
+    other = "packages/farm_other.yaml"
+    node = FakeNode({"configuration.yaml": b"x\n", PKG: b"a: 1\n"})
+    ok, out, _ = sync(node, {PKG: b"a: 1\n", other: b"b: 1\n"})
+    assert ok and any("1 added" in line and "1 adopted" in line for line in out)
+    assert set(json.loads(node.files[hn.MANIFEST])["files"]) == {PKG, other}
+    assert any(
+        c.startswith("ha backups") for c in node.commands
+    )  # a real change still takes a backup
+
+
+def test_the_wizard_plan_lists_adoptions_and_does_not_say_the_node_matches():
+    node = FakeNode({"configuration.yaml": b"x\n", PKG: b"a: 1\n"})
+    plan = hn.make_plan(node, {PKG: b"a: 1\n"})
+    assert plan["adopt"] and not (
+        plan["add"] or plan["change"] or plan["remove"] or plan["conflict"]
+    )
+
+
 def test_a_file_edited_by_hand_since_our_sync_is_a_conflict():
     node = FakeNode()
     sync(node, {PKG: b"a: 1\n"})

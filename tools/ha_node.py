@@ -19,7 +19,8 @@ Commands:
 
 Rules: only files this tool put there (listed in ``/config/.autonomy-managed.json``) are
 ever replaced or removed; an existing file it does not own is a conflict and stops the
-sync. ``configuration.yaml``, ``secrets.yaml`` and ``.storage`` are never touched, except
+sync, unless it is byte-for-byte what the source holds (copied by hand): then it is adopted,
+that is only recorded in the manifest, with no write, no backup and no reload. ``configuration.yaml``, ``secrets.yaml`` and ``.storage`` are never touched, except
 for adding the ``packages:`` include with ``--add-include`` when that is safe. Standard
 library plus PyYAML; the token is read from a file and never printed.
 """
@@ -238,13 +239,21 @@ def load_manifest(node: Node) -> dict[str, Any]:
 
 def make_plan(node: Node, wanted: dict[str, bytes]) -> dict[str, list[str]]:
     owned: dict[str, str] = load_manifest(node)["files"]
-    plan: dict[str, list[str]] = {"add": [], "change": [], "same": [], "remove": [], "conflict": []}
+    plan: dict[str, list[str]] = {
+        "add": [],
+        "change": [],
+        "same": [],
+        "adopt": [],
+        "remove": [],
+        "conflict": [],
+    }
     for rel, data in sorted(wanted.items()):
         there = node.read(f"{CONFIG_DIR}/{rel}")
         if there is None:
             plan["add"].append(rel)
         elif there == data:
-            plan["same"].append(rel)
+            # identical already: ours if the manifest says so, else a hand-copied file we can take over
+            plan["same" if owned.get(rel) == sha(data) else "adopt"].append(rel)
         elif rel in owned and owned[rel] == sha(there):
             plan["change"].append(rel)
         else:  # exists, is not ours or was edited by hand since: never overwritten
@@ -404,8 +413,21 @@ def do_sync(
         )
         out("    packages: !include_dir_named packages")
     changes = plan["add"] + plan["change"] + plan["remove"]
-    if not changes and not (add_include and state == "missing"):
-        out("nothing to change")
+    include_todo = add_include and state == "missing"
+    if not changes and not include_todo:
+        if not plan["adopt"]:
+            out("nothing to change")
+            return True
+        # Files that are already there and already identical (copied by hand): only record that they
+        # are ours. Nothing on the node changes, so no backup, no write to them, no reload.
+        manifest = load_manifest(node)
+        manifest["files"] = {rel: sha(data) for rel, data in wanted.items()}
+        node.write(MANIFEST, json.dumps(manifest, indent=1, sort_keys=True).encode())
+        out(
+            f"adopted {len(plan['adopt'])} identical file(s) into the manifest: "
+            + ", ".join(plan["adopt"])
+            + "; no file was changed, nothing reloaded"
+        )
         return True
 
     backup = do_backup(node, backup_args)
@@ -471,6 +493,8 @@ def do_sync(
     counts = (
         f"{len(plan['add'])} added, {len(plan['change'])} changed, {len(plan['remove'])} removed"
     )
+    if plan["adopt"]:
+        counts += f", {len(plan['adopt'])} adopted"
     if reload:
         out(
             f"reload mode: {counts}; check_config and restart skipped (each reload checks its own domain)"
@@ -741,10 +765,10 @@ def run_wizard(
     if site["source"]:
         wanted = read_source(fetch_fn(site["source"]))
         plan = make_plan(node, wanted)
-        for kind in ("add", "change", "remove", "conflict"):
+        for kind in ("add", "change", "adopt", "remove", "conflict"):
             for rel in plan[kind]:
                 out(f"  {kind:9} {rel}")
-        plan_changes = bool(plan["add"] or plan["change"] or plan["remove"])
+        plan_changes = bool(plan["add"] or plan["change"] or plan["remove"] or plan["adopt"])
         if not plan_changes and not plan["conflict"]:
             out("The node already matches.")
     extras = plan_extras(node, api, site)
