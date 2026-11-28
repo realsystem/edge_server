@@ -77,7 +77,7 @@ loopback address (the admin page of a public monitor is normally limited to your
 sudo ./ops/monitor/kuma-provision.sh --plan \
     --url http://127.0.0.1:3001 --public-url https://monitor.example.com \
     --admin-password-file /root/.kuma-admin \
-    --telegram-token-file /root/.kuma-telegram-token --telegram-chat-id 123456789 \
+    --telegram-token-file /root/.kuma-telegram-token --telegram-chat-id-file /root/.kuma-telegram-chat \
     --monitor "Home HA heartbeat" --monitor "Farm HA heartbeat" --urls-out /root/heartbeat-urls.env
 ```
 

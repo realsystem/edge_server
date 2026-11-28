@@ -16,7 +16,7 @@ What one run does (each step only if it is missing or different):
 Usage:
   kuma_provision.py --url http://127.0.0.1:3001 --public-url https://monitor.example.com \\
       --admin-password-file /root/.kuma-admin \\
-      --telegram-token-file /root/.kuma-telegram-token --telegram-chat-id 123456789 \\
+      --telegram-token-file /root/.kuma-telegram-token --telegram-chat-id-file /root/.kuma-telegram-chat \\
       --monitor "Home HA heartbeat" --monitor "Farm HA heartbeat" --urls-out /root/heartbeat-urls.env
   kuma_provision.py ... --plan        # say what would change, change nothing
 
@@ -440,7 +440,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--interval", type=int, default=900, help="seconds without a beat before Down (default 900)"
     )
     p.add_argument("--telegram-token-file", type=Path, help="file holding the Telegram bot token")
-    p.add_argument("--telegram-chat-id", default="", help="the chat that receives the alerts")
+    p.add_argument(
+        "--telegram-chat-id-file",
+        type=Path,
+        help="file holding the chat id that receives the alerts (best: a chat id on a command line shows in ps)",
+    )
+    p.add_argument(
+        "--telegram-chat-id",
+        default="",
+        help="the chat that receives the alerts (prefer --telegram-chat-id-file)",
+    )
     p.add_argument(
         "--notification-name", default="Telegram", help="name of the notification in Kuma"
     )
@@ -461,6 +470,19 @@ def main(
     if args.interval < 60:
         print("error: --interval must be at least 60 seconds", file=sys.stderr)
         return 1
+    chat_id = args.telegram_chat_id
+    if args.telegram_chat_id_file is not None:
+        if chat_id:
+            print(
+                "error: give --telegram-chat-id-file or --telegram-chat-id, not both",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            chat_id = read_secret(args.telegram_chat_id_file)
+        except (OSError, KumaError) as exc:
+            print(f"error: cannot use the chat id file: {exc}", file=sys.stderr)
+            return 1
     cfg = Config(
         url=args.url.rstrip("/"),
         public_url=(args.public_url or args.url).rstrip("/"),
@@ -469,7 +491,7 @@ def main(
         monitors=args.monitor,
         interval=args.interval,
         telegram_token_file=args.telegram_token_file,
-        telegram_chat_id=args.telegram_chat_id,
+        telegram_chat_id=chat_id,
         notification_name=args.notification_name,
         urls_out=args.urls_out,
         plan=args.plan,
