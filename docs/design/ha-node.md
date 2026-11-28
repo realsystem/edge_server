@@ -26,7 +26,7 @@ Secrets go through the existing `secrets.sh` (SOPS/age); the wizard never prints
 ## Safety rules
 
 - **Backup first** (`ha backups new`); the backup id is recorded.
-- **Only files we own.** A manifest on the node lists what we put there (for example `packages/farm_*.yaml`). Anything else is never overwritten or deleted. The one edit to `configuration.yaml` is the `packages:` include, and only after asking.
+- **Only files we own.** A manifest on the node lists what we put there (for example `packages/farm_*.yaml`). Anything else is never overwritten or deleted. A file that is already there and byte-for-byte identical to the source (copied by hand) is adopted: the manifest records it, nothing on the node is written, backed up or reloaded; one that differs even by line endings stays a conflict. The one edit to `configuration.yaml` is the `packages:` include, and only after asking.
 - **Check, then restart.** `check_config` runs on the new files; on failure the previous files are restored and nothing restarts.
 - **Reload mode for small nodes.** `sync --reload` skips `check_config` and the restart. A configuration check can run for minutes on a Raspberry Pi 3 and has hung one (the node rebooted), and a restart also runs it. Instead each domain a changed package touches is reloaded through its own reload service (helpers first, automations last), which validates only that domain. If a reload fails, the previous files are restored and reloaded again and the sync reports failure. Domains with no reload service and custom components are listed as needing a restart and are never forced. `--backup-args` adds options to `ha backups new` for a lighter backup. The default mode is unchanged.
 - **Idempotent.** The same answers give no change on a second run.
