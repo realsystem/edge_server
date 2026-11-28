@@ -3,7 +3,7 @@
 # video server, a VM. Safe to run again: it rewrites the same files and keeps the timer running.
 #
 #   sudo ./ops/heartbeat/install.sh [--url-file FILE [--url-key KEY]] [--name NAME] [--interval-min N] [--degraded-as up|down]
-#                                   [--disk-percent N] [--no-first-beat]
+#                                   [--disk-percent N] [--disk-path DIR] [--no-first-beat]
 #   sudo ./ops/heartbeat/install.sh --uninstall
 #
 #   --url-file FILE     read the monitor's URL from this file (best): either the bare URL, or the KEY=URL lines that
@@ -16,6 +16,7 @@
 #   --interval-min N    minutes between heartbeats, 1 to 60 (default 5)
 #   --degraded-as MODE  up (default): a degraded host (disk full) says so in the message only; down: the monitor alerts
 #   --disk-percent N    disk use that counts as degraded (default 90)
+#   --disk-path DIR     the file system whose use is reported and checked (default /; e.g. a RAID or data disk)
 #   --no-first-beat     do not send one heartbeat right away
 #   --root DIR          install under DIR and skip systemd (for packaging and tests; needs no root)
 #
@@ -32,6 +33,7 @@ NAME=""
 INTERVAL=5
 DEGRADED_AS=up
 DISK_PERCENT=90
+DISK_PATH=""
 FIRST_BEAT=1
 UNINSTALL=0
 ROOT=""
@@ -47,6 +49,7 @@ while [ $# -gt 0 ]; do
     --interval-min) INTERVAL="${2:-}"; shift 2 ;;
     --degraded-as) DEGRADED_AS="${2:-}"; shift 2 ;;
     --disk-percent) DISK_PERCENT="${2:-}"; shift 2 ;;
+    --disk-path) DISK_PATH="${2:-}"; shift 2 ;;
     --no-first-beat) FIRST_BEAT=0; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     --root) ROOT="${2:-}"; shift 2 ;;
@@ -77,6 +80,7 @@ fi
 [[ "$INTERVAL" =~ ^[0-9]+$ ]] && [ "$INTERVAL" -ge 1 ] && [ "$INTERVAL" -le 60 ] || die "--interval-min must be 1 to 60"
 [[ "$DISK_PERCENT" =~ ^[0-9]+$ ]] && [ "$DISK_PERCENT" -ge 1 ] && [ "$DISK_PERCENT" -le 100 ] || die "--disk-percent must be 1 to 100"
 case "$DEGRADED_AS" in up | down) ;; *) die "--degraded-as must be up or down" ;; esac
+if [ -n "$DISK_PATH" ] && [[ ! "$DISK_PATH" =~ ^/[A-Za-z0-9._/@+-]*$ ]]; then die "--disk-path must be an absolute path of letters, digits and . _ / @ + -"; fi
 if [ -n "$NAME" ] && [[ ! "$NAME" =~ ^[A-Za-z0-9._\ -]+$ ]]; then die "--name may only contain letters, digits, space, . _ -"; fi
 
 if [ -n "$URL_FILE" ]; then
@@ -113,6 +117,7 @@ umask 077
   [ -z "$NAME" ] || printf 'HEARTBEAT_NAME=%s\n' "$NAME"
   printf 'HEARTBEAT_DEGRADED_AS=%s\n' "$DEGRADED_AS"
   printf 'HEARTBEAT_DISK_DEGRADED_PERCENT=%s\n' "$DISK_PERCENT"
+  [ -z "$DISK_PATH" ] || printf 'HEARTBEAT_DISK_PATH=%s\n' "$DISK_PATH"
 } >"$CONF"
 chmod 600 "$CONF"
 umask 022

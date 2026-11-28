@@ -314,6 +314,19 @@ class TestInstaller:
         assert done.returncode == 0, done.stderr
         assert f"HEARTBEAT_URL={KUMA}\n" in (root / "etc/edge-heartbeat.env").read_text()
 
+    def test_disk_path_is_saved_and_the_default_leaves_it_out(self, box):
+        root, done = self.installed(box, "--disk-path", "/srv/dev-disk-by-label-data")
+        assert done.returncode == 0, done.stderr
+        conf = (root / "etc/edge-heartbeat.env").read_text()
+        assert "HEARTBEAT_DISK_PATH=/srv/dev-disk-by-label-data\n" in conf
+        root, done = self.installed(box)
+        assert "HEARTBEAT_DISK_PATH" not in (root / "etc/edge-heartbeat.env").read_text()
+
+    @pytest.mark.parametrize("path", ["data", "/srv/with space", "/srv/a;b", "/srv/a'b", "/srv/$x"])
+    def test_a_disk_path_that_is_not_a_plain_absolute_path_is_refused(self, box, path):
+        root, done = self.installed(box, "--disk-path", path)
+        assert done.returncode != 0 and not (root / "etc/edge-heartbeat.env").exists()
+
     def test_uninstall_removes_everything_it_made(self, box):
         root, _ = self.installed(box)
         done = run_install(box, "--root", posix(root), "--uninstall")

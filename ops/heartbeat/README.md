@@ -28,7 +28,8 @@ Without it the installer asks with the typing hidden, or reads `$HEARTBEAT_URL`;
 history. It installs `/usr/local/sbin/edge-heartbeat`, `/etc/edge-heartbeat.env` (mode 600) and a systemd timer (every 5 minutes by
 default, `--interval-min`), sends one heartbeat at once, and can be run again or removed with `--uninstall`.
 
-The message looks like `ok | up 12 d | disk 41% | mem 62% | load 0.31`. A host whose disk use reaches `--disk-percent` (90) is
+The message looks like `ok | up 12 d | disk 41% | mem 62% | load 0.31`. The disk is `/` unless you pass `--disk-path DIR` (a RAID or
+data disk, say; the setting is kept when the installer is run again). A host whose disk use reaches `--disk-percent` (90) is
 "degraded": by default that only shows in the message (`status=up`); with `--degraded-as down` the monitor raises an alert. A host
 that stops sending is always an alert. Look at the last beats with `journalctl -u edge-heartbeat -n 20`, try it with
 `edge-heartbeat --dry-run` (it hides the push token), and stop it for maintenance with `sudo systemctl stop edge-heartbeat.timer`.
