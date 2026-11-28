@@ -2,13 +2,16 @@
 # Installs the host heartbeat sender (ops/heartbeat/node-heartbeat.sh) with a systemd timer, on any systemd Linux: a NAS, a
 # video server, a VM. Safe to run again: it rewrites the same files and keeps the timer running.
 #
-#   sudo ./ops/heartbeat/install.sh [--url-file FILE] [--name NAME] [--interval-min N] [--degraded-as up|down]
+#   sudo ./ops/heartbeat/install.sh [--url-file FILE [--url-key KEY]] [--name NAME] [--interval-min N] [--degraded-as up|down]
 #                                   [--disk-percent N] [--no-first-beat]
 #   sudo ./ops/heartbeat/install.sh --uninstall
 #
-#   --url-file FILE     read the monitor's URL from this file (best). Without it the URL is read from $HEARTBEAT_URL, or
-#                       asked for with the typing hidden. A URL on the command line (--url) works but stays in shell
-#                       history, so avoid it: the URL is a secret.
+#   --url-file FILE     read the monitor's URL from this file (best): either the bare URL, or the KEY=URL lines that
+#                       kuma-provision.sh writes. A file with several lines needs --url-key, so a host cannot end up
+#                       sending to another site's monitor. Without a file the URL is read from $HEARTBEAT_URL, or asked
+#                       for with the typing hidden. A URL on the command line (--url) works but stays in shell history,
+#                       so avoid it: the URL is a secret.
+#   --url-key KEY       with --url-file: use the line that starts with KEY= (e.g. NAS_1_HEARTBEAT_URL)
 #   --name NAME         label in the message body (default: the host name)
 #   --interval-min N    minutes between heartbeats, 1 to 60 (default 5)
 #   --degraded-as MODE  up (default): a degraded host (disk full) says so in the message only; down: the monitor alerts
@@ -24,6 +27,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 URL="${HEARTBEAT_URL:-}"
 URL_FILE=""
+URL_KEY=""
 NAME=""
 INTERVAL=5
 DEGRADED_AS=up
@@ -37,6 +41,7 @@ die() { printf 'ERROR: %s\n' "$1" >&2; shift; for h in "$@"; do printf '    hint
 while [ $# -gt 0 ]; do
   case "$1" in
     --url-file) URL_FILE="${2:-}"; shift 2 ;;
+    --url-key) URL_KEY="${2:-}"; shift 2 ;;
     --url) URL="${2:-}"; shift 2 ;;
     --name) NAME="${2:-}"; shift 2 ;;
     --interval-min) INTERVAL="${2:-}"; shift 2 ;;
@@ -76,7 +81,19 @@ if [ -n "$NAME" ] && [[ ! "$NAME" =~ ^[A-Za-z0-9._\ -]+$ ]]; then die "--name ma
 
 if [ -n "$URL_FILE" ]; then
   [ -r "$URL_FILE" ] || die "cannot read $URL_FILE"
-  URL="$(head -n1 "$URL_FILE" | tr -d '\r\n')"
+  [ -z "$URL_KEY" ] || [[ "$URL_KEY" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "--url-key may only contain letters, digits and _"
+  lines="$(tr -d '\r' <"$URL_FILE" | grep -vE '^[[:space:]]*(#|$)' || true)"
+  count="$(printf '%s' "$lines" | grep -c . || true)"
+  if [ -n "$URL_KEY" ]; then
+    line="$(printf '%s\n' "$lines" | grep -m1 "^$URL_KEY=" || true)"
+    [ -n "$line" ] || die "no line starting with $URL_KEY= in $URL_FILE"
+  elif [ "$count" -gt 1 ]; then
+    die "$URL_FILE has $count lines (one per monitor): say which is this host's with --url-key NAME" "NAME is the part before the = sign"
+  else
+    line="$lines"
+  fi
+  # a KEY=URL line (what kuma-provision.sh writes) or a bare URL; a URL has ':' before any '=', so it never looks like a key
+  if [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*=(.*)$ ]]; then URL="${BASH_REMATCH[1]}"; else URL="$line"; fi
 elif [ -z "$URL" ]; then
   [ -t 0 ] || die "no URL: give --url-file FILE or set HEARTBEAT_URL" "the URL is a secret, so it is not taken from the command line by default"
   read -r -s -p "Heartbeat URL (typing is hidden): " URL
