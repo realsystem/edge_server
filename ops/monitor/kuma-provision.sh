@@ -5,7 +5,7 @@
 #
 #   ./ops/monitor/kuma-provision.sh --url http://127.0.0.1:3001 --public-url https://monitor.example.com \
 #       --admin-password-file /root/.kuma-admin --telegram-token-file /root/.kuma-telegram-token \
-#       --telegram-chat-id 123456789 --monitor "Home HA heartbeat" --urls-out /root/heartbeat-urls.env
+#       --telegram-chat-id-file /root/.kuma-telegram-chat --monitor "Home HA heartbeat" --urls-out /root/heartbeat-urls.env
 #
 # Add --plan first to see what would change. Run it on the VM against Kuma's loopback address (--url) because the admin
 # page of a public monitor is normally limited to your own address; --public-url only builds the push URLs.

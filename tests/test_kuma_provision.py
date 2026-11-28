@@ -47,6 +47,7 @@ class FakeKuma:
                 "id": len(self._notifications) + 1,
                 "name": args[0]["name"],
                 "isDefault": args[0]["isDefault"],
+                "chat": args[0]["telegramChatID"],
             }
             self._notifications.append(note)
             return {"ok": True, "id": note["id"]}
@@ -336,3 +337,66 @@ def test_the_wrapper_script_parses_and_keeps_its_dependency_in_a_venv():
     bash = shutil.which("bash")
     if bash:
         assert subprocess.run([bash, "-n", str(script)], capture_output=True).returncode == 0
+
+
+def argv_with_chat_file(files, chat_args):
+    return [
+        "--url", "http://127.0.0.1:3001", "--public-url", URL,
+        "--admin-password-file", str(files["password"]),
+        "--telegram-token-file", str(files["token"]),
+        *chat_args,
+        "--urls-out", str(files["urls"]), "--monitor", "Home HA heartbeat",
+    ]  # fmt: skip
+
+
+def run_argv(argv, kuma):
+    return kp.main(argv, kuma_factory=lambda url: kuma, http_factory=lambda base: FakeHttp())
+
+
+def test_the_chat_id_can_come_from_a_file_so_it_stays_off_the_command_line(files, tmp_path, capsys):
+    chat_file = tmp_path / "chat"
+    chat_file.write_text(CHAT + "\n", encoding="utf-8")
+    kuma = FakeKuma()
+    assert (
+        run_argv(argv_with_chat_file(files, ["--telegram-chat-id-file", str(chat_file)]), kuma) == 0
+    )
+    assert kuma.notifications()[0]["chat"] == CHAT
+    assert CHAT not in capsys.readouterr().out
+
+
+def test_the_chat_id_file_also_arms_the_existing_notification_check(files, tmp_path, capsys):
+    chat_file = tmp_path / "chat"
+    chat_file.write_text(CHAT + "\n", encoding="utf-8")
+    kuma = FakeKuma(
+        needs_setup=False,
+        admin=("admin", "pw"),
+        notifications=[{"id": 1, "name": "Telegram", "isDefault": True}],
+    )
+    files["password"].write_text("pw\n", encoding="utf-8")
+    argv = argv_with_chat_file(files, ["--telegram-chat-id-file", str(chat_file), "--plan"])
+    assert run_argv(argv, kuma) == 0
+    out = capsys.readouterr().out
+    assert "notification 'Telegram' already exists (left as it is)" in out
+    assert len(kuma.notifications()) == 1
+
+
+def test_both_chat_id_options_are_refused(files, tmp_path, capsys):
+    chat_file = tmp_path / "chat"
+    chat_file.write_text(CHAT + "\n", encoding="utf-8")
+    argv = argv_with_chat_file(
+        files, ["--telegram-chat-id-file", str(chat_file), "--telegram-chat-id", CHAT]
+    )
+    assert run_argv(argv, FakeKuma()) == 1
+    assert "not both" in capsys.readouterr().err
+
+
+def test_a_missing_or_empty_chat_id_file_is_an_error_that_does_not_leak(files, tmp_path, capsys):
+    empty = tmp_path / "empty"
+    empty.write_text("\n", encoding="utf-8")
+    for bad in (empty, tmp_path / "does-not-exist"):
+        assert (
+            run_argv(argv_with_chat_file(files, ["--telegram-chat-id-file", str(bad)]), FakeKuma())
+            == 1
+        )
+    err = capsys.readouterr().err
+    assert err.count("cannot use the chat id file") == 2 and CHAT not in err
