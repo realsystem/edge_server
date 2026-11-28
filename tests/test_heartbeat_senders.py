@@ -279,6 +279,41 @@ class TestInstaller:
         )
         assert done.returncode != 0 and "--url-file" in done.stderr
 
+    def installed_lines(self, box, lines, *args):
+        root = box["dir"] / "root"
+        url_file = box["dir"] / "urls.env"
+        url_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        done = run_install(box, "--root", posix(root), "--url-file", posix(url_file), *args)
+        return root, done
+
+    def test_a_key_equals_url_line_from_the_provisioning_tool_works(self, box):
+        root, done = self.installed_lines(box, [f"ACME_HEARTBEAT_URL={KUMA}"])
+        assert done.returncode == 0, done.stderr
+        assert f"HEARTBEAT_URL={KUMA}\n" in (root / "etc/edge-heartbeat.env").read_text()
+
+    def test_a_file_with_several_monitors_needs_the_key_and_is_never_guessed(self, box):
+        other = "https://monitor.example.com/api/push/OTHERSITE"
+        lines = [f"HOME_HA_HEARTBEAT_URL={other}", f"NAS_1_HEARTBEAT_URL={KUMA}"]
+        root, done = self.installed_lines(box, lines)
+        assert done.returncode != 0 and "--url-key" in done.stderr
+        assert not (root / "etc/edge-heartbeat.env").exists()
+        assert "OTHERSITE" not in done.stderr + done.stdout
+        root, done = self.installed_lines(box, lines, "--url-key", "NAS_1_HEARTBEAT_URL")
+        assert done.returncode == 0, done.stderr
+        conf = (root / "etc/edge-heartbeat.env").read_text()
+        assert f"HEARTBEAT_URL={KUMA}\n" in conf and "OTHERSITE" not in conf
+
+    def test_an_unknown_or_malformed_key_is_refused(self, box):
+        lines = [f"NAS_1_HEARTBEAT_URL={KUMA}"]
+        for key in ("NOPE_URL", "bad key", "x;y"):
+            root, done = self.installed_lines(box, lines, "--url-key", key)
+            assert done.returncode != 0 and not (root / "etc/edge-heartbeat.env").exists(), key
+
+    def test_comments_and_blank_lines_are_ignored(self, box):
+        root, done = self.installed_lines(box, ["# made by kuma-provision.sh", "", f"X_URL={KUMA}"])
+        assert done.returncode == 0, done.stderr
+        assert f"HEARTBEAT_URL={KUMA}\n" in (root / "etc/edge-heartbeat.env").read_text()
+
     def test_uninstall_removes_everything_it_made(self, box):
         root, _ = self.installed(box)
         done = run_install(box, "--root", posix(root), "--uninstall")
@@ -407,3 +442,20 @@ class TestHomeAssistantPackage:
         assert got == kuma + "?status=up&msg=ok%20%7C%20HA%20up%202.5%20h%20%7C%202%20unavailable"
         plain = "https://hc.example.com/abc?x=1"
         assert self.render(url_template, {"input_text.edge_heartbeat_url": plain}, attrs) == plain
+
+
+def test_the_shell_scripts_in_ops_are_executable_in_git():
+    """The docs run them as ./ops/.../x.sh, which needs the executable bit (it was missing once)."""
+    git = shutil.which("git")
+    if git is None or not (ROOT / ".git").exists():
+        pytest.skip("not a git checkout")
+    listing = subprocess.run(
+        [git, "ls-files", "-s", "--", "ops/*.sh", "ops/**/*.sh"],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        check=True,
+    ).stdout.splitlines()
+    assert listing, "no scripts found"
+    not_executable = [line.split("\t")[1] for line in listing if not line.startswith("100755")]
+    assert not_executable == []

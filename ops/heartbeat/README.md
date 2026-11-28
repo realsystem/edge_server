@@ -21,7 +21,9 @@ Kuma shows it. Any other URL (Healthchecks and so on) is called exactly as store
 sudo ./ops/heartbeat/install.sh --url-file /root/this-hosts-push-url --name nas-1
 ```
 
-`--url-file` holds one line, the push URL of a monitor made for this host (`ops/monitor/kuma-provision.sh` writes such lines).
+`--url-file` holds the push URL of a monitor made for this host: the bare URL, or the `NAME_HEARTBEAT_URL=<url>` line that
+`ops/monitor/kuma-provision.sh --urls-out` writes. If the file has several lines (one per monitor), add `--url-key NAME_HEARTBEAT_URL`
+to pick this host's; the installer refuses to guess, so a host cannot send to another site's monitor.
 Without it the installer asks with the typing hidden, or reads `$HEARTBEAT_URL`; a URL on the command line works but stays in shell
 history. It installs `/usr/local/sbin/edge-heartbeat`, `/etc/edge-heartbeat.env` (mode 600) and a systemd timer (every 5 minutes by
 default, `--interval-min`), sends one heartbeat at once, and can be run again or removed with `--uninstall`.
